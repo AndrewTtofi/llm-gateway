@@ -9,7 +9,17 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-05 (Phase 0 foundations + Phase 1 pass-through proxy)
+
 ### Added
+- `POST /v1/chat/completions`: OpenAI-compatible pass-through, non-streaming and SSE streaming (Phase 1)
+- `OpenAICompatAdapter` for OpenAI and OpenAI-compatible providers (Ollama, …); `AdapterPool` reuses one HTTP client per provider
+- Response header `x-gateway-provider` names the `provider/model` that served the request
+- Streaming: first chunk is fetched before the 200 so upfront provider failures return real HTTP errors; mid-stream failures arrive as an in-band error event without `[DONE]` (ADR 0002)
+- Client disconnect cancels the upstream request (streaming and non-streaming)
+- Upstream error mapping: client-caused 400/413/422 pass through; provider auth (401/403), wrong configured model (404) and outages → 502; 429 keeps `retry-after`; `insufficient_quota` → 503; timeouts → 504; malformed upstream bodies → 502
+- Request validation errors returned in OpenAI's error shape (400)
+- Tests: respx-mocked endpoint tests, ASGI-level disconnect tests, `openai` SDK integration tests; `make test-e2e` against the running stack + Ollama
 - Project scaffold: build plan, CLAUDE.md, SESSION.md, Claude Code agents and skills
 - Docker Compose stack: gateway, Redis, Postgres, Prometheus, Grafana
 - Config-driven model registry (`config/models.yaml`), pricing and limits files
@@ -33,6 +43,7 @@ Version plan: each completed phase bumps the minor version
 - OpenAI fallbacks set to `gpt-6-luna` / `gpt-6.1-sol` / `gpt-6-astra`; all prices filled in `pricing.yaml`
 
 ### Security
+- Provider error text is not returned to clients except for client-caused 400/413/422 — it can contain API-key fragments, org IDs and internal hosts
 - `/admin/reload` compares the admin key in constant time
 
 <!--

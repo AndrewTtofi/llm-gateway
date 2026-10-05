@@ -54,11 +54,11 @@ Learn: project layout, config loading with pydantic-settings.
 
 ### Phase 1 — Pass-through proxy (days 2–3)
 Goal: one provider, OpenAI format in, OpenAI format out, with streaming.
-- [ ] Pydantic models for the OpenAI chat request/response (`app/schemas.py`)
-- [ ] `POST /v1/chat/completions` forwarding to OpenAI via httpx (non-streaming)
-- [ ] Streaming: Server-Sent Events relayed chunk by chunk (`stream: true`)
-- [ ] Client disconnect cancels the upstream request
-- [ ] Integration test with the official `openai` SDK pointed at the gateway
+- [x] Pydantic models for the OpenAI chat request/response (`app/schemas.py`)
+- [x] `POST /v1/chat/completions` forwarding to OpenAI via httpx (non-streaming)
+- [x] Streaming: Server-Sent Events relayed chunk by chunk (`stream: true`)
+- [x] Client disconnect cancels the upstream request
+- [x] Integration test with the official `openai` SDK pointed at the gateway
 
 DoD: `openai` SDK with `base_url=http://localhost:8000/v1` streams a reply through the gateway.
 Learn: SSE, async streaming, chat completion schema.

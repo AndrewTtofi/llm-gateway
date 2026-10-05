@@ -1,6 +1,6 @@
 [project]
 name = "llm-gateway"
-version = "0.0.1"
+version = "0.1.0"
 requires-python = ">=3.14"
 
 [tool.ruff]
@@ -19,4 +19,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = ["live: calls real provider APIs (costs money)"]
+markers = [
+  "live: calls real provider APIs (costs money)",
+  "e2e: needs the running stack (make up) + Ollama; free",
+]

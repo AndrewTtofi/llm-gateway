@@ -1,4 +1,4 @@
-.PHONY: up down logs test test-live lint fmt reload shell install lock
+.PHONY: up down logs test test-e2e test-live lint fmt reload shell install lock
 
 up:
 	docker compose up -d --build
@@ -10,7 +10,10 @@ logs:
 	docker compose logs -f gateway
 
 test:
-	pytest -m "not live" -q
+	pytest -m "not live and not e2e" -q
+
+test-e2e:
+	pytest -m e2e -q
 
 test-live:
 	pytest -q

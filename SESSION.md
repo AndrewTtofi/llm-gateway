@@ -5,16 +5,37 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 0 — Foundations (complete except provider API keys)
-- **Branch:** main · remote `github.com/AndrewTtofi/llm-gateway` (private) · CI green
-- **Status:** Python 3.14 / Redis 8 / Postgres 18; stack up, `/healthz` 200, fresh clone → healthz in 13s (images cached), `make test` 10 passed, `make lint` clean
-- **Next up:** owner adds `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` to `.env`; then Phase 1 on branch `phase-1-proxy`
+- **Phase:** 1 — Pass-through proxy (built on `phase-1-proxy`, in review)
+- **Branch:** `phase-1-proxy` · remote `github.com/AndrewTtofi/llm-gateway` (private)
+- **Status:** Phase 1 DoD met; `make test` 47 passed, `make test-e2e` 2 passed, `make lint` clean. Python 3.14 / Redis 8 / Postgres 18
+- **Next up:** merge Phase 1 PR → tag `v0.1.0`; then Phase 2 (Anthropic adapter, hot-reload polish). Owner still to add provider API keys
 - **Blockers:** none (API keys only needed for live tests)
 - **Open questions:** none
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 4
+**Did**
+- Phase 1 on `phase-1-proxy`: `/v1/chat/completions` pass-through, SSE streaming, disconnect cancellation, OpenAI error mapping
+- 47 unit/integration tests + 2 e2e; DoD met: `openai` SDK streams from Ollama through the running gateway
+- ADR 0002: streaming error semantics, disconnects, what provider error text clients may see
+- code-reviewer pass: fixed disconnect during first-token wait, upstream left open on slow-client
+  disconnect (`SSEResponse`), provider error text leaking key fragments/org IDs, raw 500s on
+  malformed upstream bodies, swallowed outside cancellation, 404/insufficient_quota mapping
+
+**Learned**
+- In SSE the HTTP status is final once headers go out — so pull the first chunk before committing to 200
+- Streamed responses carry deltas, not the full message; usage only arrives (as a final chunk with empty `choices`) when `stream_options.include_usage` is set
+
+**Deferred to Phase 3** (from review)
+- Per-provider connection-pool limits + short pool timeout; overall stream deadline;
+  close reload-retired adapters after a grace period; read retry statuses from config
+
+**Next**
+- Phase 2: Anthropic adapter (translation notes in the Claude discussion: thinking always-on, no forced tool_choice, refusal stop reason)
+
 
 ### 2026-10-05 — Session 3
 **Did**
