@@ -124,3 +124,16 @@ guardrail = Counter(
     ["rule", "action"],
     registry=registry,
 )
+judge = Counter(
+    "gateway_judge_total",
+    "LLM-as-judge samples by result: scored, dropped, error, unparsable (ADR 0022).",
+    ["alias", "result"],
+    registry=registry,
+)
+judge_score = Histogram(
+    "gateway_judge_score",
+    "Judge scores (1 bad … 5 excellent) per alias and A/B variant.",
+    ["alias", "variant"],
+    buckets=(1.5, 2.5, 3.5, 4.5, 5.5),
+    registry=registry,
+)

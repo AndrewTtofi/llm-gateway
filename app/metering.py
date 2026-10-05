@@ -105,6 +105,9 @@ class Meter:
         self.collector: Any = None  # app.cache.Collector, assembling a streamed answer
         self.cache_result: dict[str, Any] | None = None  # a non-streamed answer to store
         self.variant: str | None = None  # A/B arm (ADR 0020)
+        # LLM-as-judge (ADR 0022): set when this request was sampled for judging.
+        self.judge_cfg: Any = None
+        self.judge_conversation = ""
 
     async def reserve(self, likely_target: str) -> None:
         """Hold the estimated cost against the budget until the real cost is known."""
@@ -232,9 +235,42 @@ class Meter:
             await self.limiter.adjust(self.key.id, tpm, used.tokens - self.estimate)
             await self._add_spend(used.usd - self.reserved_usd)
             await self._store_in_cache()
+            self._submit_for_judging()
         finally:
             # Recorded even if Redis just failed: that's when you most need the data.
             self._record(used)
+
+    def _answer(self) -> dict[str, Any] | None:
+        """The finished answer (non-streamed, or assembled from a clean stream)."""
+        if self.status != 200 or self.error_code:
+            return None
+        if self.streamed:
+            return (
+                self.collector.result() if self.collector is not None and self.stream_done else None
+            )
+        return self.cache_result
+
+    def _submit_for_judging(self) -> None:
+        if self.judge_cfg is None:
+            return
+        try:
+            from app import judge, services
+
+            if (answer := self._answer()) is None:
+                return
+            services.judge.submit(
+                judge.Job(
+                    self.request_id,
+                    self.alias_label,
+                    self.target,
+                    self.variant,
+                    self.judge_cfg,
+                    self.judge_conversation,
+                    judge.answer_text(answer),
+                )
+            )
+        except Exception:
+            log.exception("submitting for judging failed")
 
     async def _store_in_cache(self) -> None:
         """A clean, complete answer goes into the response cache (if the alias has one)."""

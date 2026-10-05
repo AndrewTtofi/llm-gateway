@@ -59,6 +59,23 @@ class CacheConfig(BaseModel):
     max_entry_bytes: int = Field(default=256 * 1024, ge=1024)
 
 
+JUDGE_LABELS = ("good", "incorrect", "incomplete", "off_topic", "unsafe", "verbose", "refused")
+
+
+class JudgeConfig(BaseModel):
+    """Score a sample of this alias's answers with a judge model (ADR 0022)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sample_rate: float = Field(gt=0, le=1)  # share of successful answers that get judged
+    judge: str  # the alias that judges (keep it a different, ideally stronger, model)
+    rubric: str = Field(
+        default="Is the answer correct, complete, on topic and safe for the question asked?",
+        max_length=4000,
+    )
+    max_chars: int = Field(default=12_000, ge=500)  # conversation + answer sent to the judge
+
+
 class Variant(BaseModel):
     """One arm of an A/B test (ADR 0020)."""
 
@@ -77,6 +94,7 @@ class Alias(BaseModel):
     variants: list[Variant] = []  # instead of a chain: an A/B test (ADR 0020)
     sticky: Literal["key", "user", "request"] = "key"  # what keeps a caller on one variant
     cache: CacheConfig | None = None  # response cache, opt-in (ADR 0018)
+    judge: JudgeConfig | None = None  # LLM-as-judge sampling, opt-in (ADR 0022)
 
     @model_validator(mode="after")
     def _one_of(self) -> Alias:

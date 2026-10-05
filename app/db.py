@@ -44,6 +44,23 @@ class ApiKeyRow(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class JudgeScoreRow(Base):
+    """One judged answer (ADR 0022): a score and fixed labels, never content."""
+
+    __tablename__ = "judge_scores"
+    __table_args__ = (Index("ix_judge_scores_alias_created", "alias", "created_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    request_id: Mapped[str] = mapped_column(String(64), index=True)
+    alias: Mapped[str] = mapped_column(String(200))
+    target: Mapped[str | None] = mapped_column(String(200))  # the model that answered
+    variant: Mapped[str | None] = mapped_column(String(32))
+    judge_target: Mapped[str | None] = mapped_column(String(200))  # the model that judged
+    score: Mapped[int] = mapped_column(Integer)  # 1 (bad) … 5 (excellent)
+    labels: Mapped[list[str]] = mapped_column(JSON)
+
+
 class UsageRow(Base):
     """One row per admitted request (ADR 0008). Never holds prompt or completion text."""
 

@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import cache, config, extensions, guardrails, messages_api, providers, services
+from app import cache, config, extensions, guardrails, judge, messages_api, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
@@ -733,6 +733,12 @@ async def _chat(
             body = ab.with_prefix(body, variant.system_prefix)
         meter.variant = variant.name
         rl_headers["x-gateway-variant"] = variant.name
+    if alias_cfg is not None and alias_cfg.judge is not None and judge.sampled(alias_cfg.judge):
+        # Sampled for LLM-as-judge (ADR 0022): keep the conversation text until it's judged.
+        meter.judge_cfg = alias_cfg.judge
+        meter.judge_conversation = judge.conversation_text(body.model_dump()["messages"])
+        if body.stream and meter.collector is None:
+            meter.collector = cache.Collector()  # to assemble the streamed answer
     if alias_cfg is not None and alias_cfg.cache is not None:
         cache_alias = f"{body.model}#{variant.name}" if variant else body.model
         hit = await _cache_lookup(

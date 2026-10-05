@@ -161,6 +161,18 @@ panel("table", "A/B: cost per request by variant — this month", 24, 6, 0, 60, 
     "FROM usage_log WHERE variant IS NOT NULL AND created_at >= date_trunc('month', now()) "
     "GROUP BY 1, 2 ORDER BY 1, 2")], ds=PG, desc="From the usage log: exact cost per arm.")
 
+# --- row 8: quality (LLM-as-judge, ADR 0022) ---
+panel("timeseries", "Judge: average score by alias / variant", 12, 8, 0, 66, [prom(
+    f"sum by (alias, variant) (rate(gateway_judge_score_sum{RATE})) / "
+    f"sum by (alias, variant) (rate(gateway_judge_score_count{RATE}))", "{{alias}} {{variant}}")],
+    desc="1 bad … 5 excellent. Only sampled answers (judge.sample_rate).")
+panel("table", "Judge: labels this month", 12, 8, 12, 66, [sql(
+    "SELECT alias, coalesce(variant, '') AS variant, label, count(*) AS answers, "
+    "round(avg(score)::numeric, 2) AS avg_score "
+    "FROM judge_scores, json_array_elements_text(labels) AS label "
+    "WHERE created_at >= date_trunc('month', now()) GROUP BY 1, 2, 3 ORDER BY 1, 2, answers DESC")],
+    ds=PG, desc="Scores and fixed labels only; no content is stored.")
+
 dashboard = {
     "uid": "llm-gateway",
     "title": "LLM Gateway",

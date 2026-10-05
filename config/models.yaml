@@ -153,6 +153,7 @@ aliases:
   #     - { name: haiku,   weight: 10, chain: [anthropic/claude-haiku-4-5-20251001],
   #         system_prefix: "Answer in at most three sentences." }
   #   cache: { mode: exact, ttl_seconds: 3600 }   # response cache (ADR 0018), optional
+  #   judge: { sample_rate: 0.05, judge: smart }  # LLM-as-judge on 5% of answers (ADR 0022)
   # The strongest model from each company, best first. Providers without a key are skipped.
   frontier:
     chain:

@@ -18,6 +18,7 @@ from app import config
 from app.auth import CachedKeys, MemoryKeyStore, PostgresKeyStore
 from app.cache import CacheStore, MemoryCacheStore, RedisCacheStore
 from app.db import make_engine, make_sessions
+from app.judge import Judge, MemoryScoreStore, PostgresScoreStore
 from app.observability.usage import MemoryUsageSink, PostgresUsageWriter, UsageSink
 from app.ratelimit import (
     Limiter,
@@ -35,6 +36,7 @@ limiter: Limiter = MemoryLimiter()
 spend: SpendTracker = MemorySpend()
 usage: UsageSink = MemoryUsageSink()
 response_cache: CacheStore = MemoryCacheStore()  # ADR 0018
+judge: Judge = Judge(MemoryScoreStore())  # ADR 0022
 _writer: PostgresUsageWriter | None = None
 
 _redis: Redis | None = None
@@ -42,9 +44,10 @@ _engine: AsyncEngine | None = None
 
 
 async def start() -> None:
-    global keys, limiter, spend, usage, response_cache, _redis, _engine, _writer, started
+    global keys, limiter, spend, usage, response_cache, judge, _redis, _engine, _writer, started
     if config.settings.gateway_stores == "memory":
         router.store = MemoryBreakerStore()
+        judge.start()
         started = True
         return
     timeout = config.registry.circuit_breaker.redis_timeout_ms / 1000
@@ -59,6 +62,8 @@ async def start() -> None:
     usage = _writer
     limiter = RedisLimiter(_redis)
     response_cache = RedisCacheStore(_redis)
+    judge = Judge(PostgresScoreStore(sessions))
+    judge.start()
     spend = RedisSpend(_redis)
     router.store = (
         MemoryBreakerStore()
@@ -74,6 +79,7 @@ async def start() -> None:
 async def stop() -> None:
     global _redis, _engine, _writer, _deps_task, started
     started = False
+    await judge.stop()
     if _deps_task is not None:
         _deps_task.cancel()
         _deps_task = None
