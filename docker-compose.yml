@@ -13,18 +13,18 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   redis:
-    image: redis:7.4.11-alpine
+    image: redis:8.8.3-alpine
     ports: ["6379:6379"]
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, retries: 10 }
 
   postgres:
-    image: postgres:16.15-alpine
+    image: postgres:18.6-alpine
     environment:
       POSTGRES_USER: gateway
       POSTGRES_PASSWORD: gateway
       POSTGRES_DB: gateway
     ports: ["5432:5432"]
-    volumes: [pgdata:/var/lib/postgresql/data]
+    volumes: [pgdata:/var/lib/postgresql]   # PG18+: data lives in /var/lib/postgresql/<major>/docker
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U gateway"], interval: 5s, retries: 10 }
 
   prometheus:

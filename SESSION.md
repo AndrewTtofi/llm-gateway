@@ -7,7 +7,7 @@ Keep "Current state" short and always true.
 ## Current state
 - **Phase:** 0 — Foundations (complete except provider API keys)
 - **Branch:** main · remote `github.com/AndrewTtofi/llm-gateway` (private) · CI green
-- **Status:** stack up, `/healthz` 200, fresh clone → healthz in 13s (images cached), `make test` 10 passed, `make lint` clean
+- **Status:** Python 3.14 / Redis 8 / Postgres 18; stack up, `/healthz` 200, fresh clone → healthz in 13s (images cached), `make test` 10 passed, `make lint` clean
 - **Next up:** owner adds `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` to `.env`; then Phase 1 on branch `phase-1-proxy`
 - **Blockers:** none (API keys only needed for live tests)
 - **Open questions:** none
@@ -25,8 +25,16 @@ Keep "Current state" short and always true.
 - Kept Redis 7 / Postgres 16 / Python 3.12 majors; Postgres 18 needs a pgdata migration — separate decision
 - Standard pip-tools layout (`.in` → `.txt`) so Dependabot can regenerate locks
 
+- Merged PR #1. Then major upgrades on `chore/major-upgrades`: Python 3.14.8, Redis 8.8.3, Postgres 18.6
+- Postgres 18 image stores data under `/var/lib/postgresql/18/docker`; mount moved to `/var/lib/postgresql`.
+  Old PG16 volume had 0 tables — dumped (`pg_dumpall`) then removed and recreated
+- Local `.venv` rebuilt on Python 3.14.8 (via `uv python install`, no system changes)
+
+**Learned**
+- Upgrading Postgres majors in Docker is never just a tag bump: data dirs are version-specific (pg_upgrade or dump/restore)
+
 **Next**
-- Merge `chore/pin-deps` once CI is green, then Phase 1
+- Merge `chore/major-upgrades`, then Phase 1
 
 
 ### 2026-10-05 — Session 2

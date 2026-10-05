@@ -20,6 +20,10 @@ Version plan: each completed phase bumps the minor version
 - Config test: every model in an alias chain must have a `pricing.yaml` entry
 
 ### Changed
+- Python 3.12 → **3.14** (`python:3.14.8-slim`, CI, ruff/mypy targets, `requires-python`); lockfiles recompiled, same pins
+- Redis 7.4 → **8.8** (`redis:8.8.3-alpine`)
+- Postgres 16 → **18** (`postgres:18.6-alpine`); volume now mounts at `/var/lib/postgresql` (PG18 image layout). Existing dev volumes must be recreated — see SESSION.md
+- CI runs on push to `main` and on PRs (no more duplicate runs per PR)
 - Dependencies locked with pip-tools: `requirements*.in` (direct deps) → hashed `requirements*.txt`; Docker and CI install with `--require-hashes`
 - Version floors raised to the versions actually tested
 - Docker images pinned: `python:3.12.15-slim`, `redis:7.4.11-alpine`, `postgres:16.15-alpine`, `prom/prometheus:v3.15.0`, `grafana/grafana:13.2.3`

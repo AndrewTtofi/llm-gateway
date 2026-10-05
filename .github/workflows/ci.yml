@@ -1,12 +1,14 @@
 name: ci
-on: [push, pull_request]
+on:
+  push: { branches: [main] }
+  pull_request:
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
-        with: { python-version: "3.12", cache: pip, cache-dependency-path: requirements-dev.txt }
+        with: { python-version: "3.14", cache: pip, cache-dependency-path: requirements-dev.txt }
       - run: pip install --require-hashes -r requirements-dev.txt
       - run: ruff check app tests && mypy app
       - run: pytest -m "not live" -q

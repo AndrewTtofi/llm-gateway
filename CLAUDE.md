@@ -16,7 +16,7 @@ non-obvious parts briefly in the PR/summary so he learns from it.
    (Or run the `end-session` skill.)
 
 ## Stack
-Python 3.12 · FastAPI · Pydantic v2 · httpx (async) · Redis · Postgres (SQLAlchemy 2 async + Alembic)
+Python 3.14 · FastAPI · Pydantic v2 · httpx (async) · Redis 8 · Postgres 18 (SQLAlchemy 2 async + Alembic)
 · Prometheus · Grafana · pytest + pytest-asyncio + respx · ruff + mypy · Docker Compose.
 
 ## Layout

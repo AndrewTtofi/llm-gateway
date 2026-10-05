@@ -1,11 +1,11 @@
 [project]
 name = "llm-gateway"
 version = "0.0.1"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
@@ -13,6 +13,7 @@ ignore = ["S101"]
 
 [tool.mypy]
 strict = true
+python_version = "3.14"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
