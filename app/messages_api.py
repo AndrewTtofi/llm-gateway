@@ -106,6 +106,8 @@ def _to_openai(body: dict[str, Any]) -> dict[str, Any]:
         out["reasoning_effort"] = effort
     if isinstance(thinking := body.get("thinking"), dict):
         out["thinking"] = thinking  # extension field: Anthropic targets only (ADR 0013)
+    if isinstance(route := body.get("route"), dict):
+        out["route"] = route  # policy-routing hints (ADR 0017)
     return out
 
 

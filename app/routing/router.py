@@ -92,6 +92,7 @@ class Routed:
     target: str = ""
     attempts: list[tuple[str, str]] = field(default_factory=list)
     current: str = ""  # target being tried right now (who to bill if the client leaves)
+    chain: list[str] | None = None  # set by policy routing (ADR 0017): this request's chain
     attempt_started: float = 0.0  # perf_counter at the start of the latest attempt
 
     @property
@@ -124,11 +125,14 @@ async def _route[T](
     routed: Routed | None = None,
 ) -> tuple[T, Routed, ProviderAdapter, Registry]:
     reg = config.registry  # one snapshot for the whole request, even across a reload
-    try:
-        chain = reg.resolve(body.model)
-    except KeyError as exc:
-        raise UnknownModel(body.model) from exc
     routed = routed if routed is not None else Routed()
+    if routed.chain:
+        chain = routed.chain
+    else:
+        try:
+            chain = reg.resolve(body.model)
+        except KeyError as exc:
+            raise UnknownModel(body.model) from exc
     # The error to report if nothing works. A provider failing outranks "this provider
     # can't express the request": the former is what actually stopped us.
     provider_error: ProviderError | None = None

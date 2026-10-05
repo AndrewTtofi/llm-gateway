@@ -16,7 +16,7 @@ import logging
 import secrets
 import signal
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
@@ -34,9 +34,8 @@ from app.metering import Meter
 from app.observability import live, metrics
 from app.observability import logging as obs_log
 from app.providers.base import ProviderAdapter
-from app.providers.openai_compat import rules_for
 from app.ratelimit import estimate_prompt_tokens
-from app.routing import router
+from app.routing import policy, router
 from app.routing.router import AllTargetsFailed, Routed, UnknownModel
 from app.schemas import ChatCompletionRequest, StreamOptions
 
@@ -368,7 +367,13 @@ async def list_models(key: Authenticated) -> dict[str, object]:
     """Models this key may call: aliases (with their chain), then direct provider/models."""
     reg, lim = config.registry, key_limits(key)
     data: list[dict[str, object]] = [
-        {"id": name, "object": "model", "created": 0, "owned_by": "gateway", "chain": a.chain}
+        {
+            "id": name,
+            "object": "model",
+            "created": 0,
+            "owned_by": "gateway",
+            **({"chain": a.chain} if a.policy is None else {"policy": a.policy.model_dump()}),
+        }
         for name, a in reg.aliases.items()
         if lim.allows(name)
     ]
@@ -411,7 +416,14 @@ async def model_catalog(
     # One snapshot of the config: a reload during the awaits below mustn't mix versions.
     reg, pricing, catalog = config.registry, config.pricing, config.catalog
     prices, cat = pricing.models, catalog.models
-    aliases = {n: a.chain for n, a in reg.aliases.items() if lim.allows(n)}
+    aliases = {
+        n: a.chain if a.policy is None else policy.candidates(n, a.policy)
+        for n, a in reg.aliases.items()
+        if lim.allows(n)
+    }
+    policies = {
+        n: a.policy.model_dump() for n, a in reg.aliases.items() if a.policy and lim.allows(n)
+    }
     targets = dict.fromkeys(t for chain in aliases.values() for t in chain)
     if reg.allow_direct_models:
         targets |= dict.fromkeys(t for t in sorted(reg.known_targets()) if lim.allows(t))
@@ -454,7 +466,7 @@ async def model_catalog(
                 "pricing": row_price,
                 **facts.model_dump_public(),
                 # What the gateway can use, not just what the model can do (ADR 0012).
-                "capabilities": _usable(facts.capabilities, reg.providers, t),
+                "capabilities": policy.usable_capabilities(list(facts.capabilities), t),
                 "circuit": "unknown",  # filled in below, all targets at once
                 "live": live.snapshot(t),
             }
@@ -467,22 +479,15 @@ async def model_catalog(
         "prices_checked": pricing.checked,
         "catalog_checked": catalog.checked,
         "blend": f"{BLEND_INPUT}:{BLEND_OUTPUT} input:output tokens",
-        "aliases": [{"id": n, "chain": chain} for n, chain in aliases.items()],
+        "aliases": [
+            {
+                "id": n,
+                **({"policy": policies[n], "candidates": c} if n in policies else {"chain": c}),
+            }
+            for n, c in aliases.items()
+        ],
         "data": rows,
     }
-
-
-def _usable(caps: Sequence[str], providers: dict[str, dict[str, Any]], target: str) -> list[str]:
-    provider, _, model = target.partition("/")
-    cfg = providers.get(provider) or {}
-    if cfg.get("type") != "openai":
-        return list(caps)
-    rules = rules_for(cfg, model)
-    return [
-        c
-        for c in caps
-        if not (c == "tools" and not rules["tools"]) and not (c == "vision" and not rules["vision"])
-    ]
 
 
 def _configured(name: str, cfg: dict[str, Any] | None) -> bool:
@@ -688,7 +693,38 @@ async def _chat(
         meter.alias_label = "_unknown"  # never a client-chosen string as a metric label
         await meter.settle()
         return _unknown(body)
-    await meter.reserve(chain[0])  # hold the estimated cost against the budget now
+    alias = config.registry.aliases.get(body.model)
+    if alias is not None and alias.policy is not None:
+        # Policy routing (ADR 0017): this request's chain, from the catalog.
+        try:
+            hints = _route_hints(body, request)
+            plan = await policy.plan(
+                body.model,
+                policy.effective(alias.policy, hints),
+                body.model_dump(exclude_unset=True),
+                prompt_estimate,
+            )
+        except (ValueError, TypeError) as exc:
+            meter.status, meter.error_code = 400, "invalid_route"
+            await meter.settle()
+            return error_response(
+                400, f"Invalid route hints: {exc}", code="invalid_route", param="route"
+            )
+        except policy.NoRoute as exc:
+            status = 503 if exc.capacity else 400
+            meter.status, meter.error_code = status, "no_route"
+            await meter.settle()
+            return error_response(
+                status,
+                str(exc),
+                "api_error" if exc.capacity else "invalid_request_error",
+                "no_route",
+            )
+        chain = plan.chain
+        rl_headers["x-gateway-route"] = plan.header()
+    else:
+        chain = []  # the router resolves the alias itself
+    await meter.reserve(chain[0] if chain else config.registry.resolve(body.model)[0])
     if body.stream:
         # Always ask the provider for usage so streams can be metered (ADR 0007); the
         # meter drops the usage chunk again if the client didn't ask for it. Keep any
@@ -702,8 +738,19 @@ async def _chat(
     if started:
         rl_headers["server-timing"] = f"admit;dur={(time.perf_counter() - started) * 1000:.2f}"
     if body.stream:
-        return await _stream(body, request, meter, rl_headers, fmt)
-    return await _complete(body, request, meter, rl_headers, anthropic_client)
+        return await _stream(body, request, meter, rl_headers, fmt, chain)
+    return await _complete(body, request, meter, rl_headers, anthropic_client, chain)
+
+
+def _route_hints(body: ChatCompletionRequest, request: Request) -> dict[str, Any] | None:
+    """Policy hints from the body (`route`, e.g. OpenAI SDK extra_body) or the
+    `x-gateway-route` header. The body wins if both are sent."""
+    extra = body.model_extra or {}
+    if isinstance(extra.get("route"), dict):
+        return dict(extra["route"])
+    if header := request.headers.get("x-gateway-route"):
+        return policy.parse_header(header)
+    return None
 
 
 async def _settle(meter: Meter) -> None:
@@ -739,8 +786,9 @@ async def _complete(
     meter: Meter,
     rl_headers: dict[str, str],
     anthropic_client: bool = False,
+    chain: list[str] | None = None,
 ) -> JSONResponse | Response:
-    routed = Routed()
+    routed = Routed(chain=chain or None)
     try:
         try:
             result, routed = await cancel_on_disconnect(request, router.route_chat(body, routed))
@@ -784,11 +832,12 @@ async def _stream(
     meter: Meter,
     rl_headers: dict[str, str],
     fmt: StreamFormat | None = None,
+    chain: list[str] | None = None,
 ) -> JSONResponse | Response:
     # Retries and fallback cover everything up to the first chunk, which is pulled
     # *before* the 200 goes out (ADR 0002, 0005). That wait can be long (prompt
     # processing), so it is watched for disconnects too.
-    routed = Routed()
+    routed = Routed(chain=chain or None)
     try:
         (first, chunks), routed = await cancel_on_disconnect(
             request, router.route_stream(body, routed)

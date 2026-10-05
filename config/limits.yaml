@@ -17,7 +17,7 @@ tiers:
     requests_per_minute: 300
     tokens_per_minute: 200000
     monthly_budget_usd: 100
-    allowed_aliases: [fast, balanced, smart, local, frontier]
+    allowed_aliases: [fast, balanced, smart, local, frontier, auto]
   chaos:                             # for load/chaos tests against the fake provider
     requests_per_minute: 600
     tokens_per_minute: 1000000

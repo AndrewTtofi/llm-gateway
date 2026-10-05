@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-REQUEST_FIELDS = ("thinking",)
+REQUEST_FIELDS = ("thinking", "route")  # route: policy-routing hints (ADR 0017)
 MESSAGE_FIELDS = ("cache_control", "thinking_blocks")
 
 

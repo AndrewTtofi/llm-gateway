@@ -140,6 +140,11 @@ providers:
 
 # Aliases are what clients send as `model`. Each is an ordered fallback chain.
 aliases:
+  # Chosen per request from the catalog (ADR 0017): the cheapest configured model with
+  # quality ≥ 3 that can do what the request needs. Clients can tighten it with `route`
+  # (e.g. optimize: quality) or the x-gateway-route header.
+  auto:
+    policy: { optimize: cost, min_quality: 3, max_chain: 4 }
   # The strongest model from each company, best first. Providers without a key are skipped.
   frontier:
     chain:

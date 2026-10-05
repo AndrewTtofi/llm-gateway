@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -33,8 +33,29 @@ class Settings(BaseSettings):
     metrics_port: int = 9100
 
 
+class Policy(BaseModel):
+    """Build the chain per request from the catalog instead of a fixed list (ADR 0017)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    optimize: Literal["cost", "quality", "latency"] = "cost"
+    candidates: list[str] = []  # targets to choose from; empty = every known model
+    needs: list[Literal["tools", "vision", "reasoning", "json_schema"]] = []
+    min_quality: int | None = Field(default=None, ge=1, le=5)
+    max_blended_price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_chain: int = Field(default=4, ge=1, le=10)
+    client_hints: bool = True  # clients may tighten it (route field / x-gateway-route)
+
+
 class Alias(BaseModel):
-    chain: list[str]  # ["provider/model", ...] in fallback order
+    chain: list[str] = []  # ["provider/model", ...] in fallback order
+    policy: Policy | None = None  # instead of a chain: chosen per request
+
+    @model_validator(mode="after")
+    def _one_of(self) -> Alias:
+        if bool(self.chain) == (self.policy is not None):
+            raise ValueError("an alias needs exactly one of `chain` or `policy`")
+        return self
 
 
 class RetryConfig(BaseModel):
@@ -270,9 +291,19 @@ def _drop_fake(raw: dict[str, Any]) -> None:
     for name in fake:
         del raw["providers"][name]
     for alias in list(raw.get("aliases") or {}):
-        chain = [t for t in raw["aliases"][alias]["chain"] if t.split("/", 1)[0] not in fake]
+        spec = raw["aliases"][alias]
+        if "policy" in spec:  # policy aliases: drop test providers from their candidates
+            policy = spec["policy"] or {}
+            if policy.get("candidates"):
+                policy["candidates"] = [
+                    t for t in policy["candidates"] if t.split("/", 1)[0] not in fake
+                ]
+                if not policy["candidates"]:
+                    del raw["aliases"][alias]
+            continue
+        chain = [t for t in spec.get("chain") or [] if t.split("/", 1)[0] not in fake]
         if chain:
-            raw["aliases"][alias]["chain"] = chain
+            spec["chain"] = chain
         else:
             del raw["aliases"][alias]
 
