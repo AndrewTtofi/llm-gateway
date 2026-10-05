@@ -5,11 +5,11 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 0 — Foundations
-- **Branch:** main
-- **Status:** local tooling green (`make test` 9 passed, `make lint` clean); stack not yet brought up
-- **Next up:** start Docker Desktop (enable WSL integration), `.env` with API keys, install Ollama + `llama3.2:3b`, `make up`, confirm `/healthz`; `git init` + first push for CI
-- **Blockers:** Docker daemon not reachable from WSL; Ollama not installed; repo not under git yet
+- **Phase:** 0 — Foundations (complete except provider API keys)
+- **Branch:** main · remote `github.com/AndrewTtofi/llm-gateway` (private) · CI green
+- **Status:** stack up, `/healthz` 200, fresh clone → healthz in 13s (images cached), `make test` 10 passed, `make lint` clean
+- **Next up:** owner adds `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` to `.env`; then Phase 1 on branch `phase-1-proxy`
+- **Blockers:** none (API keys only needed for live tests)
 - **Open questions:** none
 
 ---
@@ -25,8 +25,19 @@ Keep "Current state" short and always true.
 - Added `tests/test_api.py` (healthz, /v1/models, /admin/reload auth)
 - CI lint step now runs mypy too, matching `make lint`
 
+- Created `.env` from example with a generated `GATEWAY_ADMIN_KEY` (API keys still empty)
+- `make up`: all 5 services healthy; `/admin/reload` works with the admin key
+- Pulled `ollama/llama3.2:3b`; verified the container reaches Ollama via `host.docker.internal`
+- Filled OpenAI models: fast → `gpt-6-luna`, balanced → `gpt-6.1-sol`, smart → `gpt-6-astra`
+- Filled all prices in `pricing.yaml` (checked 2026-10-05); test that every chain model is priced
+- `git init`, repo-local identity, pushed to private GitHub repo; first CI run green
+
+**Decided**
+- Repo is private for now; flip to public at Phase 7
+
 **Next**
-- Remaining Phase 0 items need the owner: Docker, API keys, Ollama, git remote
+- Owner: add provider API keys to `.env`
+- Phase 1 — pass-through proxy
 
 
 ### 2026-10-05 — Session 1

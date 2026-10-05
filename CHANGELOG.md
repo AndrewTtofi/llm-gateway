@@ -16,10 +16,12 @@ Version plan: each completed phase bumps the minor version
 - `/healthz` endpoint and config loader skeleton
 - CI workflow (lint + tests)
 - API tests for `/healthz`, `/v1/models`, `/admin/reload`
+- Config test: every model in an alias chain must have a `pricing.yaml` entry
 
 ### Changed
 - Errors use OpenAI's `{"error": {...}}` shape
 - CI lint step also runs mypy
+- OpenAI fallbacks set to `gpt-6-luna` / `gpt-6.1-sol` / `gpt-6-astra`; all prices filled in `pricing.yaml`
 
 ### Security
 - `/admin/reload` compares the admin key in constant time

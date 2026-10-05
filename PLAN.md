@@ -43,11 +43,11 @@ every finished phase in `CHANGELOG.md`.
 
 ### Phase 0 — Foundations (day 1)
 Goal: the repo runs, the stack comes up, the tooling is in place.
-- [ ] `docker compose up` brings up gateway, Redis, Postgres, Prometheus, Grafana
-- [ ] `GET /healthz` returns 200
-- [ ] `.env` created from `.env.example`; API keys for Anthropic + OpenAI; Ollama installed with a small model pulled
+- [x] `docker compose up` brings up gateway, Redis, Postgres, Prometheus, Grafana
+- [x] `GET /healthz` returns 200
+- [ ] `.env` created from `.env.example`; API keys for Anthropic + OpenAI; Ollama installed with a small model pulled  _(done except API keys — owner adds them)_
 - [x] `make test` and `make lint` run (even with zero tests)
-- [ ] CI workflow green on first push
+- [x] CI workflow green on first push
 
 DoD: fresh clone → `make up` → healthz OK in under 5 minutes.
 Learn: project layout, config loading with pydantic-settings.
