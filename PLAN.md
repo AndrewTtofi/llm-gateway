@@ -125,6 +125,7 @@ DoD: numbers in the README, reproducible with one command.
 - [ ] Optional: deploy to a small VM or Cloud Run behind auth
 
 ### Phase 8+ — Extensions (later projects on this codebase)
+- [x] Inbound Anthropic Messages API (`/v1/messages`), ADR 0010. Next: lossless prompt caching + thinking for Anthropic targets
 | # | Extension | Hooks into |
 |---|-----------|-----------|
 | 7 | Semantic cache (embeddings + Redis vector) | before router |

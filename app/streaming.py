@@ -106,39 +106,66 @@ def sse_error(message: str) -> str:
     return f"data: {json.dumps(err)}\n\n"
 
 
+class StreamFormat(Protocol):
+    """How chunks (internal OpenAI format) are written to the client."""
+
+    def encode(self, chunk: dict[str, Any]) -> list[str]: ...
+    def end(self) -> list[str]: ...
+    def error(self, message: str) -> str: ...
+
+
+class OpenAIStream:
+    """Chunks as-is, ending with `[DONE]`."""
+
+    def encode(self, chunk: dict[str, Any]) -> list[str]:
+        return [f"data: {json.dumps(chunk)}\n\n"]
+
+    def end(self) -> list[str]:
+        return ["data: [DONE]\n\n"]
+
+    def error(self, message: str) -> str:
+        return sse_error(message)
+
+
 async def relay_sse(
     first: dict[str, Any] | None,
     chunks: AsyncIterator[dict[str, Any]],
     meter: ChunkFilter | None = None,
+    fmt: StreamFormat | None = None,
 ) -> AsyncGenerator[str]:
     """Re-emit upstream chunks as SSE. Once the 200 is sent, errors can only travel in-band.
 
     `meter` sees every chunk (to count usage) and may drop or rewrite it — e.g. the usage
-    chunk the gateway asked for but the client didn't. An errored stream ends with an
-    error event and no `[DONE]`, so it can't be mistaken for a complete answer.
+    chunk the gateway asked for but the client didn't. `fmt` writes the client's wire
+    format (OpenAI by default; Anthropic events for /v1/messages). An errored stream ends
+    with an error event and no end marker (`[DONE]` / `message_stop`), so it can't be
+    mistaken for a complete answer.
     """
+    out = fmt or OpenAIStream()
 
-    def emit(chunk: dict[str, Any]) -> str | None:
-        out = meter.observe(chunk) if meter is not None else chunk
-        return f"data: {json.dumps(out)}\n\n" if out is not None else None
+    def emit(chunk: dict[str, Any]) -> list[str]:
+        seen = meter.observe(chunk) if meter is not None else chunk
+        return out.encode(seen) if seen is not None else []
 
     try:
-        if first is not None and (line := emit(first)):
-            yield line
+        if first is not None:
+            for line in emit(first):
+                yield line
         async for chunk in chunks:
-            if line := emit(chunk):
+            for line in emit(chunk):
                 yield line
     except ProviderError as exc:
         if meter is not None:
             meter.failed("upstream_timeout" if exc.timeout else "upstream_error")
-        yield sse_error(exc.message)
+        yield out.error(exc.message)
         return
     except Exception:
         log.exception("stream relay failed")
         if meter is not None:
             meter.failed("gateway_error")
-        yield sse_error("gateway error while streaming")
+        yield out.error("gateway error while streaming")
         return
     if meter is not None:
         meter.finished()  # everything delivered; a disconnect from here on isn't a loss
-    yield "data: [DONE]\n\n"
+    for line in out.end():
+        yield line
