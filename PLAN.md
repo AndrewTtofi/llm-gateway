@@ -154,22 +154,22 @@ Things that limit real use today. Each item gets tests; non-obvious ones get an 
   - `usage_log` retention: `python -m app.maintenance prune --days N` (batched deletes) plus a documented schedule.
 
 ### Phase 10 — Extensions (`phase-10-extensions`)
-- [ ] **Policy routing** (ADR 0017): `model: "auto"` + `route` hints (`optimize: cost|latency|quality`, `needs`, `min_quality`, `max_blended_price`).
+- [x] **Policy routing** (ADR 0017): `model: "auto"` + `route` hints (`optimize: cost|latency|quality`, `needs`, `min_quality`, `max_blended_price`).
   - The chain is built per request from the catalog: allowed, configured, breaker not open, capabilities and context fit.
-- [ ] **Response cache** (ADR 0018): opt-in per alias.
+- [x] **Response cache** (ADR 0018): opt-in per alias.
   - Exact match: a hash of the normalised request, in Redis with a TTL.
   - Semantic: embeddings from a configured OpenAI-compatible provider, Redis 8 vector sets, a similarity threshold.
   - Streams are replayed; cache hits are free and metered as such.
-- [ ] **Self-healing and alerts** (ADR 0019)
+- [x] **Self-healing and alerts** (ADR 0019)
   - Background synthetic probes for open breakers, so recovery doesn't need user traffic.
   - Longer quarantine for gateway faults (auth, quota).
   - Webhook alerts on breaker and quarantine state changes.
-- [ ] **A/B routing** (ADR 0020): weighted alias variants, sticky per key or user, optional system-prompt prefix per variant.
+- [x] **A/B routing** (ADR 0020): weighted alias variants, sticky per key or user, optional system-prompt prefix per variant.
   - The variant is recorded in the usage log and metrics (bounded labels).
-- [ ] **Prompt-injection filter** (ADR 0021): configurable heuristics with an optional classifier model.
+- [x] **Prompt-injection filter** (ADR 0021): configurable heuristics with an optional classifier model.
   - Actions per tier: `log` / `flag` / `block`.
   - Never logs the content, only the rule that matched.
-- [ ] **LLM-as-judge sampling** (ADR 0022): a sampled share of responses is scored asynchronously by a judge alias against a rubric.
+- [x] **LLM-as-judge sampling** (ADR 0022): a sampled share of responses is scored asynchronously by a judge alias against a rubric.
   - Scores stored (no content) in `judge_scores`, plus a metric and a dashboard panel.
 
 ### Phase 11 — Ship it again

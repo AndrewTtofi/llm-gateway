@@ -9,6 +9,14 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Added (Phase 10 — extensions)
+- Policy routing: `model: auto` (shipped) and any alias with a `policy`. The chain is built per request from the catalog: capabilities (incl. implied), context fit, quality and price constraints, availability, then ranked by cost, quality or measured latency. Clients can tighten a policy with `route` / `x-gateway-route` (ADR 0017)
+- Response cache, opt-in per alias: exact (SHA-256) or semantic (embeddings + Redis 8 vector sets). Scoped per key by default; free hits, stream replays, `x-gateway-cache: bypass | refresh` (ADR 0018)
+- Self-healing: background probes of half-open targets, quarantine of auth/model/quota failures, breaker alerts to a Slack-compatible webhook, deduplicated fleet-wide (ADR 0019)
+- A/B routing: weighted, sticky alias variants with optional system-prompt prefixes; `usage_log.variant` (migration 0005), per-arm metrics and Grafana panels (ADR 0020)
+- Prompt-injection filter: weighted rules over normalised text in `config/guardrails.yaml`, per-tier `off | log | flag | block`, optional classifier for borderline cases (ADR 0021)
+- LLM-as-judge sampling: background scoring of sampled answers against a rubric; scores and fixed labels only in `judge_scores` (migration 0006), metrics and panels (ADR 0022)
+
 ### Added (Phase 9 — close the gaps)
 - Prompt caching and extended thinking through `/v1/messages`. `cache_control` and signed thinking blocks (in requests, history, responses and streams) reach Anthropic targets and come back, and never leak to other providers or OpenAI clients (ADR 0013)
 - OpenAI Responses API adapter (`api: responses` per model). GPT-6 Astra and Sol can call tools again. Configurable reasoning `mode`; `store: false` always (ADR 0014)
