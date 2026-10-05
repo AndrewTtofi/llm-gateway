@@ -124,16 +124,58 @@ DoD: numbers in the README, reproducible with one command.
 - [x] Short write-up / LinkedIn post on what you learned
 - [ ] Optional: deploy to a small VM or Cloud Run behind auth
 
-### Phase 8+ — Extensions (later projects on this codebase)
-- [x] Inbound Anthropic Messages API (`/v1/messages`), ADR 0010. Next: lossless prompt caching + thinking for Anthropic targets
-| # | Extension | Hooks into |
-|---|-----------|-----------|
-| 7 | Semantic cache (embeddings + Redis vector) | before router |
-| 2 | Cost autopilot (route by prompt complexity / budget) | router |
-| 24 | Self-healing gateway (auto-disable, auto-recover, alerts) | breaker + metrics |
-| 12 / 9 | Feature flags / prompt A/B routing | router rules |
-| 21 | Prompt injection filter | request middleware |
-| 25 | LLM-as-judge sampling of responses | async post-processing |
+### Phase 8 — Reach (done)
+- [x] Inbound Anthropic Messages API (`/v1/messages`), ADR 0010
+- [x] Wiki (`docs/wiki/`)
+- [x] Model catalog, `GET /v1/catalog`, reviewed price sync (`make prices`), ADR 0011
+- [x] Top model from each company, `frontier` alias, per-provider parameter rules, ADR 0012
+
+### Phase 9 — Close the gaps (`phase-9-gaps`)
+Things that limit real use today. Each item gets tests; non-obvious ones get an ADR.
+- [ ] **Lossless Anthropic features through `/v1/messages`** (ADR 0013)
+  - `cache_control` on system, messages, content blocks and tools reaches Anthropic targets.
+  - `thinking` (request parameter, history blocks with signatures, streamed thinking and signature deltas) round-trips.
+  - Non-Anthropic targets never see these extension fields; `/v1/chat/completions` never leaks them.
+- [ ] **OpenAI Responses API adapter** (ADR 0014): `api: responses` per model.
+  - Chat request → Responses input items, tools, `tool_choice`, `max_output_tokens`, `reasoning`, `text.format`; stream events → chunks; usage.
+  - GPT-6 Astra and Sol get tool calling back. Reasoning mode `pro` is configurable per model.
+- [ ] **Cost accuracy** (ADR 0015)
+  - Long-context price tiers (`tiers: [{above_prompt_tokens, input, output, cached_input}]`).
+  - Cache-write prices (`cache_write`) and cache-creation token tracking.
+  - Time-of-day pricing (DeepSeek off-peak windows).
+  - The sync proposes tiers too.
+- [ ] **Admin**
+  - `PATCH /admin/keys/{id}` (edit name, tier, limits, allowed aliases).
+  - Teams: a key belongs to a team, teams have monthly budgets in `limits.yaml`, and admission checks both. Spend per team in `/admin/teams` and Grafana.
+  - Request body size limit (413), configurable.
+- [ ] **Operations**
+  - Release workflow: build and push a multi-arch image to GHCR on `v*` tags (with SBOM and provenance).
+  - `docker-compose.prod.yml`: no fake provider, no reload, migration job, 2 replicas behind Caddy (TLS), secrets via env file, internal-only admin, metrics and readiness.
+  - `usage_log` retention: `python -m app.maintenance prune --days N` (batched deletes) plus a documented schedule.
+
+### Phase 10 — Extensions (`phase-10-extensions`)
+- [ ] **Policy routing** (ADR 0016): `model: "auto"` + `route` hints (`optimize: cost|latency|quality`, `needs`, `min_quality`, `max_blended_price`).
+  - The chain is built per request from the catalog: allowed, configured, breaker not open, capabilities and context fit.
+- [ ] **Response cache** (ADR 0017): opt-in per alias.
+  - Exact match: a hash of the normalised request, in Redis with a TTL.
+  - Semantic: embeddings from a configured OpenAI-compatible provider, Redis 8 vector sets, a similarity threshold.
+  - Streams are replayed; cache hits are free and metered as such.
+- [ ] **Self-healing and alerts** (ADR 0018)
+  - Background synthetic probes for open breakers, so recovery doesn't need user traffic.
+  - Longer quarantine for gateway faults (auth, quota).
+  - Webhook alerts on breaker and quarantine state changes.
+- [ ] **A/B routing** (ADR 0019): weighted alias variants, sticky per key or user, optional system-prompt prefix per variant.
+  - The variant is recorded in the usage log and metrics (bounded labels).
+- [ ] **Prompt-injection filter** (ADR 0020): configurable heuristics with an optional classifier model.
+  - Actions per tier: `log` / `flag` / `block`.
+  - Never logs the content, only the rule that matched.
+- [ ] **LLM-as-judge sampling** (ADR 0021): a sampled share of responses is scored asynchronously by a judge alias against a rubric.
+  - Scores stored (no content) in `judge_scores`, plus a metric and a dashboard panel.
+
+### Phase 11 — Ship it again
+- [ ] Wiki and README for phases 9–10.
+- [ ] Full security audit of the gateway; fix findings.
+- [ ] Merge the stacked PRs (#10 → #11 → #12 → phase 9 → phase 10) once CI runs; tag releases.
 
 ---
 
