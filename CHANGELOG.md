@@ -9,6 +9,8 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05 (Phase 2 — multi-provider + model registry)
+
 ### Added
 - `CONTRIBUTING.md`
 - Anthropic adapter (official `anthropic` SDK): OpenAI chat-completions ⇄ Messages API — system prompt, roles, `max_tokens` default, stop reasons, usage (incl. cached tokens), tool calls and parallel tool results, images, `response_format`, `reasoning_effort`, streaming events → OpenAI chunks (Phase 2, ADR 0003)

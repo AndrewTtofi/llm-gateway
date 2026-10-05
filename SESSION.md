@@ -5,11 +5,11 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 2 — Multi-provider + model registry (built on `phase-2-providers`, in review)
+- **Phase:** 2 — Multi-provider + model registry ✅ (v0.2.0) → next: 3 — Reliability
 - **Branch:** `phase-2-providers` · `v0.1.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
-- **Status:** Phase 2 built + reviewed; `make test` 115 passed, `make test-e2e` 2 passed, `make lint` clean. Claude paths verified only against a mocked API
-- **Next up:** owner adds `ANTHROPIC_API_KEY` to `.env` → `docker compose restart gateway` → `make test-live` (Phase 2 DoD against real Claude) → merge → tag `v0.2.0`
-- **Blockers:** Phase 2 DoD for `fast`/`smart` needs the Anthropic API key
+- **Status:** Phase 2 DoD met live: same OpenAI client code streams from `fast`/`smart`/`local`, real tool call OK, Sonnet 5.5 capability translation verified. `make test` 115, `make test-live` 4 passed
+- **Next up:** Phase 3 on `phase-3-reliability`: retries + backoff, fallback through alias chains, circuit breaker in Redis, chaos provider, mid-stream failure ADR. Also from reviews: pool limits, overall stream deadline, retire old adapters
+- **Blockers:** none. Owner: rotate the Anthropic key (it was pasted in chat); `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** none
 
 ---
