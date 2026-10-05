@@ -12,11 +12,16 @@
 - [Keys, limits and budgets](Keys-Limits-and-Budgets.md)
 - [Observability](Observability.md)
 - [Choosing models and prices](Choosing-Models.md)
+- [Smart routing](Smart-Routing.md)
+- [Response cache](Response-Cache.md)
+- [Quality and safety](Quality-and-Safety.md)
+- [Self-healing](Self-Healing.md)
 
 **Reference**
 - [Configuration](Configuration-Reference.md)
 - [API](API-Reference.md)
 - [Operations and deployment](Operations-and-Deployment.md)
+- [Production deployment](Production-Deployment.md)
 - [Testing and benchmarks](Testing-and-Benchmarks.md)
 - [Security](Security.md)
 

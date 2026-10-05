@@ -143,10 +143,9 @@ and settle at the real price of whichever model served. A `frontier` request the
 briefly holds more budget than a cheaper fallback ends up spending. Check `GET /v1/catalog?sort=quality` to see
 what each one costs and which are `configured`.
 
-## Coming next: policy routing
+## Let the gateway choose: `model: auto`
 
-Instead of picking a model in the app, an app will be able to say what it needs, for example
-`model: "auto"` plus hints like `optimize: cost`, `needs: [tools]`, `min_quality: 3`. The
-gateway will then build the fallback chain per request from this catalog: cheapest-first,
-fastest-first or best-first, skipping open breakers and models without the needed
-capabilities or context.
+Instead of picking a model in the app, send `model: "auto"`, plus hints if you like
+(`optimize: quality`, `needs: [tools]`). The gateway builds the fallback chain per request
+from this catalog: cheapest-first, best-first or fastest-first, skipping open breakers and
+models without the needed capabilities or context. See [Smart routing](Smart-Routing.md).

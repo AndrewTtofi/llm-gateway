@@ -35,6 +35,11 @@ readers who are new to them.
 | Issue keys and control spend | [Keys, limits and budgets](Keys-Limits-and-Budgets.md) |
 | Monitor it | [Observability](Observability.md) |
 | Let apps pick models by price, capability, quality and live speed; keep prices current | [Choosing models](Choosing-Models.md) |
+| Route by policy (`model: auto`) or run A/B tests | [Smart routing](Smart-Routing.md) |
+| Cache answers (exact or semantic) | [Response cache](Response-Cache.md) |
+| Filter prompt injection; score answer quality | [Quality and safety](Quality-and-Safety.md) |
+| Recover providers automatically; get alerts | [Self-healing](Self-Healing.md) |
+| Deploy with TLS, replicas and monitoring | [Production deployment](Production-Deployment.md) |
 | Change models, prices or limits | [Configuration reference](Configuration-Reference.md) |
 | Integrate a client | [API reference](API-Reference.md) |
 | Run it in production | [Operations and deployment](Operations-and-Deployment.md) |

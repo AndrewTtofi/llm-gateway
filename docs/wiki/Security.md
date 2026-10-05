@@ -18,6 +18,10 @@ The gateway holds the organisation's provider API keys and sees every prompt. Th
 | Resource exhaustion | Format check before any key lookup; a miss cache for unknown keys; bounded metric labels; connection pools per provider; upstream calls cancelled on disconnect |
 | Admin takeover | `/admin/*` disabled unless `GATEWAY_ADMIN_KEY` is set; constant-time comparison; restrict it at the network level too |
 | Injected config | Config is local YAML, not user input. Clients can't make the gateway call arbitrary URLs: only configured providers are called |
+| Prompt injection | A heuristic filter (plus an optional classifier) over user messages and tool results, logging, flagging or blocking per tier ([Quality and safety](Quality-and-Safety.md)) |
+| Huge requests | Bodies over `MAX_BODY_BYTES` get a 413 before parsing; Caddy caps them at the edge too |
+| Cross-tenant cache leaks | The response cache is scoped per key by default; team or global sharing is an explicit choice ([Response cache](Response-Cache.md#scope-who-shares-answers)) |
+| Dashboard credentials | In production, Grafana reads Postgres through a read-only role that can't see `key_hash` |
 
 ## Recommendations for operators
 
@@ -30,6 +34,15 @@ The gateway holds the organisation's provider API keys and sees every prompt. Th
 - **Monitoring:** alert on `upstream_quota_exhausted` and on fallback-rate spikes. Fallback
   keeps answers flowing, which can hide a problem with your account.
 - **Production:** never set `GATEWAY_ENABLE_FAKE` there.
+- **Hardening:** the production compose file shows the hardening in practice:
+  - read-only containers with all capabilities dropped;
+  - operator endpoints only on a localhost listener;
+  - each container gets only its own secrets;
+  - the Redis password stays out of process arguments.
+
+  See [Production deployment](Production-Deployment.md).
+- **Image provenance:** release images carry an SBOM and signed provenance. Verify them with
+  `gh attestation verify` before deploying.
 
 ## Repository hygiene
 

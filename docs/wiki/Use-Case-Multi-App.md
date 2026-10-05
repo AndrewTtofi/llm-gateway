@@ -213,10 +213,17 @@ everywhere, and the provider keys never need rotating, because apps never had th
 | Security | Provider keys in one service; prompts never logged; per-app access to models; instant revocation |
 | Users | Fewer outages: one provider's incident becomes a fallback, not a failure |
 
-## Limits of this setup today
+## Going further
 
-- Keys can't be edited; issue a new key and revoke the old one.
-- Budgets are per key, with no per-team roll-up. Use the usage log, grouping by a naming
-  convention such as `team-app-env`.
-- Routing is by alias order. Apps can already compare models with `GET /v1/catalog`
-  ([Choosing models](Choosing-Models.md)). Per-request policy routing (`auto` + hints) is next.
+- **Team budgets:** put each app's keys in a team (`limits.yaml` teams, `team` on the key)
+  for a per-team monthly cap and spend panel ([Keys, limits and budgets](Keys-Limits-and-Budgets.md#teams)).
+- **Edit keys:** change a key's limits in place with `PATCH /admin/keys/{id}`. The app keeps
+  its key.
+- **Let the gateway choose:** `nightly-digest` could use `model: auto` with
+  `optimize: cost`. The cheapest model that fits each request wins ([Smart routing](Smart-Routing.md)).
+- **Test changes safely:** try a cheaper model for 10% of `support-bot` traffic as an A/B
+  arm. Then compare cost, latency and judge scores per arm before switching.
+- **Cache the FAQ:** a semantic cache on the support bot's alias answers repeated questions
+  for free ([Response cache](Response-Cache.md)).
+- **Watch for injection:** set the customer-facing tier's `injection` to `flag`, then
+  `block` ([Quality and safety](Quality-and-Safety.md)).

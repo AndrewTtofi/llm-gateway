@@ -39,21 +39,60 @@ curl -X POST localhost:8000/admin/keys -H "Authorization: Bearer $GATEWAY_ADMIN_
 # list, with month-to-date spend
 curl localhost:8000/admin/keys -H "Authorization: Bearer $GATEWAY_ADMIN_KEY"
 
+# edit in place: the app keeps the same key (null clears an override back to the tier's value)
+curl -X PATCH localhost:8000/admin/keys/<id> -H "Authorization: Bearer $GATEWAY_ADMIN_KEY" \
+  -H 'content-type: application/json' -d '{"tokens_per_minute":250000,"team":"support","monthly_budget_usd":null}'
+
 # revoke
 curl -X DELETE localhost:8000/admin/keys/<id> -H "Authorization: Bearer $GATEWAY_ADMIN_KEY"
 ```
 
-Shortcut: `make key name=… tier=…`. Unknown fields in the create body are rejected, so a
+Shortcut: `make key name=… tier=…`. Unknown fields are rejected on create and edit, so a
 typo like `monthly_budget` can't silently create a key without a budget.
+
+- **Editing:** name, tier, team, limits and allowed aliases can be changed. Name and tier
+  can't be cleared.
+- **When it applies:** an edit applies immediately on the replica that handled it, and
+  within 30 s (the key cache) on the others.
+
+## Teams
+
+A key can belong to a team. Teams are declared in `limits.yaml` with their own monthly
+budget, and a typo'd team name is rejected:
+
+```yaml
+teams:
+  support: { monthly_budget_usd: 500 }
+  data:    { monthly_budget_usd: 200 }
+```
+
+- **Budgets:** a request must fit **both** budgets, the key's and its team's. When the team
+  budget is used up, every key in the team gets `429 insufficient_quota` ("…team is
+  exhausted"). The rejection metric's reason is `team_budget`.
+- **Spend tracking:** spend is reserved and settled for the key and the team together.
+  `usage_log.team` records the team at request time, so moving a key later doesn't rewrite
+  history. This month's spend also stays with the old team.
+- **Where to see it:**
+  - `GET /admin/teams` lists budget, month-to-date spend and active keys per team.
+  - Grafana has "Spend per team" panels.
+- **Overshoot:** many keys in one team racing for the last dollar can overshoot its budget
+  by about the cost of the requests in flight at that moment (ADR 0016).
+
+## Request size
+
+Request bodies above `MAX_BODY_BYTES` (default 32 MiB, Anthropic's request limit) get a
+**413** before anything reads them. In production, Caddy enforces the same cap at the edge.
 
 ## Tiers
 
-Defined in `config/limits.yaml`. Every key has a tier, and any field can be overridden per key:
+Defined in `config/limits.yaml`. Every key has a tier, and any field can be overridden per key.
+Each tier also sets its [prompt-injection](Quality-and-Safety.md#prompt-injection-filter)
+action (`injection: off | log | flag | block`).
 
 | Tier | Requests/min | Tokens/min | Budget/month | Aliases |
 |------|-------------|-----------|--------------|---------|
 | `dev` | 60 | 50 000 | $10 | `fast`, `local` |
-| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local`, `frontier` |
+| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local`, `frontier`, `auto` |
 | `chaos` | 600 | 1 000 000 | $1 | chaos aliases (dev only) |
 
 `allowed_aliases` can also list exact `provider/model` names, or `"*"` for everything.
@@ -115,13 +154,22 @@ does exactly this. Give such keys a higher `tokens_per_minute`.
 ### How cost is calculated
 
 ```
-cost = (prompt − cached) × input_price
-     + cached × cached_input_price
-     + completion × output_price          (prices per 1M tokens)
+cost = (prompt − cache reads − cache writes) × input
+     + cache reads             × cached_input
+     + 5-minute cache writes   × cache_write
+     + 1-hour cache writes     × cache_write_1h
+     + completion              × output                   (prices per 1M tokens)
 ```
 
-`cached_input` is the provider's prompt-cache read price. Without it, cached tokens are
-billed as normal input. For Anthropic's refusal fallback, every attempt in `usage.iterations`
+Three refinements (ADR 0015):
+
+- **Tiers:** if the prompt is larger than a tier's `above_prompt_tokens`, that tier's prices
+  apply to the **whole** request. This is how OpenAI (above 272K tokens), Gemini and xAI
+  (above 200K) bill.
+- **Off-peak:** if the model has `off_peak` windows, a request that *starts* outside them is
+  multiplied by `multiplier`. This is DeepSeek's half price outside peak hours.
+- **Missing prices:** a missing `cached_input` bills cache reads as normal input. A missing
+  `cache_write` bills cache writes as normal input. For Anthropic's refusal fallback, every attempt in `usage.iterations`
 is billed at its own model's price. Models missing from `pricing.yaml` log a warning once.
 They are recorded with cost `null` and count as $0 against budgets, so price every model you
 put in a chain.

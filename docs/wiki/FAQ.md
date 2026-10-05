@@ -11,7 +11,7 @@ tokens breaks every major provider's terms. See [Subscriptions and provider term
 
 **Does it work with Claude Code?**
 Yes. Set `ANTHROPIC_BASE_URL` to the gateway, and use a gateway key as `ANTHROPIC_AUTH_TOKEN`
-and gateway aliases as models. Prompt caching and extended thinking don't pass through yet.
+and gateway aliases as models. Prompt caching and extended thinking pass through to Claude.
 See [Providers and translation](Providers-and-Translation.md#using-it-with-claude-code).
 
 **How much latency does it add?**
@@ -46,13 +46,28 @@ See [Configuration reference](Configuration-Reference.md) and
 [`docs/CHANGING-MODELS.md`](https://github.com/AndrewTtofi/llm-gateway/blob/main/docs/CHANGING-MODELS.md).
 
 **How accurate is the cost tracking?**
-It's as accurate as `pricing.yaml` and the providers' reported usage. Cached tokens are
-billed at the cached price, and each refusal-fallback attempt at its own model's price. Keep
-the prices current, since providers change them.
+It's as accurate as `pricing.yaml` and the providers' reported usage.
+- **Cache:** cache reads and writes are billed at their own prices.
+- **Long-context tiers:** they reprice the whole request.
+- **Off-peak:** DeepSeek's off-peak hours are half price.
+- **Refusal fallback:** each attempt is billed at its own model's price.
+
+`make prices` and a weekly job keep prices current
+([Choosing models](Choosing-Models.md#keeping-prices-current)).
 
 **Does it support embeddings, images, audio, or OpenAI's Responses API?**
-Not yet. It handles chat (`/v1/chat/completions`, `/v1/messages`), including tools, image
-*inputs* and streaming.
+Clients use chat (`/v1/chat/completions`, `/v1/messages`), including tools, image *inputs*
+and streaming. The gateway itself calls OpenAI's Responses API where a model needs it (GPT-6
+Astra and Sol), and embedding models for the semantic cache. There are no public embeddings,
+image-generation or audio endpoints.
+
+**Can it pick the model for me?**
+Yes: `model: auto` chooses per request by price, quality, capabilities and latency
+([Smart routing](Smart-Routing.md)).
+
+**Can I test a new model on a slice of traffic?**
+Yes, with A/B variants on an alias: weighted, sticky per key or user, and compared on the
+dashboard ([Smart routing](Smart-Routing.md#ab-tests-variants)).
 
 **Does it store my prompts?**
 No. It logs and stores sizes, token counts, costs and latencies, never content.

@@ -38,6 +38,12 @@ flowchart LR
 | Observability | `app/observability/` | Prometheus metrics, JSON logs, the usage-log writer |
 | Process-wide stores | `app/services.py` | Picks the Redis/Postgres or in-memory implementations at startup; readiness checks |
 | Config | `app/config.py`, `config/*.yaml` | Settings from env, plus the model registry, pricing and limits from YAML |
+| Policy and A/B routing | `app/routing/policy.py`, `app/routing/ab.py` | Chains chosen per request ([Smart routing](Smart-Routing.md)) |
+| Self-healing | `app/routing/selfheal.py` | Background probes, quarantine, alerts ([Self-healing](Self-Healing.md)) |
+| Response cache | `app/cache.py` | Exact and semantic answer cache ([Response cache](Response-Cache.md)) |
+| Guardrails, judge | `app/guardrails.py`, `app/judge.py` | Prompt-injection filter; background answer scoring ([Quality and safety](Quality-and-Safety.md)) |
+| Extensions | `app/extensions.py` | Anthropic-only fields (caching, thinking) carried through the internal format |
+| Responses API | `app/providers/openai_responses.py` | Chat completions ↔ OpenAI Responses API |
 
 ## Life of a request
 
@@ -76,15 +82,20 @@ sequenceDiagram
    tokens/min) with the estimate.
 5. **Reserve cost.** The estimated cost, priced at the chain's first target, is held
    against the budget so concurrent requests can't all spend the last dollar.
-6. **Route.** Walk the chain. For each target whose breaker allows it, call it, retry
+6. **Choose and check.** In order:
+   - The prompt-injection filter runs (per the tier's action).
+   - An A/B alias picks the arm.
+   - A cached alias may answer straight away.
+   - A policy alias builds this request's chain.
+7. **Route.** Walk the chain. For each target whose breaker allows it, call it, retry
    transient failures, and fall back on failures that aren't the client's fault.
-7. **Stream or return.** For streams, the first chunk is fetched *before* the 200 goes
+8. **Stream or return.** For streams, the first chunk is fetched *before* the 200 goes
    out, so everything up to then can still fail over.
-8. **Settle.**
+9. **Settle.**
    - Replace the token estimate with real usage, and the reserved cost with the real cost
      of the target that actually served.
    - Record metrics.
-   - Queue a usage row.
+   - Queue a usage row; store the answer in the cache, and hand a sample to the judge, if enabled.
    - Settling runs even if the client disconnects or the server is shutting down.
 
 ## Where state lives

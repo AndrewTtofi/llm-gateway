@@ -53,11 +53,15 @@ The gateway moves all of that into one place that the platform team owns:
 
 | | |
 |---|---|
-| **Routing** | Apps ask for an alias (`fast`, `smart`, `balanced`, `local`). `config/models.yaml` maps each alias to an ordered chain of models. To change models, edit YAML and run `make reload`; apps don't change. |
+| **Routing** | Apps ask for an alias (`fast`, `smart`, `balanced`, `local`, `frontier`). `config/models.yaml` maps each alias to an ordered chain of models. To change models, edit YAML and run `make reload`; apps don't change. |
+| **Smart routing** | `model: auto` builds the chain per request: the cheapest, best or fastest model that has what the request needs. Weighted, sticky **A/B variants** test a model or prompt change on part of the traffic ([guide](docs/wiki/Smart-Routing.md)). |
 | **Reliability** | Transient errors are retried with jittered backoff, then the next model in the chain is tried. A circuit breaker per model, shared across replicas in Redis, stops traffic to a provider that is down. |
 | **Streaming** | SSE relay. Errors before the first token can still fall back. After the first token, errors are reported in-band so a client never gets half of one answer spliced to another. When a client disconnects, the upstream request is cancelled. |
-| **Limits** | Every key has requests/min, tokens/min (estimated up front, corrected to actual usage afterwards) and a monthly USD budget. Admission is one atomic Redis Lua script, so limits hold across replicas. |
-| **Cost** | Each request is priced from `config/pricing.yaml`, including cached-token rates, and written to a Postgres usage log for per-key reports. `make prices` checks prices against public catalogs, and a weekly job flags drift for review. |
+| **Limits** | Every key has requests/min, tokens/min (estimated up front, corrected to actual usage afterwards) and a monthly USD budget. Keys can belong to **teams** with their own budget. Admission is one atomic Redis Lua script, so limits hold across replicas. |
+| **Cost** | Each request is priced from `config/pricing.yaml`, including cache read and write rates, long-context tiers and off-peak hours. It's written to a Postgres usage log for per-key and per-team reports. `make prices` checks prices against public catalogs, and a weekly job flags drift for review. |
+| **Caching** | An optional response cache per alias, exact or semantic (embeddings + Redis vector sets), scoped per key by default ([guide](docs/wiki/Response-Cache.md)). |
+| **Safety and quality** | A prompt-injection filter on user input and tool results (log, flag or block per tier), and LLM-as-judge scoring of a sample of answers ([guide](docs/wiki/Quality-and-Safety.md)). |
+| **Self-healing** | Background probes recover providers without spending users' requests. Bad keys and exhausted credit quarantine a provider. Breaker changes go to a Slack-compatible webhook ([guide](docs/wiki/Self-Healing.md)). |
 | **Choosing models** | `GET /v1/catalog` gives apps price, capabilities, a quality score and live latency, TTFT and error rate for every model they may use, so they can pick the cheapest or best fit ([guide](docs/wiki/Choosing-Models.md)). |
 | **Observability** | Prometheus metrics (never labelled by key), a Grafana dashboard provisioned as code, SLO burn-rate alerts, and JSON logs with a request id. Prompt content is never logged. |
 
@@ -69,7 +73,8 @@ The **[wiki](docs/wiki/Home.md)** explains every part in depth:
 - provider translation;
 - routing and circuit breakers;
 - keys, limits and budgets;
-- observability, configuration, the API, operations and security;
+- smart routing, the response cache, guardrails and the judge, self-healing;
+- observability, configuration, the API, operations, production deployment and security;
 - [a multi-app walkthrough](docs/wiki/Use-Case-Multi-App.md);
 - [subscriptions and provider terms](docs/wiki/Subscriptions-and-Terms.md).
 
@@ -187,6 +192,7 @@ Clients send an alias as `model`. Each alias maps to a chain of models (from `co
 | `balanced` | Claude Sonnet 5.5 → OpenAI → Ollama llama3.2 |
 | `local` | Ollama llama3.2 |
 | `frontier` | The top model from each company: Claude Fable 5.1 → Claude Opus 5.5 → GPT-6 Astra → Gemini 3.1 Pro → Grok 4.7 → Mistral Medium 3.5 → DeepSeek V4.1 Flash |
+| `auto` | Chosen per request: the cheapest configured model with quality ≥ 3 that can do what the request needs ([smart routing](docs/wiki/Smart-Routing.md)) |
 
 Clients can also call an exact `provider/model` if their tier allows it. `GET /v1/models`
 lists what the key may use.
@@ -217,10 +223,10 @@ claude
 ```
 
 The request is translated into the internal format, so the alias's whole fallback chain
-applies, including non-Claude models. Some features don't survive the translation yet:
+applies, including non-Claude models.
 
-- **Prompt caching:** `cache_control` is dropped.
-- **Extended thinking:** dropped.
+- **Prompt caching and extended thinking** pass through to Claude targets losslessly:
+  `cache_control` breakpoints, signed thinking blocks, and streamed thinking.
 - **Rejected with a 400:** server tools (web search, code execution) and document blocks.
 
 Claude Code asks for a large `max_tokens` (often 32 000) on every request. The rate limiter
@@ -269,7 +275,7 @@ a tier from `config/limits.yaml`:
 | Tier | Requests/min | Tokens/min | Budget/month | Aliases |
 |------|-------------|-----------|--------------|---------|
 | `dev` | 60 | 50 000 | $10 | `fast`, `local` |
-| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local`, `frontier` |
+| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local`, `frontier`, `auto` |
 
 Any field can be overridden per key:
 
@@ -349,8 +355,23 @@ python tests/load/report.py
 
 ## Deploying
 
-The gateway is a stateless container (`Dockerfile`). Run as many replicas as you need
-behind a load balancer, with managed Redis and Postgres.
+The gateway is a stateless container. Release images for amd64 and arm64 are published to
+`ghcr.io/andrewttofi/llm-gateway` on every `v*` tag, with an SBOM and signed provenance.
+
+**On one host:** `docker-compose.prod.yml` runs the whole stack:
+- Caddy with automatic TLS, with operator endpoints kept off the public site;
+- two hardened gateway replicas;
+- a migration job and Redis + Postgres;
+- daily `usage_log` retention;
+- optional Prometheus and Grafana, using a read-only database role.
+
+```bash
+cp .env.prod.example .env.prod   # fill in secrets (openssl rand -hex 32)
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+```
+
+See [Production deployment](docs/wiki/Production-Deployment.md). Anywhere else, run as many
+replicas as you need behind a load balancer, with managed Redis and Postgres:
 
 - **Health checks:**
   - `/healthz` is the liveness check.
@@ -380,9 +401,10 @@ is a subscriber.
 Anthropic API key, and requests are billed to the provider API keys configured in the
 gateway, not to a subscription.
 
-**Is it only for chat?** For now, yes: `/v1/chat/completions` and `/v1/messages` (both with
-tools, images and streaming), plus `/v1/models`. Embeddings and OpenAI's newer Responses API
-are not implemented.
+**Is it only for chat?** Yes: `/v1/chat/completions` and `/v1/messages` (both with tools,
+images and streaming), plus `/v1/models` and `/v1/catalog`. Behind the scenes the gateway
+uses OpenAI's Responses API where a model requires it, and embedding models for the
+semantic cache. There are no public embeddings, image-generation or audio endpoints.
 
 ## Design decisions
 
@@ -402,6 +424,16 @@ Each non-obvious choice has an ADR in [docs/decisions/](docs/decisions/):
 | [0010](docs/decisions/0010-anthropic-messages-inbound.md) | Inbound Anthropic Messages API, translated at the edge |
 | [0011](docs/decisions/0011-model-catalog-and-pricing-sync.md) | Model catalog, and price sync with review |
 | [0012](docs/decisions/0012-openai-compatible-provider-rules.md) | Per-provider parameter rules for OpenAI-compatible APIs, and the `frontier` alias |
+| [0013](docs/decisions/0013-lossless-anthropic-features.md) | Prompt caching and extended thinking through `/v1/messages` |
+| [0014](docs/decisions/0014-openai-responses-api.md) | OpenAI Responses API adapter |
+| [0015](docs/decisions/0015-cost-accuracy.md) | Long-context tiers, cache-write prices and off-peak pricing |
+| [0016](docs/decisions/0016-teams-key-edits-production.md) | Teams, key edits, body limits and production packaging |
+| [0017](docs/decisions/0017-policy-routing.md) | Policy routing (`model: auto`) |
+| [0018](docs/decisions/0018-response-cache.md) | Response cache, exact and semantic |
+| [0019](docs/decisions/0019-self-healing-alerts.md) | Self-healing: background probes, quarantine, alerts |
+| [0020](docs/decisions/0020-ab-routing.md) | A/B routing with weighted, sticky variants |
+| [0021](docs/decisions/0021-prompt-injection-filter.md) | Prompt-injection filter |
+| [0022](docs/decisions/0022-llm-as-judge.md) | LLM-as-judge sampling |
 
 ## Development
 

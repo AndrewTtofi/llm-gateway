@@ -29,11 +29,20 @@ eventually takes Prometheus down. Unknown models are labelled `_unknown`.
 | `gateway_cost_usd_total` | counter | target | Spend |
 | `gateway_fallbacks_total` | counter | alias, target | Served by a target other than the first |
 | `gateway_upstream_attempts_total` | counter | target, outcome | Every upstream call: `ok`, `transient:503`, `skipped:open`, … |
-| `gateway_rejected_total` | counter | reason | Rejected before routing: `unauthenticated`, `model_not_allowed`, `rate_limit`, `budget` |
+| `gateway_rejected_total` | counter | reason | Rejected before routing: `unauthenticated`, `model_not_allowed`, `rate_limit`, `budget`, `team_budget` |
 | `gateway_circuit_state` | gauge | target | 0 closed, 1 half-open, 2 open (polled from Redis every 15 s) |
 | `gateway_usage_log_dropped_total` | counter | — | Usage rows lost (queue full or Postgres down) |
 | `gateway_event_loop_lag_seconds` | histogram | — | How late a 0.5 s timer fires; blocking code or CPU saturation |
 | `gateway_auth_stale_served_total` | counter | — | Requests authenticated from a stale cached key during a Postgres outage |
+| `gateway_cache_total` | counter | mode, result | Response cache: `hit_exact`, `hit_semantic`, `miss`, `store`, `bypass`, `refresh` |
+| `gateway_variant_requests_total` | counter | alias, variant, status | Requests per A/B arm |
+| `gateway_variant_duration_seconds` | histogram | alias, variant | Latency per A/B arm |
+| `gateway_variant_cost_usd_total` | counter | alias, variant | Spend per A/B arm |
+| `gateway_guardrail_detections_total` | counter | rule, action | Prompt-injection detections by rule (`classifier` for classifier verdicts) |
+| `gateway_judge_score` | histogram | alias, variant | LLM-as-judge scores (1–5) |
+| `gateway_judge_total` | counter | alias, result | Judge samples: `scored`, `dropped`, `error`, `unparsable` |
+| `gateway_probes_total` | counter | target, result | Background probes: `recovered`, `failed`, `skipped`, `busy` |
+| `gateway_alerts_total` | counter | result | Alert webhook posts: `sent`, `failed` |
 
 ## Grafana dashboard
 
@@ -48,6 +57,9 @@ edit `config/grafana/build_dashboard.py`, run it, and commit both the script and
 | Reliability | Circuit-breaker timeline; upstream attempts by outcome |
 | Tokens and money | Tokens/min by target; spend/hour by target; rejections by reason |
 | Per key (Postgres) | Spend per key this month (table, revoked keys marked); spend per key over time |
+| Per team (Postgres) | Spend per team this month; spend per team over time |
+| A/B tests | Requests/s, error rate and p95 latency per arm; cost per request per arm (Postgres) |
+| Quality | Average judge score per alias and arm; judge labels this month (Postgres) |
 
 The per-key panels query Postgres directly. Per-key data never goes into Prometheus,
 because of the cardinality rule above.
@@ -74,7 +86,8 @@ One row per **admitted** request in `usage_log`:
 | `prompt_tokens`, `completion_tokens`, `cached_tokens` | From the provider's usage |
 | `usage_estimated` | True when the provider sent no usage, so counts are estimates |
 | `estimated_tokens` | The pre-call estimate, to check estimation quality |
-| `cost_usd` | `null` for an unpriced model |
+| `cost_usd` | `null` for an unpriced model; 0 for cache hits (`target` = `cache/exact` or `cache/semantic`) |
+| `team`, `variant` | The key's team and the A/B arm, at request time |
 | `latency_ms`, `ttft_ms` | `ttft_ms` for streams |
 
 Rows are written by a **background batch writer**. `submit()` never blocks or raises: if

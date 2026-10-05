@@ -22,6 +22,8 @@ Configuration has two layers:
 | `GATEWAY_STORES` | `external` | `memory` runs without Redis/Postgres (single process, tests) |
 | `GATEWAY_ENABLE_FAKE` | `false` | Loads the `fake` chaos provider and `dev_only` providers. **Never in production** |
 | `GRAFANA_RENDERER_TOKEN` | dev-only value | Shared by Grafana and its image renderer (screenshots profile) |
+| `MAX_BODY_BYTES` | 33554432 (32 MiB) | Larger request bodies get a 413 |
+| `ALERT_WEBHOOK_URL` | — | Slack-compatible webhook for breaker alerts ([Self-healing](Self-Healing.md)); the variable name is set by `self_healing.alert_webhook_env` |
 
 ## `config/models.yaml`
 
@@ -70,6 +72,27 @@ Order is preference. Mixing providers is what gives you resilience, since a sing
 provider's outage takes out every model it hosts. Ending a chain on a local model gives you
 a last resort that costs nothing.
 
+An alias has exactly one of three kinds of routing, plus optional extras:
+
+```yaml
+aliases:
+  fixed:   { chain: [anthropic/claude-sonnet-5-5, openai/gpt-6.1-sol] }
+  auto:    { policy: { optimize: cost, min_quality: 3 } }          # chosen per request
+  support:                                                        # A/B test
+    sticky: user
+    variants:
+      - { name: control, weight: 90, chain: [anthropic/claude-sonnet-5-5] }
+      - { name: haiku,   weight: 10, chain: [anthropic/claude-haiku-4-5-20251001], system_prefix: "Be brief." }
+    cache: { mode: exact, ttl_seconds: 3600 }                     # optional, any kind
+    judge: { sample_rate: 0.05, judge: smart }                    # optional, any kind
+```
+
+| Key | Page |
+|-----|------|
+| `policy`, `variants`, `sticky` | [Smart routing](Smart-Routing.md) |
+| `cache` | [Response cache](Response-Cache.md) |
+| `judge` | [Quality and safety](Quality-and-Safety.md#llm-as-judge-sampling) |
+
 ### Routing settings
 
 ```yaml
@@ -86,16 +109,38 @@ circuit_breaker:
   open_seconds: 30
   probe_timeout_seconds: 330       # > the slowest call
   redis_timeout_ms: 100
+self_healing:                      # background probes, quarantine, alerts (Self-Healing page)
+  probes: true
+  probe_interval_seconds: 10
+  probe_max_tokens: 16
+  quarantine_seconds: 600
+  quarantine_status: [401, 403, 404]
+  alert_webhook_env: ALERT_WEBHOOK_URL
+  alert_min_interval_seconds: 60
 ```
 
 ## `config/pricing.yaml`
 
 ```yaml
+checked: 2026-10-05                # bumped by `make prices ARGS=--write`
 currency: USD
-models:
-  anthropic/claude-sonnet-5-5: { input: 2.00, output: 10.00, cached_input: 0.20 }   # $ per 1M tokens
-  ollama/llama3.2:3b:          { input: 0,    output: 0 }
+models:                            # $ per 1M tokens
+  anthropic/claude-sonnet-5-5: { input: 2.00, output: 10.00, cached_input: 0.20, cache_write: 2.50, cache_write_1h: 4.00 }
+  openai/gpt-6-astra:          { input: 10.00, output: 50.00, cached_input: 1.00, cache_write: 12.50,
+                                 tiers: [{ above_prompt_tokens: 272000, input: 20.00, output: 75.00, cached_input: 2.00 }] }
+  deepseek/deepseek-flash:     { input: 0.30, output: 1.20, cached_input: 0.006,
+                                 off_peak: { multiplier: 0.5, peak_utc: ["01:00-04:00", "06:00-10:00"], peak_days: [mon, tue, wed, thu, fri] } }
+  ollama/llama3.2:3b:          { input: 0, output: 0 }
 ```
+
+| Field | Meaning |
+|-------|---------|
+| `cached_input` | Prompt-cache reads; missing = billed as input |
+| `cache_write`, `cache_write_1h` | Prompt-cache writes (5-minute and 1-hour); missing = billed as input |
+| `tiers` | Above `above_prompt_tokens`, these prices apply to the whole request |
+| `off_peak` | Outside the UTC peak windows (end exclusive; `24:00` allowed), every price × `multiplier` |
+
+Prices must be finite and non-negative; the gateway refuses to load the file otherwise.
 
 Keys are targets (`provider/model`). Prices change: `make prices` compares them with public
 catalogs and proposes updates for review ([Choosing models](Choosing-Models.md#keeping-prices-current)).
@@ -125,14 +170,29 @@ tiers:
     tokens_per_minute: 200000
     monthly_budget_usd: 100
     allowed_aliases: [fast, balanced, smart, local]   # or provider/model names, or "*"
+    injection: log                 # prompt-injection filter: off | log | flag | block
+teams:                             # optional; keys with `team` also count against its budget
+  support: { monthly_budget_usd: 500 }
 ```
 
-Per-key overrides (`POST /admin/keys`) take precedence over the tier.
+Per-key overrides (`POST /admin/keys`, `PATCH /admin/keys/{id}`) take precedence over the tier.
+
+## `config/guardrails.yaml`
+
+```yaml
+threshold: 1.0
+rules:
+  - { name: ignore_instructions, pattern: '\b(ignore|disregard)\b.{0,40}\binstructions?\b', weight: 1.0, applies_to: [user, tool] }
+classifier: { alias: fast, when: suspicious, timeout_seconds: 5, max_chars: 4000 }   # optional
+```
+
+Prompt-injection rules. See [Quality and safety](Quality-and-Safety.md#prompt-injection-filter).
+Patterns must compile; names are short lower-case slugs.
 
 ## Reloading
 
-`models.yaml`, `pricing.yaml`, `catalog.yaml` and `limits.yaml` reload together without a restart, in any of
-three ways:
+`models.yaml`, `pricing.yaml`, `catalog.yaml`, `limits.yaml` and `guardrails.yaml` reload
+together without a restart, in any of three ways:
 
 - `make reload`, which calls `POST /admin/reload`;
 - `POST /admin/reload` directly;
