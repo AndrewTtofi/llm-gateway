@@ -42,6 +42,7 @@ class EffectiveLimits:
     tokens_per_minute: int
     monthly_budget_usd: float
     allowed_aliases: tuple[str, ...]
+    concurrent_requests: int = 0  # in flight per replica; 0 = no limit
 
     def allows(self, model: str) -> bool:
         return "*" in self.allowed_aliases or model in self.allowed_aliases
@@ -76,6 +77,7 @@ class ApiKey:
                 else tier.monthly_budget_usd
             ),
             allowed_aliases=tuple(allowed if allowed is not None else tier.allowed_aliases),
+            concurrent_requests=tier.concurrent_requests,
         )
 
     def public(self) -> dict[str, Any]:

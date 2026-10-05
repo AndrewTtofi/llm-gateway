@@ -19,8 +19,9 @@ About +2.6 ms p50 and +3.8 ms p95 per request, measured. Time to first token, wh
 notice, is dominated by the provider. See [Testing and benchmarks](Testing-and-Benchmarks.md).
 
 **What happens if Redis goes down?**
-Requests keep flowing. Rate limits, budgets and breakers fail open until Redis returns. See
-[Architecture → Degraded modes](Architecture.md#degraded-modes).
+Requests keep flowing. Rate limits and breakers fail open until Redis returns. Budgets
+keep using each replica's last known spend, and spend is queued and written when Redis is
+back. See [Architecture → Degraded modes](Architecture.md#degraded-modes).
 
 **What if Postgres goes down?**
 Keys seen in the last 10 minutes keep working from cache. New or unknown keys get 503.
@@ -34,6 +35,17 @@ was open, so the next one in the chain served. `GET /admin/providers` shows brea
 The limiter reserves `max_tokens` up front and refunds the unused part when the request
 finishes. A client sending `max_tokens: 32000` uses a lot of tokens/min while requests are in
 flight. Lower `max_tokens`, or raise the key's `tokens_per_minute`.
+
+**Why did I get `429 concurrency_limit_exceeded`?**
+The key already has its tier's `concurrent_requests` in flight on that replica (dev 10,
+standard 50). It stops one app from holding every provider connection. Wait for a request
+to finish (`retry-after: 1`), or move the key to a tier with a higher limit.
+
+**I cancelled a request. Why was it billed?**
+The provider had already started on it and bills what it generated, including reasoning it
+never streams. Without the provider's usage, the gateway bills what it relayed. It also
+bills at least `output_tokens_per_second` (100) for each second the request ran, up to
+`max_tokens`. See [Keys, limits and budgets](Keys-Limits-and-Budgets.md#when-the-provider-reports-no-usage).
 
 **Why can't a stream fall back after it starts?**
 The client has already received part of an answer. Switching models would join two answers

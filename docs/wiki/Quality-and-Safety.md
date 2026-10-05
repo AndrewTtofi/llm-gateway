@@ -18,12 +18,23 @@ every prompt, so it checks them.
 
   Trivial obfuscation doesn't slip past. Punctuation inside words (`i.g.n.o.r.e`) is not
   undone.
-- **Bounded work:** the scan covers the last `max_chars_per_message` (20 000) characters of
-  each message, up to `max_chars_total` (200 000) per request, so huge prompts can't stall
-  the gateway.
+- **Bounded work:** each message is scanned up to `max_chars_per_message` (20 000)
+  characters, newest messages first, up to `max_chars_total` (200 000) per request, so huge
+  prompts can't stall the gateway. A longer message is scanned at **both ends**, half the
+  budget each, so a payload can't hide by being followed (or preceded) by filler.
 - **Roles:** by default the rules apply to **user messages and tool results**. Tool results
-  are where *indirect* injection hides. System messages are the operator's and aren't
-  scanned.
+  are where *indirect* injection hides. **Tool definitions** are scanned as tool text too:
+  their descriptions can come from a third-party MCP server. System messages are the
+  operator's and aren't scanned.
+- **Unscanned text:** text over the budget is counted as `unscanned`
+  (`gateway_guardrail_detections_total{rule="unscanned"}`). `unscanned` in guardrails.yaml
+  decides what it means (ADR 0023):
+
+  | Value | Effect |
+  |-------|--------|
+  | `allow` | Nothing |
+  | `suspicious` | Default. The classifier is asked, if configured. Tiers set to `flag` get `x-gateway-guardrail: unscanned` |
+  | `block` | Tiers set to `injection: block` also refuse requests with unscanned text. Strict: very long conversations are refused |
 - **Detection:** a request scoring `threshold` (default 1.0) or more is a detection. One
   strong signal is enough; weak ones add up.
 
@@ -73,7 +84,8 @@ whether the text is an injection attempt.
 - **Can only add:** only "INJECTION" adds a detection; "SAFE" can't clear a rule match. So
   an attacker who manages to fool the classifier gains nothing.
 - **Failure:** errors fail open.
-- **Cost:** each check is one small request, billed to your provider account.
+- **Cost:** each check is one small request, billed to your provider account and not to the
+  caller's key. It's bounded by the caller's requests per minute.
 
 ### What it can't do
 

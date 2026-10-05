@@ -8,6 +8,7 @@ here rather than holding their own reference.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from redis.asyncio import Redis
@@ -21,6 +22,7 @@ from app.db import make_engine, make_sessions
 from app.judge import Judge, MemoryScoreStore, PostgresScoreStore
 from app.observability.usage import MemoryUsageSink, PostgresUsageWriter, UsageSink
 from app.ratelimit import (
+    Concurrency,
     Limiter,
     MemoryLimiter,
     MemorySpend,
@@ -34,17 +36,22 @@ from app.routing.breaker import MemoryBreakerStore, RedisBreakerStore
 keys: CachedKeys = CachedKeys(MemoryKeyStore())
 limiter: Limiter = MemoryLimiter()
 spend: SpendTracker = MemorySpend()
+concurrency = Concurrency()  # per replica, so never replaced (ADR 0023)
 usage: UsageSink = MemoryUsageSink()
 response_cache: CacheStore = MemoryCacheStore()  # ADR 0018
 judge: Judge = Judge(MemoryScoreStore())  # ADR 0022
 _writer: PostgresUsageWriter | None = None
 
+log = logging.getLogger(__name__)
+
 _redis: Redis | None = None
+_cache_redis: Redis | None = None  # CACHE_REDIS_URL, when the cache has its own
 _engine: AsyncEngine | None = None
 
 
 async def start() -> None:
     global keys, limiter, spend, usage, response_cache, judge, _redis, _engine, _writer, started
+    global _cache_redis
     if config.settings.gateway_stores == "memory":
         router.store = MemoryBreakerStore()
         judge.start()
@@ -61,7 +68,11 @@ async def start() -> None:
     _writer.start()
     usage = _writer
     limiter = RedisLimiter(_redis)
-    response_cache = RedisCacheStore(_redis)
+    if config.settings.cache_redis_url:
+        _cache_redis = Redis.from_url(
+            config.settings.cache_redis_url, socket_timeout=timeout, socket_connect_timeout=timeout
+        )
+    response_cache = RedisCacheStore(_cache_redis or _redis)
     judge = Judge(PostgresScoreStore(sessions))
     judge.start()
     spend = RedisSpend(_redis)
@@ -77,7 +88,7 @@ async def start() -> None:
 
 
 async def stop() -> None:
-    global _redis, _engine, _writer, _deps_task, started
+    global _redis, _cache_redis, _engine, _writer, _deps_task, started
     started = False
     await judge.stop()
     if _deps_task is not None:
@@ -89,12 +100,52 @@ async def stop() -> None:
     if _redis is not None:
         await _redis.aclose()
         _redis = None
+    if _cache_redis is not None:
+        await _cache_redis.aclose()
+        _cache_redis = None
     if _engine is not None:
         await _engine.dispose()
         _engine = None
 
 
 started = False  # set once start() has finished
+
+
+KEYS_CHANNEL = "gateway:keys-changed"
+
+
+async def announce_key_change() -> None:
+    """Tell every replica to drop its cached keys now (revoked or edited), instead of
+    within the cache's 30 s (ADR 0023). Best effort: the TTL still bounds it."""
+    if _redis is None:
+        return
+    try:
+        await _redis.publish(KEYS_CHANNEL, "1")
+    except Exception as exc:
+        log.warning("couldn't announce a key change: %s", type(exc).__name__)
+
+
+async def watch_key_changes() -> None:
+    """Drop cached keys when another replica announces a change. Its own connection: a
+    subscriber waits indefinitely, which the request path's short socket timeout forbids."""
+    if config.settings.gateway_stores == "memory":
+        return
+    while True:
+        client = Redis.from_url(config.settings.redis_url, socket_connect_timeout=2)
+        try:
+            async with client.pubsub() as ps:
+                await ps.subscribe(KEYS_CHANNEL)
+                keys.invalidate()  # changes missed while not subscribed
+                async for message in ps.listen():
+                    if message.get("type") == "message":
+                        keys.invalidate()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("key change subscription lost: %s", type(exc).__name__)
+        finally:
+            await client.aclose()
+        await asyncio.sleep(5)
 
 
 def redis_client() -> Redis | None:

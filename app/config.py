@@ -15,6 +15,9 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
+    # Optional separate Redis for the response cache (ADR 0023): clients decide how much it
+    # grows, so in production it gets its own memory cap and eviction, away from limits.
+    cache_redis_url: str = ""
     database_url: str = "postgresql+asyncpg://gateway:gateway@localhost:5432/gateway"
     gateway_admin_key: str = ""
     log_level: str = "INFO"
@@ -29,6 +32,11 @@ class Settings(BaseSettings):
     # Largest request body accepted (413 above it). Base64 images make bodies big:
     # Anthropic allows up to 32 MB per request.
     max_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    # A streaming client that doesn't take a chunk within this long is treated as gone, so
+    # it can't hold an upstream connection open by reading slowly (ADR 0023). 0 = no limit.
+    client_write_timeout_seconds: float = Field(default=30, ge=0)
+    # /docs, /redoc and /openapi.json. The schema lists the admin routes: off in production.
+    docs_enabled: bool = True
     # Prometheus metrics on their own port (internal only). 0 = serve /metrics on the API port.
     metrics_port: int = 9100
 
@@ -65,6 +73,20 @@ class CacheConfig(BaseModel):
     embedding: str | None = None  # provider/model (OpenAI-compatible /embeddings), semantic only
     max_entries: int = Field(default=10_000, ge=1)  # per scope and alias (semantic index)
     max_entry_bytes: int = Field(default=256 * 1024, ge=1024)
+    # Semantic matching in a shared scope serves one caller's answer for another caller's
+    # *different* question, so a caller can plant an answer for others (ADR 0023). Allowed
+    # only when set explicitly.
+    shared_semantic: bool = False
+
+    @model_validator(mode="after")
+    def _shared_semantic_is_explicit(self) -> CacheConfig:
+        if self.mode == "semantic" and self.scope != "key" and not self.shared_semantic:
+            raise ValueError(
+                f"semantic caching with scope {self.scope!r} lets one caller's answer reach "
+                "other callers' similar questions, including a planted one. Use scope: key, "
+                "mode: exact, or set shared_semantic: true for public content (ADR 0023)"
+            )
+        return self
 
 
 JUDGE_LABELS = ("good", "incorrect", "incomplete", "off_topic", "unsafe", "verbose", "refused")
@@ -215,6 +237,9 @@ class Registry(BaseModel):
 class Estimation(BaseModel):
     chars_per_token: float = Field(default=4, gt=0)
     default_completion_tokens: int = Field(default=1024, ge=0)
+    # Assumed generation speed, for requests cut off before the provider reported usage
+    # (hang-up, timeout): billed at least this many output tokens per second (ADR 0023).
+    output_tokens_per_second: float = Field(default=100, ge=0)
 
 
 class Tier(BaseModel):
@@ -224,6 +249,8 @@ class Tier(BaseModel):
     allowed_aliases: list[str]
     # Prompt-injection filter (ADR 0021): what to do when a request looks like one.
     injection: Literal["off", "log", "flag", "block"] = "log"
+    # Requests in flight per key and replica (ADR 0023); 0 = no limit.
+    concurrent_requests: int = Field(default=20, ge=0)
 
 
 class Team(BaseModel):
@@ -410,9 +437,14 @@ class Guardrails(BaseModel):
     """config/guardrails.yaml: prompt-injection heuristics (ADR 0021)."""
 
     threshold: float = Field(default=1.0, gt=0)  # score at which a request counts as injection
-    # Bound the work per request: the last N characters of each message, and of all of them.
+    # Bound the work per request: N characters of each message (both ends of a longer
+    # one), and of all of them, newest first.
     max_chars_per_message: int = Field(default=20_000, ge=100)
     max_chars_total: int = Field(default=200_000, ge=1000)
+    # Text over those limits isn't scanned (ADR 0023). allow: ignore it. suspicious: count
+    # it, and ask the classifier if there is one. block: tiers with `injection: block`
+    # also refuse requests with unscanned text.
+    unscanned: Literal["allow", "suspicious", "block"] = "suspicious"
     rules: list[GuardRule] = []
     classifier: Classifier | None = None
 

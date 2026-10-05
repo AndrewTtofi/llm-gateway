@@ -51,7 +51,7 @@ def to_responses(
         if request.get(name) is not None:
             out[name] = request[name]
     if user := request.get("user"):
-        out["safety_identifier"] = str(user)
+        out["safety_identifier"] = str(user)  # already a hash: shape_request hashes `user`
     reasoning: dict[str, Any] = {}
     if effort := request.get("reasoning_effort"):
         reasoning["effort"] = effort

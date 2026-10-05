@@ -418,7 +418,10 @@ async def lookup(
 ) -> tuple[dict[str, Any] | None, Lookup | None, str]:
     """→ (cached answer or None, the lookup for storing later, result label).
 
-    `mode`: "" (normal), "bypass" (no read, no write), "refresh" (no read, write)."""
+    `mode`: "" (normal), "bypass" (no read, no write), "refresh" (no read, write).
+    In a shared scope a client can't overwrite what others get: refresh acts as bypass."""
+    if mode == "refresh" and cfg.scope != "key":
+        mode = "bypass"
     if mode == "bypass" or not cacheable(request):
         label = "bypass" if mode == "bypass" else "uncacheable"
         metrics.cache.labels(cfg.mode, label).inc()

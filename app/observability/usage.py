@@ -10,12 +10,21 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from sqlalchemy import insert
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db import UsageRow
 from app.observability import metrics
 
 log = logging.getLogger(__name__)
+BIGINT_MAX = 2**63 - 1
+
+
+def _outage(exc: BaseException) -> bool:
+    """The database is unreachable (as opposed to rejecting this one row)."""
+    if isinstance(exc, OperationalError | InterfaceError | OSError | TimeoutError):
+        return True
+    return isinstance(exc, DBAPIError) and bool(exc.connection_invalidated)
 
 
 @dataclass
@@ -41,9 +50,13 @@ class UsageRecord:
     estimated_tokens: int | None = None  # what the limiter reserved before the call
     team: str | None = None
     variant: str | None = None  # A/B arm (ADR 0020)
+    client_request_id: str | None = None  # the caller's x-request-id, kept apart (ADR 0023)
 
     def row(self) -> dict[str, Any]:
         out = asdict(self)
+        for col in ("prompt_tokens", "completion_tokens", "cached_tokens", "estimated_tokens"):
+            if isinstance(out[col], int):
+                out[col] = max(0, min(out[col], BIGINT_MAX))
         # Columns are bounded; one oversized value must never sink a whole batch.
         for col, limit in (
             ("request_id", 64),
@@ -53,6 +66,7 @@ class UsageRecord:
             ("error_code", 100),
             ("team", 100),
             ("variant", 32),
+            ("client_request_id", 64),
         ):
             if isinstance(out[col], str):
                 out[col] = out[col][:limit]
@@ -141,7 +155,8 @@ class PostgresUsageWriter:
                 log.error("usage row dropped: %s", type(exc).__name__)
                 return
         # The batch failed. Maybe one bad row, maybe Postgres is down: try the rows one by
-        # one, and stop after a few consecutive failures (then it's the database).
+        # one. A row Postgres rejects costs only that row; a few consecutive connection
+        # failures mean the database is down, and the rest of the batch is dropped.
         failures = 0
         for i, row in enumerate(rows):
             try:
@@ -149,6 +164,9 @@ class PostgresUsageWriter:
                 failures = 0
             except Exception as exc:
                 metrics.usage_dropped.inc()
+                if not _outage(exc):
+                    log.error("usage row rejected: %s", type(exc).__name__)
+                    continue
                 failures += 1
                 if failures >= self.MAX_CONSECUTIVE_FAILURES:
                     metrics.usage_dropped.inc(len(rows) - i - 1)

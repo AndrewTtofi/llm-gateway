@@ -11,6 +11,7 @@ sqlalchemy[asyncio]>=2.1
 asyncpg>=0.31
 alembic>=1.20
 anthropic>=1.11
+httpx2>=2.13  # imported directly (the Anthropic SDK's transport), so pinned directly
 anyio>=4.15
 prometheus-client>=0.26
 structlog>=26.1

@@ -118,7 +118,7 @@ The design favours availability: a gateway that is down takes every AI feature d
 
 | Failure | Behaviour | Trade-off |
 |---------|-----------|-----------|
-| Redis down | Rate limits, budgets and breakers **fail open**. Redis calls are skipped for 5 s after an error, so requests don't each wait on a timeout | Limits aren't enforced until Redis returns |
+| Redis down | Rate limits and breakers **fail open**. Budgets use each replica's last known spend; spend is queued and written when Redis is back. Redis calls are skipped for 5 s after an error, so requests don't each wait on a timeout | Rate limits aren't enforced until Redis returns (`GatewayRedisFailingOpen` pages) |
 | Postgres down | Recently seen keys keep working from cache (stale-if-error, up to 10 min). Usage rows are dropped and counted (`gateway_usage_log_dropped_total`) | Unknown keys get 503 `auth_unavailable`; some usage history is lost |
 | One provider down | Its breaker opens and traffic goes to the next target | Answers come from a different model |
 | All targets down | 503 `all_providers_unavailable`, retryable | — |

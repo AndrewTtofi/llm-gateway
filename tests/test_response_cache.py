@@ -8,7 +8,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from app import cache, main, services
+from app import cache, config, main, services
 from app.config import CacheConfig, Registry
 from tests.conftest import UPSTREAM, add_key
 from tests.test_chat import COMPLETION, chunk, sse
@@ -288,6 +288,11 @@ def test_team_scope_shares_within_a_team(
 ) -> None:
     respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
     monkeypatch.setattr(cached, "scope", "team")
+    teams = {
+        "web": config.Team(monthly_budget_usd=100),
+        "data": config.Team(monthly_budget_usd=100),
+    }
+    monkeypatch.setattr(config, "limits", config.limits.model_copy(update={"teams": teams}))
     from app.auth import hash_key
 
     keys = [add_key(allowed_aliases=["*"]) for _ in range(3)]

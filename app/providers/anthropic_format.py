@@ -12,14 +12,13 @@ The main differences being bridged:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from typing import Any
 
 from anthropic import transform_schema
 
-from app.providers.base import UnsupportedRequest
+from app.providers.base import UnsupportedRequest, hashed_user
 
 # finish_reason for each Anthropic stop_reason.
 FINISH_REASON = {
@@ -34,6 +33,9 @@ FINISH_REASON = {
 
 IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 IMAGE_TYPE_ALIASES = {"image/jpg": "image/jpeg"}
+
+# Anthropic requires max_tokens; sent when neither the client nor the config sets one.
+DEFAULT_MAX_TOKENS = 4096
 
 # OpenAI reasoning_effort → Anthropic output_config.effort.
 EFFORT = {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}
@@ -122,7 +124,7 @@ def _to_anthropic(
 
     if user := request.get("user"):
         # Clients often put an email here; Anthropic wants an opaque id. Hash it.
-        out["metadata"] = {"user_id": hashlib.sha256(str(user).encode()).hexdigest()}
+        out["metadata"] = {"user_id": hashed_user(user)}
     if isinstance(thinking := request.get("thinking"), dict):
         out["thinking"] = thinking  # extension field from /v1/messages clients (ADR 0013)
     if system_parts:

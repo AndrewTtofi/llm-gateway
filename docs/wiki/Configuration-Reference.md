@@ -23,6 +23,9 @@ Configuration has two layers:
 | `GATEWAY_ENABLE_FAKE` | `false` | Loads the `fake` chaos provider and `dev_only` providers. **Never in production** |
 | `GRAFANA_RENDERER_TOKEN` | dev-only value | Shared by Grafana and its image renderer (screenshots profile) |
 | `MAX_BODY_BYTES` | 33554432 (32 MiB) | Larger request bodies get a 413 |
+| `CLIENT_WRITE_TIMEOUT_SECONDS` | 30 | A streaming client that doesn't take a chunk this long is disconnected; 0 = no limit |
+| `DOCS_ENABLED` | `true` | `/docs`, `/redoc`, `/openapi.json`. Set `false` in production: the schema lists the admin API |
+| `CACHE_REDIS_URL` | — | A separate Redis for the response cache (production: capped, LRU). Unset = `REDIS_URL` |
 | `ALERT_WEBHOOK_URL` | — | Slack-compatible webhook for breaker alerts ([Self-healing](Self-Healing.md)); the variable name is set by `self_healing.alert_webhook_env` |
 
 ## `config/models.yaml`
@@ -53,7 +56,8 @@ providers:
 | `models` | Known models with per-model capability flags (Anthropic), or failure profiles (`fake`) |
 | `defaults` | Flags for models not listed |
 | `stream_usage: false` | (openai type) don't send `stream_options`; usage is taken from the stream if the provider sends it, otherwise estimated |
-| `params` | (openai type) `allow` / `drop` / `rename` / `values`, per provider and per model. See [Providers and translation → Parameter rules](Providers-and-Translation.md#parameter-rules) |
+| `params` | (openai type) `allow` / `drop` / `rename` / `values` / `pass`, per provider and per model. See [Providers and translation → Parameter rules](Providers-and-Translation.md#parameter-rules) |
+| `default_max_tokens` | The output limit the provider applies when the client sends none. Anthropic requires one (4096 unless set); for others, set it if the provider's default is large, so the token estimate matches |
 | `tools: false`, `vision: false` | (openai type, per model) requests needing them skip this target |
 | `dev_only: true` | Loaded only with `GATEWAY_ENABLE_FAKE=1` (e.g. the benchmark mock) |
 
@@ -84,6 +88,7 @@ aliases:
       - { name: control, weight: 90, chain: [anthropic/claude-sonnet-5-5] }
       - { name: haiku,   weight: 10, chain: [anthropic/claude-haiku-4-5-20251001], system_prefix: "Be brief." }
     cache: { mode: exact, ttl_seconds: 3600 }                     # optional, any kind
+    # semantic + scope team/global also needs shared_semantic: true (ADR 0023)
     judge: { sample_rate: 0.05, judge: smart }                    # optional, any kind
 ```
 
@@ -163,7 +168,8 @@ shows prices only. See [Choosing models](Choosing-Models.md).
 ```yaml
 estimation:
   chars_per_token: 4               # pre-call token estimate
-  default_completion_tokens: 1024  # assumed output when the client sends no max_tokens
+  default_completion_tokens: 1024  # assumed output when the client and provider set none
+  output_tokens_per_second: 100    # billing floor for requests cut off without usage (ADR 0023)
 tiers:
   standard:
     requests_per_minute: 300
@@ -171,16 +177,22 @@ tiers:
     monthly_budget_usd: 100
     allowed_aliases: [fast, balanced, smart, local]   # or provider/model names, or "*"
     injection: log                 # prompt-injection filter: off | log | flag | block
+    concurrent_requests: 50        # in flight per key and replica; 0 = no limit (default 20)
 teams:                             # optional; keys with `team` also count against its budget
   support: { monthly_budget_usd: 500 }
 ```
 
-Per-key overrides (`POST /admin/keys`, `PATCH /admin/keys/{id}`) take precedence over the tier.
+Per-key overrides (`POST /admin/keys`, `PATCH /admin/keys/{id}`) take precedence over the tier
+for rate limits, budget and allowed aliases. `injection` and `concurrent_requests` are set
+per tier only.
 
 ## `config/guardrails.yaml`
 
 ```yaml
 threshold: 1.0
+max_chars_per_message: 20000       # scanned per message (both ends of a longer one)
+max_chars_total: 200000            # scanned per request, newest messages first
+unscanned: suspicious              # text over the budget: allow | suspicious | block (ADR 0023)
 rules:
   - { name: ignore_instructions, pattern: '\b(ignore|disregard)\b.{0,40}\binstructions?\b', weight: 1.0, applies_to: [user, tool] }
 classifier: { alias: fast, when: suspicious, timeout_seconds: 5, max_chars: 4000 }   # optional

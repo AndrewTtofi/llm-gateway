@@ -73,3 +73,27 @@ groups:
         for: 5m
         labels: { severity: ticket }
         annotations: { summary: "Event loop blocked or saturated (p99 lag {{ $value | humanizeDuration }})" }
+
+  # Security and business-logic signals (ADR 0023).
+  - name: gateway-safety
+    rules:
+      - alert: GatewayRedisFailingOpen
+        # Rate limits allow everything and budgets use the last known spend meanwhile.
+        expr: sum by (what) (increase(gateway_redis_fail_open_total[5m])) > 0
+        for: 2m
+        labels: { severity: page }
+        annotations: { summary: "{{ $labels.what }} is running without Redis (failing open)" }
+      - alert: GatewayAuthServedStale
+        expr: increase(gateway_auth_stale_served_total[5m]) > 0
+        for: 2m
+        labels: { severity: ticket }
+        annotations: { summary: "API keys are checked from cache: the key store (Postgres) is down" }
+      - alert: GatewayInjectionSpike
+        expr: sum(increase(gateway_guardrail_detections_total{rule!="unscanned"}[15m])) > 50
+        labels: { severity: ticket }
+        annotations: { summary: "{{ $value }} prompt-injection detections in 15 minutes" }
+      - alert: GatewayConcurrencyRejections
+        # One key holding many requests open: a runaway client, or someone starving others.
+        expr: sum(increase(gateway_rejected_total{reason="concurrency"}[10m])) > 100
+        labels: { severity: ticket }
+        annotations: { summary: "Keys are hitting their concurrent-request limit ({{ $value }} in 10 min)" }

@@ -58,11 +58,18 @@ attempts = Counter(
 )
 rejected = Counter(
     "gateway_rejected_total", "Requests rejected before routing.", ["reason"], registry=registry
-)  # unauthenticated / model_not_allowed / rate_limit / budget
+)  # unauthenticated / model_not_allowed / rate_limit / budget / concurrency …
 breaker = Gauge(
     "gateway_circuit_state",
     "Circuit breaker per target: 0 closed, 1 half-open, 2 open.",
     ["target"],
+    registry=registry,
+)
+fail_open = Counter(
+    "gateway_redis_fail_open_total",
+    "Calls answered without Redis while it was unreachable: rate limits allow, budgets "
+    "read the last known spend, and spend is queued until Redis is back (ADR 0023).",
+    ["what"],
     registry=registry,
 )
 usage_dropped = Counter(
@@ -120,7 +127,8 @@ variant_cost = Counter(
 )
 guardrail = Counter(
     "gateway_guardrail_detections_total",
-    "Prompt-injection detections by rule (from config) and action (ADR 0021).",
+    "Prompt-injection detections by rule (from config) and action (ADR 0021); rule "
+    "\"unscanned\" counts requests with text over the scan budget (ADR 0023).",
     ["rule", "action"],
     registry=registry,
 )

@@ -1,0 +1,18 @@
+# Keep the build context to what the image needs: no secrets, no history, no caches.
+.env
+.env.*
+!.env.example
+.git
+.github
+.claude
+.venv
+**/__pycache__
+.mypy_cache
+.pytest_cache
+.ruff_cache
+tests
+docs
+tools
+scripts
+*.md
+docker-compose*.yml

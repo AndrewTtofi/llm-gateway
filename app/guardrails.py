@@ -11,6 +11,10 @@ tier's `injection` setting decides the action:
 An optional classifier model is asked about borderline requests (or every request). It
 can only add detections: a "SAFE" answer never clears a rule match, so injecting the
 classifier gains nothing.
+
+The scan is bounded (characters per message and per request). A long message is scanned
+at both ends, and tool definitions are scanned like tool results. Text left unscanned is
+reported, and `unscanned` in guardrails.yaml decides whether that is suspicious (ADR 0023).
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ class Verdict:
     score: float = 0.0
     rules: list[str] = field(default_factory=list)
     classifier: str | None = None  # "injection", "safe", "error", or None (not asked)
+    unscanned: int = 0  # characters over the scan budget, not looked at
 
     def detected(self, threshold: float) -> bool:
         return self.score >= threshold or self.classifier == "injection"
@@ -71,9 +76,26 @@ def _compiled(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE | re.MULTILINE)
 
 
-def _texts(messages: list[Any]) -> list[tuple[str, str]]:
-    """(role, text) for every message; tool results keep their own role."""
+def _strings(value: Any, depth: int = 0) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if depth > 16:
+        return []
+    if isinstance(value, dict):
+        return [t for v in value.values() for t in _strings(v, depth + 1)]
+    if isinstance(value, list):
+        return [t for v in value for t in _strings(v, depth + 1)]
+    return []
+
+
+def _texts(messages: list[Any], tools: Any = None) -> list[tuple[str, str]]:
+    """(role, text) in conversation order; tool results keep their own role. Tool
+    definitions come first, as role "tool": their descriptions can come from a third
+    party (an MCP server), like tool results."""
     out = []
+    for tool in tools if isinstance(tools, list) else []:
+        if text := "\n".join(_strings(tool)):
+            out.append(("tool", text))
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -89,17 +111,27 @@ def _texts(messages: list[Any]) -> list[tuple[str, str]]:
     return out
 
 
-def scan(messages: list[Any], rules: Guardrails) -> Verdict:
+def _ends(text: str, limit: int) -> tuple[str, int]:
+    """At most `limit` characters of `text` (all of it, or its start and its end) and how
+    many that is. A payload at the start of a long message is caught like one at the end."""
+    if len(text) <= limit:
+        return text, len(text)
+    if limit <= 0:
+        return "", 0
+    head = limit // 2
+    return text[:head] + "\n" + text[len(text) - (limit - head) :], limit
+
+
+def scan(messages: list[Any], rules: Guardrails, tools: Any = None) -> Verdict:
     verdict = Verdict()
-    # Bounded work per request: the end of each message (where new input usually is) and
-    # the most recent messages overall.
+    # Bounded work per request: both ends of each message, newest messages first.
     budget, texts = rules.max_chars_total, []
-    for role, text in reversed(_texts(messages)):
-        if budget <= 0:
-            break
-        part = text[-min(rules.max_chars_per_message, budget) :]
-        budget -= len(part)
-        texts.append((role, normalise(part)))
+    for role, text in reversed(_texts(messages, tools)):
+        part, used = _ends(text, min(rules.max_chars_per_message, budget))
+        budget -= used
+        verdict.unscanned += len(text) - used
+        if part:
+            texts.append((role, normalise(part)))
     for rule in rules.rules:
         pattern = _compiled(rule.pattern)
         if any(role in rule.applies_to and pattern.search(text) for role, text in texts):
@@ -144,16 +176,20 @@ async def classify(messages: list[Any], rules: Guardrails) -> str:
     )
 
 
-async def check(messages: list[Any], action: str) -> Verdict | None:
+async def check(messages: list[Any], action: str, tools: Any = None) -> Verdict | None:
     """Scan a request (None when the tier's action is `off`). Logs and counts detections;
     the caller applies `flag` / `block`."""
     if action == "off":
         return None
     rules = config.guardrails
-    verdict = scan(messages, rules)
+    verdict = scan(messages, rules, tools)
+    if verdict.unscanned and rules.unscanned != "allow":
+        metrics.guardrail.labels("unscanned", action).inc()
     clf = rules.classifier
     if clf is not None:
-        borderline = 0 < verdict.score < rules.threshold
+        borderline = 0 < verdict.score < rules.threshold or (
+            verdict.unscanned > 0 and rules.unscanned != "allow"
+        )
         if clf.when == "always" or borderline:
             verdict.classifier = await classify(messages, rules)
     if verdict.detected(rules.threshold):

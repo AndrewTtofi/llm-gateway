@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from typing import Any
@@ -20,6 +21,13 @@ class ProviderError(Exception):
     `message` is safe to show clients. `detail` is the provider's raw error text — it can
     contain key fragments, org/project IDs or internal hosts, so it must never be returned
     to clients (log a hash of it at most).
+
+    Two kinds of failure say nothing about the provider's health, so they never count
+    against its circuit breaker (ADR 0023):
+    - `local`: the request never left the gateway (no free connection in the pool).
+    - `deadline`: the answer took longer than the gateway allows for a whole request. How
+      long an answer takes depends on what was asked (max_tokens, reasoning effort), so a
+      client can cause this on a healthy provider.
     """
 
     def __init__(
@@ -31,6 +39,8 @@ class ProviderError(Exception):
         headers: dict[str, str] | None = None,
         code: str | None = None,
         detail: str = "",
+        local: bool = False,
+        deadline: bool = False,
     ):
         super().__init__(message)
         self.message = message
@@ -40,6 +50,14 @@ class ProviderError(Exception):
         self.headers = headers or {}
         self.code = code  # provider's machine-readable code, e.g. "insufficient_quota"
         self.detail = detail
+        self.local = local
+        self.deadline = deadline
+
+
+def hashed_user(user: object) -> str:
+    """The `user` field as providers get it: a stable pseudonym, never the raw value
+    (often an email address)."""
+    return hashlib.sha256(str(user).encode()).hexdigest()
 
 
 class UnsupportedRequest(ValueError):

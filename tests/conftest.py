@@ -8,7 +8,7 @@ from app.auth import ApiKey, CachedKeys, MemoryKeyStore, generate_key, hash_key
 from app.config import Registry
 from app.observability.usage import MemoryUsageSink
 from app.providers import AdapterPool
-from app.ratelimit import MemoryLimiter, MemorySpend
+from app.ratelimit import Concurrency, MemoryLimiter, MemorySpend
 from app.routing import router
 from app.routing.breaker import MemoryBreakerStore
 
@@ -48,7 +48,8 @@ def api_key(monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setattr(services, "limiter", MemoryLimiter())
     monkeypatch.setattr(services, "spend", MemorySpend())
     monkeypatch.setattr(services, "usage", MemoryUsageSink())
-    return add_key(**UNLIMITED)
+    monkeypatch.setattr(services, "concurrency", Concurrency())
+    return add_key("chaos", **UNLIMITED)  # the chaos tier has no concurrency limit
 
 
 @pytest.fixture

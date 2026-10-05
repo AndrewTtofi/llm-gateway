@@ -82,7 +82,13 @@ class UnknownModel(LookupError):
     pass
 
 
-SKIPPED = ("skipped:open", "skipped:unsupported", "skipped:unconfigured", "unsupported_request")
+SKIPPED = (
+    "skipped:open",
+    "skipped:unsupported",
+    "skipped:unconfigured",
+    "skipped:busy",
+    "unsupported_request",
+)
 
 
 @dataclass
@@ -94,6 +100,9 @@ class Routed:
     current: str = ""  # target being tried right now (who to bill if the client leaves)
     chain: list[str] | None = None  # set by policy routing (ADR 0017): this request's chain
     attempt_started: float = 0.0  # perf_counter at the start of the latest attempt
+    # Attempts that timed out after reaching the provider, and how long each ran. The
+    # provider bills those, so the key is charged for them too (ADR 0023).
+    timed_out: list[tuple[str, float]] = field(default_factory=list)
 
     @property
     def fallback(self) -> bool:
@@ -234,11 +243,22 @@ async def _try_target[T](
                 routed.attempts.append((target, "unsupported_request"))
                 return _Failed(exc)
             except ProviderError as exc:
+                if exc.local:
+                    # No free connection: never sent, so not the target's fault (ADR 0023).
+                    routed.attempts.append((target, "skipped:busy"))
+                    return _Failed(exc)
                 kind = classify(exc, reg.retry)
                 # A fixed set of labels: HTTP status, or timeout/network — never a
                 # provider-supplied code (unbounded metric cardinality).
                 detail = exc.status or ("timeout" if exc.timeout else "network")
                 routed.attempts.append((target, f"{kind}:{detail}"))
+                if exc.timeout:
+                    routed.timed_out.append((target, time.perf_counter() - routed.attempt_started))
+                if exc.deadline:
+                    # The answer outlasted the gateway's limit for a whole request. The
+                    # client's request decides how long that takes, so it says nothing
+                    # about the target's health; retrying would only repeat it.
+                    return _Failed(exc)
                 if kind is Kind.CLIENT:
                     # The provider answered — it's healthy, the request is bad.
                     await store.record_success(target, cb, ticket)
@@ -305,7 +325,9 @@ class CommittedStream:
         except TimeoutError as exc:
             await self.aclose()
             err = ProviderError(
-                f"{self._target.partition('/')[0]} stream exceeded its time limit", timeout=True
+                f"{self._target.partition('/')[0]} stream exceeded its time limit",
+                timeout=True,
+                deadline=True,
             )
             await self._record(err)
             raise err from exc
@@ -314,6 +336,8 @@ class CommittedStream:
             raise
 
     async def _record(self, exc: ProviderError) -> None:
+        if exc.deadline or exc.local:
+            return  # not the target's health (ADR 0023)
         if classify(exc, self._reg.retry) is not Kind.CLIENT:
             await store.record_failure(
                 self._target, self._reg.circuit_breaker, Ticket(Decision.ALLOW)

@@ -28,8 +28,9 @@ eventually takes Prometheus down. Unknown models are labelled `_unknown`.
 | `gateway_tokens_total` | counter | target, kind | `prompt` (includes cached), `completion`, `cached` |
 | `gateway_cost_usd_total` | counter | target | Spend |
 | `gateway_fallbacks_total` | counter | alias, target | Served by a target other than the first |
-| `gateway_upstream_attempts_total` | counter | target, outcome | Every upstream call: `ok`, `transient:503`, `skipped:open`, … |
-| `gateway_rejected_total` | counter | reason | Rejected before routing: `unauthenticated`, `model_not_allowed`, `rate_limit`, `budget`, `team_budget` |
+| `gateway_upstream_attempts_total` | counter | target, outcome | Every upstream call: `ok`, `transient:503`, `skipped:open`, `skipped:busy` (no free connection), … |
+| `gateway_rejected_total` | counter | reason | Rejected before routing: `unauthenticated`, `model_not_allowed`, `rate_limit`, `concurrency`, `budget`, `team_budget` |
+| `gateway_redis_fail_open_total` | counter | what | Calls answered without Redis (`rate limiter`, `budget tracker`) during an outage |
 | `gateway_circuit_state` | gauge | target | 0 closed, 1 half-open, 2 open (polled from Redis every 15 s) |
 | `gateway_usage_log_dropped_total` | counter | — | Usage rows lost (queue full or Postgres down) |
 | `gateway_event_loop_lag_seconds` | histogram | — | How late a 0.5 s timer fires; blocking code or CPU saturation |
@@ -38,7 +39,7 @@ eventually takes Prometheus down. Unknown models are labelled `_unknown`.
 | `gateway_variant_requests_total` | counter | alias, variant, status | Requests per A/B arm |
 | `gateway_variant_duration_seconds` | histogram | alias, variant | Latency per A/B arm |
 | `gateway_variant_cost_usd_total` | counter | alias, variant | Spend per A/B arm |
-| `gateway_guardrail_detections_total` | counter | rule, action | Prompt-injection detections by rule (`classifier` for classifier verdicts) |
+| `gateway_guardrail_detections_total` | counter | rule, action | Prompt-injection detections by rule (`classifier` for classifier verdicts, `unscanned` for requests with text over the scan budget) |
 | `gateway_judge_score` | histogram | alias, variant | LLM-as-judge scores (1–5) |
 | `gateway_judge_total` | counter | alias, result | Judge samples: `scored`, `dropped`, `error`, `unparsable` |
 | `gateway_probes_total` | counter | target, result | Background probes: `recovered`, `failed`, `skipped`, `busy` |
@@ -78,13 +79,14 @@ One row per **admitted** request in `usage_log`:
 
 | Column | Notes |
 |--------|-------|
-| `created_at`, `request_id` | `request_id` matches the logs and the `x-request-id` header |
+| `created_at`, `request_id` | `request_id` matches the logs and the `x-request-id` header; always the gateway's own |
+| `client_request_id` | The caller's own id, if it sent one (`x-client-request-id` or `x-request-id`) |
 | `key_id`, `key_prefix` | Who |
 | `alias`, `target`, `provider`, `model` | What was asked for, and what served it |
 | `status`, `error_code` | Outcome; `499` + `client_disconnected` for hang-ups |
 | `streamed`, `fallback`, `attempts` | How it was served |
-| `prompt_tokens`, `completion_tokens`, `cached_tokens` | From the provider's usage |
-| `usage_estimated` | True when the provider sent no usage, so counts are estimates |
+| `prompt_tokens`, `completion_tokens`, `cached_tokens` | From the provider's usage (64-bit) |
+| `usage_estimated` | True when the provider sent no usage, so counts are estimates (a cut-off request, or timed-out attempts) |
 | `estimated_tokens` | The pre-call estimate, to check estimation quality |
 | `cost_usd` | `null` for an unpriced model; 0 for cache hits (`target` = `cache/exact` or `cache/semantic`) |
 | `team`, `variant` | The key's team and the A/B arm, at request time |
@@ -108,8 +110,10 @@ GROUP BY k.name ORDER BY usd DESC NULLS LAST;
 
 Structured JSON lines (structlog) on stdout, which suits Loki, CloudWatch or any log shipper.
 
-- **Request ids:** each request gets a `request_id`. A valid incoming `x-request-id` is reused,
-  and the id is echoed on every response.
+- **Request ids:** each request gets its own `request_id`, echoed as `x-request-id`. A
+  caller's id, from `x-client-request-id` or `x-request-id`, is kept beside it as
+  `client_request_id`, echoed as `x-client-request-id`, and is never used *as* the request
+  id. So one tenant can't make its rows share an id with another's (ADR 0023).
 - **Access log:** one line per HTTP request (method, path, status, ms). `/healthz`,
   `/readyz` and `/metrics` are skipped.
 - **Usage line:** one per chat request, with tokens, cost and target.
@@ -133,6 +137,11 @@ Alerts:
   2 days. `GatewayErrorBudgetSlowBurn` opens a ticket when it would be gone in about 5 days.
 - **Other alerts:** `GatewayTTFTSLOBreach`, `GatewayDown`, `GatewayCircuitOpen`,
   `GatewayUsageLogDropping`, `GatewayEventLoopLag`.
+- **Safety alerts (ADR 0023):**
+  - `GatewayRedisFailingOpen` (page): limits and budgets are running without Redis.
+  - `GatewayAuthServedStale`: keys are checked from cache because Postgres is down.
+  - `GatewayInjectionSpike`: more than 50 detections in 15 min.
+  - `GatewayConcurrencyRejections`: a key keeps hitting its in-flight limit.
 
 Burn-rate alerting beats plain threshold alerts. A 2% error rate for five minutes is noise,
 while 0.5% sustained for a day quietly spends the whole month's budget. Burn rate catches

@@ -359,6 +359,7 @@ httpx2==2.13.1 \
     --hash=sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa
     # via
     #   -c requirements.txt
+    #   -r requirements.in
     #   anthropic
     #   openai
 idna==3.20 \

@@ -122,7 +122,7 @@ reconcile actual tokens and cost → write a usage row in the background.
 
 If Redis or Postgres fails, the gateway degrades instead of going down:
 
-- **Redis down:** rate limits, budgets and breakers fail open.
+- **Redis down:** rate limits and breakers fail open. Budgets use the last known spend, and spend is queued until Redis is back.
 - **Postgres down:** recently used keys are served from cache, keys not in the cache get `503`, and usage rows are dropped and counted.
 
 Chat traffic keeps flowing in both cases. [RESULTS.md](docs/RESULTS.md) has the chaos tests.
@@ -259,12 +259,13 @@ reject `temperature`, so the adapter drops it for them. [ADR 0003](docs/decision
 | `x-gateway-fallback` | `true` if it wasn't the chain's first choice |
 | `x-gateway-attempts` | Upstream calls made, including retries |
 | `x-ratelimit-*`, `retry-after` | OpenAI-style rate-limit headers |
-| `x-request-id` | Correlates with the gateway's logs and usage row |
+| `x-request-id` | The gateway's id for the request, in its logs and usage row (a caller's own id comes back as `x-client-request-id`) |
 | `server-timing: admit;dur=…` | Time the gateway spent on auth and limits |
 
 Errors use OpenAI's shape (`{"error": {"message", "type", "code"}}`):
 
 - **Over a rate limit:** `429 rate_limit_exceeded` with `retry-after`.
+- **Too many requests in flight for the key:** `429 concurrency_limit_exceeded`.
 - **Budget used up:** `429 insufficient_quota`.
 
 ### API keys and limits
@@ -272,12 +273,16 @@ Errors use OpenAI's shape (`{"error": {"message", "type", "code"}}`):
 Keys look like `gw_…`. They are shown once and stored only as a SHA-256 hash. Each key has
 a tier from `config/limits.yaml`:
 
-| Tier | Requests/min | Tokens/min | Budget/month | Aliases |
-|------|-------------|-----------|--------------|---------|
-| `dev` | 60 | 50 000 | $10 | `fast`, `local` |
-| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local`, `frontier`, `auto` |
+| Tier | Requests/min | Tokens/min | Budget/month | In flight | Aliases |
+|------|-------------|-----------|--------------|-----------|---------|
+| `dev` | 60 | 50 000 | $10 | 10 | `fast`, `local` |
+| `standard` | 300 | 200 000 | $100 | 50 | `fast`, `balanced`, `smart`, `local`, `frontier`, `auto` |
 
-Any field can be overridden per key:
+Usage the provider bills is billed to the key too: reasoning output, and a request cut off
+by a hang-up or a timeout, for at least the time the provider worked on it
+([ADR 0023](docs/decisions/0023-security-hardening.md)).
+
+Limits, budget and allowed aliases can be overridden per key:
 
 ```bash
 curl -X POST localhost:8000/admin/keys -H "Authorization: Bearer $GATEWAY_ADMIN_KEY" \
@@ -434,6 +439,7 @@ Each non-obvious choice has an ADR in [docs/decisions/](docs/decisions/):
 | [0020](docs/decisions/0020-ab-routing.md) | A/B routing with weighted, sticky variants |
 | [0021](docs/decisions/0021-prompt-injection-filter.md) | Prompt-injection filter |
 | [0022](docs/decisions/0022-llm-as-judge.md) | LLM-as-judge sampling |
+| [0023](docs/decisions/0023-security-hardening.md) | Security hardening after the audit: billing, shared breakers, bounded requests |
 
 ## Development
 
@@ -455,6 +461,11 @@ The repo is set up for [Claude Code](https://claude.com/claude-code): see `CLAUD
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in
 [SECURITY.md](SECURITY.md).
+
+A full security audit (October 2026) found no auth bypass, injection, SSRF or secret leak.
+Its billing, availability and hardening findings are fixed and tested
+(`tests/test_hardening.py`). [Security](docs/wiki/Security.md#security-audit-october-2026) has
+the summary.
 
 ## License
 

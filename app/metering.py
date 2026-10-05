@@ -5,6 +5,11 @@ At admission the token bucket is charged an estimate and the estimated cost is
 stale month-to-date figure. `settle()` runs exactly once when the request ends —
 success, failure or disconnect — replaces both with the real numbers, and records the
 request: Prometheus metrics, a usage-log row and one access log line.
+
+When the provider reports no usage because the request was cut off (client hang-up,
+timeout), the bill is an estimate that can't be gamed by hanging up early (ADR 0023):
+everything relayed (answer, tool calls, thinking), and at least the time the provider
+spent generating at an assumed speed, up to the reserved maximum.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -60,6 +66,33 @@ class Used:
     def tokens(self) -> int:
         return self.prompt + self.completion
 
+    def add(self, other: Used) -> None:
+        self.prompt += other.prompt
+        self.completion += other.completion
+        self.cached += other.cached
+        self.usd += other.usd
+        self.unpriced = self.unpriced or other.unpriced
+        self.estimated = self.estimated or other.estimated
+
+
+def _text_chars(part: dict[str, Any]) -> int:
+    """Characters of output in a streamed delta or a message: the answer, tool-call
+    arguments, and reasoning (Anthropic thinking, `reasoning_content`, `reasoning`)."""
+    n = len(c) if isinstance(c := part.get("content"), str) else 0
+    for call in part.get("tool_calls") or []:
+        if isinstance(call, dict):
+            n += len((call.get("function") or {}).get("arguments") or "")
+    for name in ("reasoning_content", "reasoning"):  # DeepSeek, OpenRouter, vLLM …
+        if isinstance(r := part.get(name), str):
+            n += len(r)
+    thinking = part.get("thinking")  # a streamed thinking delta (extension, ADR 0013)
+    if isinstance(thinking, dict) and isinstance(t := thinking.get("thinking"), str):
+        n += len(t)
+    for block in part.get("thinking_blocks") or []:
+        if isinstance(block, dict) and isinstance(t := block.get("thinking"), str):
+            n += len(t)
+    return n
+
 
 class Meter:
     def __init__(
@@ -74,10 +107,11 @@ class Meter:
         sink: UsageSink | None = None,
         alias: str = "",
         streamed: bool = False,
+        alias_label: str | None = None,
     ) -> None:
         # The metric label must be a bounded value: the alias as configured, or
-        # "_unknown" — never arbitrary client input (see main.chat_completions).
-        self.alias_label = alias
+        # "_unknown" — never arbitrary client input (see main._chat).
+        self.alias_label = alias if alias_label is None else alias_label
         self.key, self.limits, self.limiter, self.spend = key, limits, limiter, spend
         self.estimate, self.prompt_estimate = estimate, prompt_estimate
         self.client_wants_usage = client_wants_usage
@@ -89,6 +123,7 @@ class Meter:
         # For the record (ADR 0008):
         self.sink, self.alias, self.streamed = sink, alias, streamed
         self.request_id = obs_log.request_id.get()
+        self.client_request_id = obs_log.client_request_id.get()
         self.started_at = datetime.now(UTC)  # time-of-day prices apply at the request's start
         # From the request arriving (middleware), so admission counts too.
         self.started = obs_log.request_started.get() or time.perf_counter()
@@ -98,6 +133,8 @@ class Meter:
         self.attempts: list[tuple[str, str]] = []
         self.fallback = False
         self.attempt_started: float | None = None  # start of the attempt that served
+        self.timed_out: list[tuple[str, float]] = []  # other attempts the provider billed
+        self.release: Callable[[], None] | None = None  # frees the key's concurrency slot
         self.stream_done = False
         # Response cache (ADR 0018): where to store the answer, and what was served from it.
         self.cache: Any = None  # app.cache.Lookup
@@ -122,11 +159,6 @@ class Meter:
         if team := self.key.team_spend_id:
             await self.spend.add(team, usd)
 
-    def _count(self, content: Any, tool_calls: Any) -> None:
-        self._chars += len(content) if isinstance(content, str) else 0
-        for call in tool_calls or []:
-            self._chars += len((call.get("function") or {}).get("arguments") or "")
-
     def failed(self, code: str) -> None:
         """The stream ended with an in-band error (after the 200 went out)."""
         self.error_code = code
@@ -138,6 +170,7 @@ class Meter:
     def routed(self, routed: Any) -> None:
         self.attempts, self.fallback = list(routed.attempts), routed.fallback
         self.attempt_started = routed.attempt_started or None
+        self.timed_out = list(routed.timed_out)
 
     def observe(self, chunk: dict[str, Any]) -> dict[str, Any] | None:
         """Watch a streamed chunk; return what to send the client (None = drop it)."""
@@ -152,7 +185,7 @@ class Meter:
                 # TTFT = first chunk carrying output (not the empty role chunk) — the same
                 # definition the load generator uses.
                 self.first_chunk_at = time.perf_counter()
-            self._count(delta.get("content"), delta.get("tool_calls"))
+            self._chars += _text_chars(delta)
         if "usage" in chunk and not self.client_wants_usage:
             if not chunk.get("choices"):
                 return None  # the usage-only chunk we requested for ourselves
@@ -164,8 +197,7 @@ class Meter:
         if isinstance(result.get("usage"), dict):
             self.usage = result["usage"]
         for choice in result.get("choices") or []:
-            msg = choice.get("message") or {}
-            self._count(msg.get("content"), msg.get("tool_calls"))
+            self._chars += _text_chars(choice.get("message") or {})
 
     def _actual(self) -> Used:
         assert self.target is not None
@@ -214,31 +246,60 @@ class Meter:
                 self.target, prompt, completion, cached, written, written_1h, self.started_at
             )
             return Used(prompt, completion, cached, usd or 0.0, unpriced=usd is None)
-        # No usage reported (disconnect, provider without it): estimate.
-        prompt = self.prompt_estimate
+        # No usage reported (cut off, or a provider without it): estimate.
         completion = math.ceil(self._chars / config.limits.estimation.chars_per_token)
-        usd = _cost(self.target, prompt, completion, at=self.started_at)
+        if self._interrupted():
+            ran = time.perf_counter() - (self.attempt_started or self.started)
+            completion = max(completion, self._generated_in(ran))
+        return self._estimated(self.target, completion)
+
+    def _interrupted(self) -> bool:
+        """Cut off before the provider finished: it may have generated (and billed) more
+        than reached us, including reasoning it never streams."""
+        if self.error_code in ("client_disconnected", "upstream_timeout"):
+            return True
+        return self.streamed and self.status == 200 and not self.error_code and not self.stream_done
+
+    def _generated_in(self, seconds: float) -> int:
+        """Output tokens a provider could have generated in `seconds`, at most the cap."""
+        est = config.limits.estimation
+        cap = max(0, self.estimate - self.prompt_estimate)
+        return min(cap, math.ceil(seconds * est.output_tokens_per_second))
+
+    def _estimated(self, target: str, completion: int) -> Used:
+        prompt = self.prompt_estimate
+        usd = _cost(target, prompt, completion, at=self.started_at)
         return Used(prompt, completion, 0, usd or 0.0, unpriced=usd is None, estimated=True)
 
     async def settle(self) -> None:
         if self._settled:
             return
         self._settled = True
+        if self.release is not None:
+            self.release()
         tpm = self.limits.tokens_per_minute
-        used = Used()
+        used, extra = Used(), []
         try:
-            if self.target is None:  # nothing reached a provider: undo the reservations
+            if self.target is None and not self.timed_out:
+                # Nothing reached a provider: undo the reservations.
                 await self.limiter.adjust(self.key.id, tpm, -self.estimate)
                 await self._add_spend(-self.reserved_usd)
                 return
-            used = self._actual()
-            await self.limiter.adjust(self.key.id, tpm, used.tokens - self.estimate)
-            await self._add_spend(used.usd - self.reserved_usd)
-            await self._store_in_cache()
-            self._submit_for_judging()
+            if self.target is not None:
+                used = self._actual()
+            # A timed-out attempt was still processed, and billed, by its provider.
+            extra = [(t, self._estimated(t, self._generated_in(s))) for t, s in self.timed_out]
+            total = Used()
+            for u in (used, *(u for _, u in extra)):
+                total.add(u)
+            await self.limiter.adjust(self.key.id, tpm, total.tokens - self.estimate)
+            await self._add_spend(total.usd - self.reserved_usd)
+            if self.target is not None:
+                await self._store_in_cache()
+                self._submit_for_judging()
         finally:
             # Recorded even if Redis just failed: that's when you most need the data.
-            self._record(used)
+            self._record(used, extra)
 
     def _answer(self) -> dict[str, Any] | None:
         """The finished answer (non-streamed, or assembled from a clean stream)."""
@@ -283,9 +344,13 @@ class Meter:
         elif self.cache_result is not None:
             await self.cache.save(self.cache_result)
 
-    def _record(self, used: Used) -> None:
-        """Metrics, usage row, access line. Never raises; never logs content."""
+    def _record(self, served: Used, extra: list[tuple[str, Used]]) -> None:
+        """Metrics, usage row, access line. Never raises; never logs content. `served` is
+        what the target that answered used; `extra`, timed-out attempts on the way."""
         now = time.perf_counter()
+        used = Used()
+        for u in (served, *(u for _, u in extra)):
+            used.add(u)
         if (
             self.streamed
             and self.target
@@ -324,13 +389,18 @@ class Meter:
                     metrics.ttft.labels(target).observe(target_ttft)
                 if ttft is not None:
                     metrics.ttft_e2e.observe(ttft)
-                metrics.tokens.labels(target, "prompt").inc(used.prompt)
-                metrics.tokens.labels(target, "completion").inc(used.completion)
-                metrics.tokens.labels(target, "cached").inc(used.cached)
-                if used.usd:
-                    metrics.cost.labels(target).inc(used.usd)
+                metrics.tokens.labels(target, "prompt").inc(served.prompt)
+                metrics.tokens.labels(target, "completion").inc(served.completion)
+                metrics.tokens.labels(target, "cached").inc(served.cached)
+                if served.usd:
+                    metrics.cost.labels(target).inc(served.usd)
                 if self.fallback:
                     metrics.fallbacks.labels(self.alias_label, target).inc()
+            for t, u in extra:
+                metrics.tokens.labels(t, "prompt").inc(u.prompt)
+                metrics.tokens.labels(t, "completion").inc(u.completion)
+                if u.usd:
+                    metrics.cost.labels(t).inc(u.usd)
         except Exception:
             log.exception("recording metrics failed")
         if self.variant:
@@ -353,6 +423,7 @@ class Meter:
         record = UsageRecord(
             created_at=datetime.now(UTC),
             request_id=self.request_id,
+            client_request_id=self.client_request_id,
             key_id=self.key.id,
             key_prefix=self.key.prefix,
             team=self.key.team,

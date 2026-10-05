@@ -9,6 +9,7 @@ they accept, so each provider (and model) can declare it in config (ADR 0012):
       drop: [...]         # never sent
       rename: {a: b}      # sent under another name (max_tokens → max_completion_tokens)
       values: {k: [...]}  # field sent only with one of these values (reasoning_effort)
+      pass: [...]         # let through fields the gateway holds back by default (below)
     tools: false          # model can't call tools on this API → try the next target
     vision: false         # model doesn't take images → try the next target
 
@@ -34,6 +35,7 @@ from app.providers.base import (
     ProviderError,
     UnsupportedRequest,
     first_then_rest,
+    hashed_user,
     upstream_status_error,
 )
 
@@ -44,6 +46,23 @@ log = logging.getLogger(__name__)
 ESSENTIAL = frozenset({"model", "messages", "stream"})
 # Fields that only make sense with tools; removed for a `tools: false` model.
 TOOL_FIELDS = ("tools", "tool_choice", "parallel_tool_calls", "functions", "function_call")
+# Never forwarded unless a provider lists them under `params.pass` (ADR 0023). They change
+# the price in ways token pricing doesn't capture (priority tiers, per-call search and
+# audio fees, predicted-output tokens) or keep tenants' prompts at the provider (`store`,
+# `background`).
+HELD_BACK = frozenset(
+    {
+        "service_tier",
+        "store",
+        "background",
+        "metadata",
+        "web_search_options",
+        "search_parameters",
+        "prediction",
+        "audio",
+        "modalities",
+    }
+)
 
 
 def rules_for(cfg: dict[str, Any], model: str) -> dict[str, Any]:
@@ -57,6 +76,7 @@ def rules_for(cfg: dict[str, Any], model: str) -> dict[str, Any]:
         "drop": set(base.get("drop") or ()) | set(own.get("drop") or ()),
         "rename": {**(base.get("rename") or {}), **(own.get("rename") or {})},
         "values": {**(base.get("values") or {}), **(own.get("values") or {})},
+        "pass": set(base.get("pass") or ()) | set(own.get("pass") or ()),
         "tools": spec.get("tools", cfg.get("tools", True)),
         "vision": spec.get("vision", cfg.get("vision", True)),
         # "responses": this model is called through OpenAI's Responses API (ADR 0014)
@@ -86,6 +106,10 @@ def shape_request(
     as they're *sent* (after renaming)."""
     rules = rules_for(cfg, model)
     body = dict(strip_request(request))  # Anthropic-only extension fields (ADR 0013)
+    for field in HELD_BACK - rules["pass"]:
+        body.pop(field, None)
+    if body.get("user"):
+        body["user"] = hashed_user(body["user"])  # often an email: never sent as-is
     if not rules["tools"]:
         if body.get("tools") or body.get("functions"):
             raise UnsupportedRequest(f"{name}/{model} can't call tools through this API")
@@ -187,7 +211,8 @@ class OpenAICompatAdapter(ProviderAdapter):
         try:
             resp = await self._client.post(path, json=body, timeout=self._timeout)
         except httpx.HTTPError as exc:
-            raise _network_error(self.name, exc) from exc
+            # Not streamed, the read timeout is `total`: the whole answer took too long.
+            raise _network_error(self.name, exc, deadline=True) from exc
         if resp.status_code >= 400:
             raise _status_error(self.name, resp.status_code, resp.text, resp.headers)
         try:
@@ -313,7 +338,13 @@ def _invalid_response(provider: str, text: str) -> ProviderError:
     )
 
 
-def _network_error(provider: str, exc: httpx.HTTPError) -> ProviderError:
-    timeout = isinstance(exc, httpx.TimeoutException)
+def _network_error(provider: str, exc: httpx.HTTPError, deadline: bool = False) -> ProviderError:
+    """Pool full: the request never left (ADR 0023). Connect timeout: nothing was sent, a
+    network failure. Other timeouts: the provider was working on it."""
+    if isinstance(exc, httpx.PoolTimeout):
+        return ProviderError(f"{provider} is busy (no free connection)", retryable=True, local=True)
+    timeout = isinstance(exc, httpx.TimeoutException) and not isinstance(exc, httpx.ConnectTimeout)
     kind = "timed out" if timeout else f"connection failed ({type(exc).__name__})"
-    return ProviderError(f"{provider} {kind}", retryable=True, timeout=timeout)
+    return ProviderError(
+        f"{provider} {kind}", retryable=True, timeout=timeout, deadline=timeout and deadline
+    )

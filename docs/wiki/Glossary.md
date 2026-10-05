@@ -12,6 +12,7 @@
 | **Chain** | The ordered list of targets behind an alias; fallback walks it |
 | **Circuit breaker** | Per-target switch that stops calling a failing target for a while, then probes it |
 | **Completion tokens** | Tokens the model generated (output); usually the expensive kind |
+| **Concurrency limit** | How many requests one key may have in flight at once on a replica (`concurrent_requests`) |
 | **Content block** | Anthropic's unit of output: a text, `tool_use` or thinking block, streamed as start → deltas → stop |
 | **Context window** | The maximum tokens (prompt + output) a model can handle in one request |
 | **Coordinated omission** | A benchmarking error where a slow system causes fewer measurements and so looks faster |
@@ -24,6 +25,7 @@
 | **First-token boundary** | The moment the first chunk reaches the client; fallback is possible before it, not after |
 | **Half-open** | Breaker state that lets exactly one probe request through to test recovery |
 | **In-band error** | An error sent inside an already-started stream, since the HTTP status (200) has already gone out |
+| **Interrupted request** | One cut off before the provider reported usage (hang-up, timeout); billed by what was relayed and the time it ran |
 | **LLM-as-judge** | Using a (strong) model to grade another model's answers against a rubric |
 | **`max_tokens`** | The cap on output tokens for a request; also the basis of the gateway's token estimate |
 | **Policy alias** | An alias whose chain is built per request from constraints and an objective (`model: auto`) |

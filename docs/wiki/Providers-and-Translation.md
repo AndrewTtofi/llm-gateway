@@ -59,6 +59,7 @@ providers:
 | `drop` | Never sent |
 | `rename` | Sent under another name; if the client sent both, the new name wins |
 | `values` | Sent only with one of these values; otherwise removed, so the provider uses its default |
+| `pass` | Let through fields that are held back by default (below) |
 | `tools: false` / `vision: false` | A request with tools or images skips this target and the chain continues. `/v1/catalog` doesn't list the capability |
 
 Model rules overlay provider rules. They apply in the order rename → drop → allow →
@@ -68,6 +69,20 @@ values, so `drop`, `allow` and `values` use the names fields are *sent* under.
 
 Dropped parameters change behaviour silently: xAI's reasoning models don't honour `stop`,
 for example. That's the trade for a chain that keeps working.
+
+**Held back by default (ADR 0023).** Some fields are never forwarded unless the provider lists
+them under `params.pass`:
+
+| Field | Held back because |
+|-------|-------------------|
+| `service_tier` | Priority tiers cost about twice the standard price, which the gateway's pricing doesn't know |
+| `web_search_options`, `search_parameters` | Per-call search fees (OpenAI, xAI) on top of tokens |
+| `audio`, `modalities` | Audio output is priced per audio token |
+| `prediction` | Predicted outputs bill rejected prediction tokens as output |
+| `store`, `background`, `metadata` | They keep tenants' prompts and answers stored in the operator's provider account |
+
+`user` is always sent as a SHA-256 pseudonym, never as given (it's often an email address).
+The Responses API's `safety_identifier` gets the same pseudonym.
 
 `make test-live` runs a chat, a stream and a tool call against each provider whose key is
 set. Run it after adding a key, or when a provider ships a new model.
