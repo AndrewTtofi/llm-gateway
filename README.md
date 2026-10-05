@@ -100,6 +100,9 @@ opens weekly update PRs for pip, Docker images and GitHub Actions.
 This repo is set up for [Claude Code](https://claude.com/claude-code): see
 `CLAUDE.md`, `.claude/agents/` and `.claude/skills/`.
 
+## Contributing
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md).
+
 ## Design decisions
 See [docs/decisions/](docs/decisions/).
 

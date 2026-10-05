@@ -9,6 +9,13 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Security
+- CI token is read-only, actions pinned to commit SHAs, no persisted git credentials
+- `SECURITY.md` with private vulnerability reporting, `CODEOWNERS`
+
+### Added
+- `CONTRIBUTING.md`
+
 ## [0.1.0] - 2026-10-05 (Phase 0 foundations + Phase 1 pass-through proxy)
 
 ### Added
