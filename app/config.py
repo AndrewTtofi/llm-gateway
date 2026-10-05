@@ -162,6 +162,8 @@ class Tier(BaseModel):
     tokens_per_minute: int = Field(gt=0)
     monthly_budget_usd: float = Field(ge=0)
     allowed_aliases: list[str]
+    # Prompt-injection filter (ADR 0021): what to do when a request looks like one.
+    injection: Literal["off", "log", "flag", "block"] = "log"
 
 
 class Team(BaseModel):
@@ -317,6 +319,41 @@ class Catalog(BaseModel):
     models: dict[str, CatalogEntry] = {}
 
 
+class GuardRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[a-z0-9_]{1,40}$")  # metric label and log field: bounded
+    pattern: str
+    weight: float = Field(default=1.0, gt=0)
+    applies_to: list[Literal["user", "tool", "system", "assistant"]] = ["user", "tool"]
+
+    @field_validator("pattern")
+    @classmethod
+    def _compiles(cls, value: str) -> str:
+        try:
+            re.compile(value)
+        except re.error as exc:  # pydantic only reports ValueErrors as validation errors
+            raise ValueError(f"invalid regular expression: {exc}") from exc
+        return value
+
+
+class Classifier(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    alias: str  # a gateway alias that answers SAFE or INJECTION
+    when: Literal["suspicious", "always"] = "suspicious"  # suspicious: only if a rule matched
+    timeout_seconds: float = Field(default=5, gt=0)
+    max_chars: int = Field(default=4000, ge=100)  # how much text is sent for classification
+
+
+class Guardrails(BaseModel):
+    """config/guardrails.yaml: prompt-injection heuristics (ADR 0021)."""
+
+    threshold: float = Field(default=1.0, gt=0)  # score at which a request counts as injection
+    rules: list[GuardRule] = []
+    classifier: Classifier | None = None
+
+
 _ENV = re.compile(r"\$\{(\w+)\}")
 
 
@@ -374,6 +411,12 @@ def load_pricing(config_dir: Path) -> Pricing:
     return Pricing.model_validate(yaml.safe_load((config_dir / "pricing.yaml").read_text()))
 
 
+def load_guardrails(config_dir: Path) -> Guardrails:
+    path = config_dir / "guardrails.yaml"  # optional: without it, no rules
+    raw = yaml.safe_load(path.read_text()) if path.exists() else None
+    return Guardrails.model_validate(raw or {})
+
+
 def load_catalog(config_dir: Path) -> Catalog:
     path = config_dir / "catalog.yaml"  # optional: without it the catalog shows prices only
     return (
@@ -388,15 +431,18 @@ registry = load_registry(settings.config_dir, settings.gateway_enable_fake)
 limits = load_limits(settings.config_dir)
 pricing = load_pricing(settings.config_dir)
 catalog = load_catalog(settings.config_dir)
+guardrails = load_guardrails(settings.config_dir)
 
 
 def reload_registry() -> Registry:
     """Reload models, limits, pricing and the catalog together. If any file is broken,
     raise and keep all of them as they were — never a half-applied config."""
-    global registry, limits, pricing, catalog
+    global registry, limits, pricing, catalog, guardrails
     new_registry = load_registry(settings.config_dir, settings.gateway_enable_fake)
     new_limits = load_limits(settings.config_dir)
     new_pricing = load_pricing(settings.config_dir)
     new_catalog = load_catalog(settings.config_dir)
+    new_guardrails = load_guardrails(settings.config_dir)
     registry, limits, pricing, catalog = new_registry, new_limits, new_pricing, new_catalog
+    guardrails = new_guardrails
     return registry

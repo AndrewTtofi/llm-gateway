@@ -1,0 +1,59 @@
+# Prompt-injection heuristics (ADR 0021). What happens on a match is set per tier in
+# limits.yaml (`injection: off | log | flag | block`). Hot-reloaded with `make reload`.
+#
+# Each rule is a regular expression matched against normalised text (Unicode NFKC,
+# lower-cased, zero-width characters removed, whitespace collapsed) of the message roles
+# in `applies_to`. Matching rules add their `weight`; a request scoring `threshold` or more
+# is a detection. Tool results are included by default: text a tool fetched (a web page,
+# a file, an email) is the usual carrier of *indirect* injection.
+#
+# Heuristics are a tripwire, not a guarantee: they catch common and copy-pasted attacks
+# and will miss novel ones. Tune weights against your own traffic (start with `log`).
+
+threshold: 1.0
+
+rules:
+  - name: ignore_instructions
+    pattern: '\b(ignore|disregard|forget|override|bypass)\b.{0,40}\b(all |any |the )?(previous|prior|above|earlier|preceding|system|original)\b.{0,40}\b(instructions?|rules?|prompts?|directions?|guidelines?)\b'
+    weight: 1.0
+
+  - name: reveal_system_prompt
+    pattern: '\b(reveal|show|print|repeat|output|display|leak|tell me)\b.{0,40}\b(system prompt|system message|hidden (instructions?|prompt)|initial (instructions?|prompt)|your (instructions|rules|prompt))\b'
+    weight: 1.0
+
+  - name: role_override
+    pattern: '\byou are (now|no longer)\b|\bact as (an? )?(unrestricted|unfiltered|jailbroken|evil)\b|\b(developer|god|dan) mode\b|\bdo anything now\b'
+    weight: 0.6
+
+  - name: fake_chat_markup
+    # Chat-template tokens or fake role headers smuggled into content.
+    pattern: '<\|?\s*/?\s*(system|im_start|im_end|endoftext|assistant)\s*\|?>|^\s*(###\s*)?(system|assistant)\s*:|\[\s*/?\s*(system|inst)\s*\]'
+    weight: 0.6
+    applies_to: [user, tool]
+
+  - name: restriction_removal
+    # Weak alone ("a plan without limits"); adds up with the other signals.
+    pattern: '\b(no|without|free of|remove (all|your))\b.{0,20}\b(restrictions|filters|guardrails|safety rules|content policy)\b'
+    weight: 0.5
+
+  - name: exfiltration_link
+    # Markdown images/links that put data into a URL query: a classic exfiltration trick.
+    pattern: '!?\[[^\]]{0,100}\]\(\s*https?://[^)\s]{1,200}[?&][a-z0-9_]{1,30}=\s*(\{|\$|<|%7b)'
+    weight: 1.0
+    applies_to: [user, tool]
+
+  - name: tool_instruction
+    # Text inside a tool result that addresses the assistant directly.
+    pattern: '\b(assistant|ai|model|chatbot)\b.{0,20}\b(must|should|now)\b.{0,40}\b(ignore|send|email|forward|exfiltrate|delete|execute|run)\b'
+    weight: 0.5
+    applies_to: [tool]
+
+# Optional: ask a model about borderline requests (a score above 0 but below the threshold),
+# or about every request (`when: always`). The classifier can only add detections, never
+# clear one, so injecting the classifier itself doesn't help an attacker. It costs one small
+# request per check, billed to your provider account, not to the caller's key.
+# classifier:
+#   alias: fast
+#   when: suspicious
+#   timeout_seconds: 5
+#   max_chars: 4000

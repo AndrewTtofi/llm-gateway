@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import cache, config, extensions, messages_api, providers, services
+from app import cache, config, extensions, guardrails, messages_api, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
@@ -704,6 +704,24 @@ async def _chat(
         alias=body.model,
         streamed=body.stream,
     )
+    # Prompt-injection filter (ADR 0021), per the key's tier.
+    action = config.limits.tiers[key.tier].injection if key.tier in config.limits.tiers else "log"
+    guard = await guardrails.check(body.model_dump()["messages"], action)
+    if guard is not None and guard.detected(config.guardrails.threshold):
+        flag = f"flagged; rules={','.join(guard.rules) or '-'}"
+        if guard.classifier == "injection":
+            flag += "; classifier=injection"
+        if action == "block":
+            meter.status, meter.error_code = 400, "prompt_injection_detected"
+            await meter.settle()
+            return error_response(
+                400,
+                "The request was blocked by the gateway's prompt-injection filter.",
+                code="prompt_injection_detected",
+                headers={**rl_headers, "x-gateway-guardrail": flag.replace("flagged", "blocked")},
+            )
+        if action == "flag":
+            rl_headers["x-gateway-guardrail"] = flag
     alias_cfg = config.registry.aliases.get(body.model)
     variant = None
     if alias_cfg is not None and alias_cfg.variants:

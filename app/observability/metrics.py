@@ -118,3 +118,9 @@ variant_duration = Histogram(
 variant_cost = Counter(
     "gateway_variant_cost_usd_total", "Spend per A/B arm.", ["alias", "variant"], registry=registry
 )
+guardrail = Counter(
+    "gateway_guardrail_detections_total",
+    "Prompt-injection detections by rule (from config) and action (ADR 0021).",
+    ["rule", "action"],
+    registry=registry,
+)
