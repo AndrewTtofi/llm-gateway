@@ -56,6 +56,18 @@ The gateway moves all of that into one place that the platform team owns:
 | **Cost** | Each request is priced from `config/pricing.yaml`, including cached-token rates, and written to a Postgres usage log for per-key reports. |
 | **Observability** | Prometheus metrics (never labelled by key), a Grafana dashboard provisioned as code, SLO burn-rate alerts, and JSON logs with a request id. Prompt content is never logged. |
 
+## Documentation
+
+The **[wiki](docs/wiki/Home.md)** explains every part in depth:
+
+- architecture and the life of a request;
+- provider translation;
+- routing and circuit breakers;
+- keys, limits and budgets;
+- observability, configuration, the API, operations and security;
+- [a multi-app walkthrough](docs/wiki/Use-Case-Multi-App.md);
+- [subscriptions and provider terms](docs/wiki/Subscriptions-and-Terms.md).
+
 ## Use cases
 
 | Situation | What the gateway does |
@@ -345,6 +357,7 @@ behind a load balancer, with managed Redis and Postgres.
 ## FAQ
 
 **Does it work with a ChatGPT Plus or Claude Pro/Max subscription?** No, and that's by design.
+The [subscriptions page](docs/wiki/Subscriptions-and-Terms.md) has the per-provider details and sources.
 Those subscriptions cover the consumer apps (chatgpt.com, claude.ai, the Claude desktop and
 mobile apps, and Claude Code signed in with your account). They don't come with API
 credentials, and the providers' terms don't allow their login tokens to be reused to serve
