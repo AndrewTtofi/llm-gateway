@@ -5,16 +5,35 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 1 — Pass-through proxy (built on `phase-1-proxy`, in review)
-- **Branch:** `phase-1-proxy` · remote `github.com/AndrewTtofi/llm-gateway` (private)
-- **Status:** Phase 1 DoD met; `make test` 47 passed, `make test-e2e` 2 passed, `make lint` clean. Python 3.14 / Redis 8 / Postgres 18
-- **Next up:** merge Phase 1 PR → tag `v0.1.0`; then Phase 2 (Anthropic adapter, hot-reload polish). Owner still to add provider API keys
-- **Blockers:** none (API keys only needed for live tests)
+- **Phase:** 2 — Multi-provider + model registry (built on `phase-2-providers`, in review)
+- **Branch:** `phase-2-providers` · `v0.1.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (private)
+- **Status:** Phase 2 built + reviewed; `make test` 115 passed, `make test-e2e` 2 passed, `make lint` clean. Claude paths verified only against a mocked API
+- **Next up:** owner adds `ANTHROPIC_API_KEY` to `.env` → `docker compose restart gateway` → `make test-live` (Phase 2 DoD against real Claude) → merge → tag `v0.2.0`
+- **Blockers:** Phase 2 DoD for `fast`/`smart` needs the Anthropic API key
 - **Open questions:** none
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 5
+**Did**
+- Phase 2 on `phase-2-providers`: Anthropic adapter via official SDK, translation module with unit tests,
+  capability flags per model in config, refusal fallback (beta), `/v1/models` + SIGHUP + safe reload
+- code-reviewer pass found 3 blockers + 9 should-fix, all fixed with tests (mutation-checked):
+  unmapped stream transport errors, assistant-first/system-only requests, malformed input → 500,
+  temperature+top_p, `""` args for no-arg tools, declined model's tool calls leaking past a
+  refusal fallback, usage iterations, schema transform, user hashing, truncated streams,
+  first_token vs stream_idle, image media types
+- 115 tests; live tests ready but skipped (no key)
+
+**Decided**
+- Official `anthropic` SDK over raw httpx (ADR 0003); mocks via `httpx2.MockTransport`
+
+**Learned**
+- Model differences (sampling params, forced tool choice, effort) belong in config, not `if model ==`
+- SDK raises a mid-stream `error` event as `APIStatusError` with status 200
+
 
 ### 2026-10-05 — Session 4
 **Did**

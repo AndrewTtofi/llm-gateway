@@ -13,7 +13,7 @@ test:
 	pytest -m "not live and not e2e" -q
 
 test-e2e:
-	pytest -m e2e -q
+	pytest -m "e2e and not live" -q
 
 test-live:
 	pytest -q

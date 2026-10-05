@@ -57,6 +57,8 @@ registry = load_registry(settings.config_dir)
 
 
 def reload_registry() -> Registry:
+    """Swap in a freshly loaded registry. On a broken file, raise and keep the old one."""
     global registry
-    registry = load_registry(settings.config_dir)
+    new = load_registry(settings.config_dir)  # raises before anything is replaced
+    registry = new
     return registry

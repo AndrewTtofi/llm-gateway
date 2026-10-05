@@ -262,3 +262,12 @@ def test_stream_with_no_chunks_still_completes(client: TestClient) -> None:
     respx.post(URL).mock(return_value=httpx.Response(200, content=sse("[DONE]")))
     _, lines = stream_lines(client, {"model": "local", "messages": MSGS, "stream": True})
     assert lines == ["data: [DONE]"]
+
+
+@respx.mock
+def test_stream_without_done_is_reported_as_truncated(client: TestClient) -> None:
+    respx.post(URL).mock(return_value=httpx.Response(200, content=sse(chunk("par"))))
+    status, lines = stream_lines(client, {"model": "local", "messages": MSGS, "stream": True})
+    assert status == 200
+    assert "ended early" in json.loads(lines[-1][6:])["error"]["message"]
+    assert "data: [DONE]" not in lines

@@ -65,12 +65,12 @@ Learn: SSE, async streaming, chat completion schema.
 
 ### Phase 2 — Multi-provider + model registry (days 4–6)
 Goal: aliases in YAML resolve to real models on any provider.
-- [ ] `ProviderAdapter` interface: `chat()`, `stream()`, `health()`
-- [ ] Adapters: OpenAI, Anthropic, Ollama
-- [ ] Anthropic translation: system prompt, message roles, `max_tokens`, stop reasons, usage, tool calls, stream events
-- [ ] `config/models.yaml` loaded at start; aliases (`fast`, `smart`, `local`) map to `provider/model`
-- [ ] Hot reload of `models.yaml` (SIGHUP or `POST /admin/reload`)
-- [ ] `GET /v1/models` lists aliases and models
+- [x] `ProviderAdapter` interface: `chat()`, `stream()`, `health()`
+- [x] Adapters: OpenAI, Anthropic, Ollama
+- [x] Anthropic translation: system prompt, message roles, `max_tokens`, stop reasons, usage, tool calls, stream events
+- [x] `config/models.yaml` loaded at start; aliases (`fast`, `smart`, `local`) map to `provider/model`
+- [x] Hot reload of `models.yaml` (SIGHUP or `POST /admin/reload`)
+- [x] `GET /v1/models` lists aliases and models
 
 DoD: same client code works against `fast`, `smart`, `local`; swapping a model is a YAML edit + reload, no restart.
 Learn: provider API differences, adapter pattern, config-driven design.

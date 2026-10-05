@@ -33,6 +33,22 @@ Add it to `allowed_aliases` in `config/limits.yaml` for the tiers that may use i
   add a provider block with `type: openai` and its `base_url`. No code.
 - Others: run `/add-provider <name>` in Claude Code.
 
+### Model capabilities (Anthropic)
+Claude models differ in which OpenAI parameters they accept. If a new model behaves
+differently from the provider's `defaults`, add a line under `providers.anthropic.models`:
+```yaml
+    models:
+      claude-new-model: { sampling: false, forced_tool_choice: false, effort: true, refusal_fallback: true }
+```
+`sampling` (temperature/top_p), `forced_tool_choice` (`tool_choice: "required"`/named),
+`effort` (`reasoning_effort`), `refusal_fallback` (server-side refusal fallback, beta).
+Check the model's docs; see ADR 0003.
+
+### Reload
+`make reload` (or `POST /admin/reload`, or `kill -HUP` when running without `--reload`).
+A file that fails to parse or validate is rejected with a 400 and the previous config
+stays live.
+
 ### Always also
 1. Check the model ID in the provider's current docs.
 2. Add the model's price to `config/pricing.yaml` (or `null` until you know it).

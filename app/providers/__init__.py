@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.providers.anthropic import AnthropicAdapter
 from app.providers.base import ProviderAdapter
 from app.providers.openai_compat import OpenAICompatAdapter
 
 ADAPTER_TYPES: dict[str, type[ProviderAdapter]] = {
     "openai": OpenAICompatAdapter,
+    "anthropic": AnthropicAdapter,
 }
 
 
