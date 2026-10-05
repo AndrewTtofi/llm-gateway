@@ -304,7 +304,7 @@ async def list_models(key: Authenticated) -> dict[str, object]:
         if lim.allows(name)
     ]
     if reg.allow_direct_models:
-        direct = dict.fromkeys(m for a in reg.aliases.values() for m in a.chain)
+        direct = sorted(reg.known_targets())  # what `resolve` accepts, like /v1/catalog
         data += [
             {"id": m, "object": "model", "created": 0, "owned_by": m.split("/", 1)[0]}
             for m in direct
@@ -316,13 +316,12 @@ async def list_models(key: Authenticated) -> dict[str, object]:
 # Blended price for sorting: a typical 3:1 mix of input to output tokens.
 BLEND_INPUT, BLEND_OUTPUT = 3, 1
 SortBy = Literal["name", "price", "quality", "ttft", "latency"]
-Capability = Literal["tools", "vision", "reasoning", "json_schema"]
 
 
 @app.get("/v1/catalog", response_model=None)
 async def model_catalog(
     key: Authenticated,
-    capability: Annotated[list[Capability], Query()] = [],  # noqa: B006 — FastAPI copies it
+    capability: Annotated[list[config.Capability], Query()] = [],  # noqa: B006 — FastAPI copies it
     min_context: int = 0,
     sort: SortBy = "name",
 ) -> dict[str, Any] | JSONResponse:
@@ -340,7 +339,9 @@ async def model_catalog(
             "rate_limit_exceeded",
             headers=verdict.headers(),
         )
-    reg, prices, cat = config.registry, config.pricing.models, config.catalog.models
+    # One snapshot of the config: a reload during the awaits below mustn't mix versions.
+    reg, pricing, catalog = config.registry, config.pricing, config.catalog
+    prices, cat = pricing.models, catalog.models
     aliases = {n: a.chain for n, a in reg.aliases.items() if lim.allows(n)}
     targets = dict.fromkeys(t for chain in aliases.values() for t in chain)
     if reg.allow_direct_models:
@@ -354,42 +355,51 @@ async def model_catalog(
         if min_context and (facts.context_window or 0) < min_context:
             continue
         price = prices.get(t)
-        pricing = None
+        row_price = None
         if price is not None and price.input is not None and price.output is not None:
             blended = (BLEND_INPUT * price.input + BLEND_OUTPUT * price.output) / (
                 BLEND_INPUT + BLEND_OUTPUT
             )
-            pricing = {
+            row_price = {
                 "input": price.input,
                 "output": price.output,
                 "cached_input": price.cached_input,
                 "blended": round(blended, 6),
-                "unit": f"{config.pricing.currency} per 1M tokens",
+                "unit": f"{pricing.currency} per 1M tokens",
             }
-        try:
-            circuit = str(await router.store.state(t))
-        except Exception:
-            circuit = "unknown"
         rows.append(
             {
                 "id": t,
                 "provider": t.partition("/")[0],
                 "callable_directly": reg.allow_direct_models and lim.allows(t),
                 "in_aliases": [n for n, chain in aliases.items() if t in chain],
-                "pricing": pricing,
+                "pricing": row_price,
                 **facts.model_dump(),
-                "circuit": circuit,
+                "circuit": "unknown",  # filled in below, all targets at once
                 "live": live.snapshot(t),
             }
         )
+    for row, circuit in zip(rows, await _circuits([r["id"] for r in rows]), strict=True):
+        row["circuit"] = circuit
     rows.sort(key=lambda r: _catalog_sort_key(r, sort))
     return {
         "object": "catalog",
-        "prices_checked": config.catalog.checked,
+        "prices_checked": pricing.checked,
+        "catalog_checked": catalog.checked,
         "blend": f"{BLEND_INPUT}:{BLEND_OUTPUT} input:output tokens",
         "aliases": [{"id": n, "chain": chain} for n, chain in aliases.items()],
         "data": rows,
     }
+
+
+async def _circuits(targets: list[str]) -> list[str]:
+    """Breaker state per target, read concurrently. "unknown" while the breaker store is
+    failing open, because its "closed" would then be a guess."""
+    store = router.store
+    if getattr(store, "degraded", False):
+        return ["unknown"] * len(targets)
+    states = await asyncio.gather(*(store.state(t) for t in targets), return_exceptions=True)
+    return ["unknown" if isinstance(s, BaseException) else str(s) for s in states]
 
 
 def _catalog_sort_key(row: dict[str, Any], sort: str) -> tuple[Any, ...]:

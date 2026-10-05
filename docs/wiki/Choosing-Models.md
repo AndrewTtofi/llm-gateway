@@ -14,6 +14,7 @@ curl "localhost:8000/v1/catalog?sort=price&capability=tools" -H "Authorization: 
 {
   "object": "catalog",
   "prices_checked": "2026-10-05",
+  "catalog_checked": "2026-10-05",
   "blend": "3:1 input:output tokens",
   "aliases": [{"id": "fast", "chain": ["anthropic/claude-haiku-4-5-20251001", "openai/gpt-6-luna", "ollama/llama3.2:3b"]}],
   "data": [
@@ -52,12 +53,14 @@ The catalog only shows what **this key** may use. A key on the `dev` tier sees `
 - **`quality`:** *your* score, 1 (basic) to 5 (frontier), set in `config/catalog.yaml`. The
   starting values are a rough guide. Adjust them to your own evaluations, because "best" depends
   on the task.
-- **`live`:** what this gateway replica measured over the last 15 minutes.
+- **`live`:** what this gateway replica measured over the last 15 minutes, or a shorter
+  span under heavy traffic (`window_seconds` says which).
   - `error_rate` counts every upstream attempt, retries included.
   - `latency_ms` and `ttft_ms` cover only requests the model actually served.
   - TTFT is the fairer speed comparison, because total latency depends on answer length.
   - Each replica reports its own traffic. Use Grafana for fleet-wide history.
-- **`circuit`:** `open` means the model is being skipped right now.
+- **`circuit`:** `open` means the model is being skipped right now. `unknown` means the
+  breaker store (Redis) is unreachable.
 
 ### Using it from an app
 
@@ -103,9 +106,11 @@ make reload                  # apply without a restart, then commit
 - **Prices** (`input`, `output`, `cached_input`) go to `config/pricing.yaml`. Only changed
   lines are rewritten, and comments and alignment are kept.
 - **Facts** (`context_window`, `max_output_tokens`, `capabilities`) go to `config/catalog.yaml`.
-- **Disagreement:** when the two sources disagree, the change is flagged
-  `⚠ sources disagree` and isn't written unless you add `--force`. Check the provider's own
-  pricing page first.
+- **Agreement:** a price change is written only when both sources agree. If they disagree
+  (`⚠ sources disagree`), or only LiteLLM has the model (`⚠ unchecked`), it isn't written
+  unless you add `--force`. Check the provider's own pricing page first.
+- **Validation:** remote values are checked before use. Invalid prices or sizes are ignored,
+  and the gateway itself refuses negative or non-finite prices.
 - **Never changed:** `quality` scores, test providers (`fake`, `dev_only`), and models with no
   public source (local Ollama models). Set those by hand.
 - **Different IDs:** if a source names a model differently, add `litellm_id:` or

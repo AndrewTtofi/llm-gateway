@@ -31,11 +31,12 @@ def priced(monkeypatch: pytest.MonkeyPatch, registry: Registry) -> None:
         config,
         "pricing",
         Pricing(
+            checked=dt.date(2026, 10, 1),
             models={
                 "mock/tiny": Price(input=1.0, output=5.0, cached_input=0.1),
                 "chaos/ok": Price(input=0.0, output=0.0),
                 "claude/old": Price(input=3.0, output=15.0),
-            }
+            },
         ),
     )
     monkeypatch.setattr(
@@ -61,7 +62,7 @@ def test_catalog_lists_prices_facts_and_aliases(client: TestClient, priced: None
     resp = client.get("/v1/catalog")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["prices_checked"] == "2026-10-05"
+    assert body["catalog_checked"] == "2026-10-05" and body["prices_checked"] == "2026-10-01"
     assert {"id": "local", "chain": ["mock/tiny"]} in body["aliases"]
     tiny = next(r for r in body["data"] if r["id"] == "mock/tiny")
     assert tiny["pricing"] == {
@@ -144,6 +145,71 @@ def test_live_window_and_memory_are_bounded(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(live._targets["p/m"].attempts) == live.MAX_SAMPLES
 
 
+# --- more endpoint behaviour ----------------------------------------------
+
+
+def test_sort_by_live_speed_puts_unmeasured_last(client: TestClient, priced: None) -> None:
+    live.record_served("claude/old", 2.0, 0.9)
+    live.record_served("mock/tiny", 1.0, 0.3)
+    assert ids(client.get("/v1/catalog?sort=ttft"))[:2] == ["mock/tiny", "claude/old"]
+    assert ids(client.get("/v1/catalog?sort=latency"))[:2] == ["mock/tiny", "claude/old"]
+
+
+def test_min_context_excludes_unknown_windows(client: TestClient, priced: None) -> None:
+    assert "chaos/ok" not in ids(client.get("/v1/catalog?min_context=1"))
+
+
+async def test_open_breaker_and_degraded_store_are_shown(
+    client: TestClient, priced: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.routing import router
+    from app.routing.breaker import State
+
+    async def state(target: str) -> State:
+        return State.OPEN if target == "mock/tiny" else State.CLOSED
+
+    monkeypatch.setattr(router.store, "state", state)
+    rows = {r["id"]: r for r in client.get("/v1/catalog").json()["data"]}
+    assert rows["mock/tiny"]["circuit"] == "open" and rows["claude/old"]["circuit"] == "closed"
+    monkeypatch.setattr(type(router.store), "degraded", True, raising=False)
+    rows = {r["id"]: r for r in client.get("/v1/catalog").json()["data"]}
+    assert rows["mock/tiny"]["circuit"] == "unknown"  # fail-open "closed" would be a guess
+
+
+def test_live_window_reports_the_span_actually_covered(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [0.0]
+    monkeypatch.setattr(live, "_clock", lambda: now[0])
+    for _ in range(live.MAX_SAMPLES):
+        now[0] += 0.01  # 100 rps: the cap fills in 20 s
+        live.record_attempt("p/m", True)
+    assert live.snapshot("p/m")["window_seconds"] == 19
+
+
+def test_catalog_reloads_with_the_rest_of_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    for f in ("models.yaml", "pricing.yaml", "limits.yaml", "catalog.yaml"):
+        shutil.copy(Path("config") / f, tmp_path / f)
+    monkeypatch.setattr(config.settings, "config_dir", tmp_path)
+    monkeypatch.setattr(config, "catalog", config.catalog)
+    (tmp_path / "catalog.yaml").write_text("models:\n  x/y: { quality: 5 }\n")
+    config.reload_registry()
+    assert list(config.catalog.models) == ["x/y"]
+    (tmp_path / "catalog.yaml").write_text("models:\n  x/y: { quality: 9 }\n")  # invalid
+    with pytest.raises(ValueError):
+        config.reload_registry()
+    assert config.catalog.models["x/y"].quality == 5  # the old config stays live
+
+
+def test_negative_or_non_finite_prices_are_rejected_on_load(tmp_path: Path) -> None:
+    for bad in ("-1", ".nan", ".inf"):
+        (tmp_path / "pricing.yaml").write_text(f"models:\n  a/b: {{ input: {bad}, output: 1 }}\n")
+        with pytest.raises(ValueError):
+            config.load_pricing(tmp_path)
+
+
 # --- price sync -------------------------------------------------------------
 
 LITELLM = {
@@ -157,64 +223,97 @@ LITELLM = {
         "supports_vision": True,
     },
     "gpt-y": {"input_cost_per_token": 1e-06, "output_cost_per_token": 4e-06},
+    "llama3.2:3b": {
+        "input_cost_per_token": 0,
+        "output_cost_per_token": 0,
+        "max_input_tokens": 128000,
+    },
 }
 OPENROUTER = {
-    "anthropic/claude-x.1": {"pricing": {"prompt": "0.000003", "completion": "0.000015"}},
+    "anthropic/claude-x-1": {
+        "pricing": {"prompt": "0.000003", "completion": "0.000015", "input_cache_read": "0.0000003"}
+    },
     "openai/gpt-y": {"pricing": {"prompt": "0.000002", "completion": "0.000004"}},  # disagrees
 }
-
-
-@pytest.fixture
-def config_dir(tmp_path: Path) -> Path:
-    (tmp_path / "models.yaml").write_text(
-        """
+MODELS_YAML = """
 providers:
   anthropic: { type: anthropic }
   openai: { type: openai }
+  ollama: { type: openai }
   fake: { type: fake }
   bench: { type: openai, dev_only: true }
 aliases:
-  smart: { chain: [anthropic/claude-x-1, openai/gpt-y, fake/ok, bench/fast] }
+  smart: { chain: [anthropic/claude-x-1, openai/gpt-y, ollama/llama3.2:3b, fake/ok, bench/fast] }
 """
-    )
-    (tmp_path / "pricing.yaml").write_text(
-        """# header comment
-# Last checked: 2026-01-01
+PRICING_YAML = """# header comment
+checked: 2026-01-01
 currency: USD
 models:
   anthropic/claude-x-1:   { input: 2.00,  output: 15.00 }  # keep this comment
   openai/gpt-y:           { input: 1.00,  output: 4.00 }
+
+# trailing comment block
 """
-    )
-    (tmp_path / "catalog.yaml").write_text(
-        "models:\n  anthropic/claude-x-1: { context_window: 100000, quality: 4 }\n"
-    )
+CATALOG_YAML = """# my header — keep me
+checked: 2026-01-01
+models:
+  anthropic/claude-x-1: { context_window: 100000, capabilities: [vision, tools], quality: 4 }  # me
+"""
+
+
+@pytest.fixture
+def config_dir(tmp_path: Path) -> Path:
+    (tmp_path / "models.yaml").write_text(MODELS_YAML)
+    (tmp_path / "pricing.yaml").write_text(PRICING_YAML)
+    (tmp_path / "catalog.yaml").write_text(CATALOG_YAML)
     return tmp_path
 
 
-def test_sync_proposes_changes_and_flags_disagreement(config_dir: Path) -> None:
+def changes_by_key(changes: list[sync_prices.Change]) -> dict[tuple[str, str], sync_prices.Change]:
+    return {(c.target, c.field): c for c in changes}
+
+
+def test_sync_proposes_changes_with_a_status(config_dir: Path) -> None:
     changes, missing = sync_prices.diff(config_dir, LITELLM, OPENROUTER)
-    found = {(c.target, c.field): c for c in changes}
+    found = changes_by_key(changes)
     assert found[("anthropic/claude-x-1", "input")].proposed == 3.0
-    assert found[("anthropic/claude-x-1", "input")].agreed  # both sources say 3.00
-    assert found[("anthropic/claude-x-1", "cached_input")].proposed == 0.3
+    assert found[("anthropic/claude-x-1", "input")].status == "agreed"
+    assert found[("anthropic/claude-x-1", "cached_input")].status == "agreed"
     assert found[("anthropic/claude-x-1", "context_window")].proposed == 200000
-    assert found[("anthropic/claude-x-1", "capabilities")].proposed == ["tools", "vision"]
+    assert ("anthropic/claude-x-1", "capabilities") not in found  # same set, other order
     assert ("openai/gpt-y", "input") not in found  # LiteLLM agrees with the current price
+    # no OpenRouter entry for the local model: its new prices are unchecked
+    assert found[("ollama/llama3.2:3b", "input")].status == "unchecked"
     assert missing == []  # fake/ and dev_only providers are never looked up
 
 
-def test_sync_holds_back_disputed_prices(config_dir: Path) -> None:
+def test_sync_holds_back_disputed_and_unchecked_prices(config_dir: Path) -> None:
     litellm = {
         **LITELLM,
         "gpt-y": {"input_cost_per_token": 1.5e-06, "output_cost_per_token": 4e-06},
     }
-    changes, _ = sync_prices.diff(config_dir, litellm, OPENROUTER)
-    disputed = next(c for c in changes if c.target == "openai/gpt-y" and c.field == "input")
-    assert not disputed.agreed and disputed.check == 2.0
+    found = changes_by_key(sync_prices.diff(config_dir, litellm, OPENROUTER)[0])
+    disputed = found[("openai/gpt-y", "input")]
+    assert disputed.status == "disputed" and disputed.check == 2.0 and not disputed.safe
+    assert not found[("ollama/llama3.2:3b", "input")].safe
+    assert found[("ollama/llama3.2:3b", "context_window")].safe  # facts don't bill anyone
 
 
-def test_sync_write_keeps_comments_alignment_and_quality(
+@pytest.mark.parametrize("bad", ["NaN", "inf", -1e-06, "abc", True, None, [1]])
+def test_sync_ignores_invalid_remote_prices(config_dir: Path, bad: Any) -> None:
+    litellm = {"claude-x-1": {"input_cost_per_token": bad, "output_cost_per_token": bad}}
+    changes, _ = sync_prices.diff(config_dir, litellm, {})
+    assert not [c for c in changes if c.is_price]
+
+
+@pytest.mark.parametrize("bad", ["5000000, capabilities: [vision]", "1\nx: 2", -5, 1.5, True])
+def test_sync_ignores_invalid_remote_sizes(config_dir: Path, bad: Any) -> None:
+    litellm = {"claude-x-1": {"max_input_tokens": bad, "max_output_tokens": bad}}
+    changes, _ = sync_prices.diff(config_dir, litellm, {})
+    assert not changes
+
+
+def test_sync_write_applies_safe_changes_in_place(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     litellm = {
@@ -223,17 +322,47 @@ def test_sync_write_keeps_comments_alignment_and_quality(
     }
     monkeypatch.setattr(sync_prices, "fetch", lambda: (litellm, OPENROUTER))
     assert sync_prices.main(["--config-dir", str(config_dir), "--write"]) == 1
+    today = dt.date.today().isoformat()
+
     pricing = (config_dir / "pricing.yaml").read_text()
     assert (
         "  anthropic/claude-x-1:   { input: 3.00, output: 15.00, cached_input: 0.30 }"
         "  # keep this comment" in pricing
     )
     assert "openai/gpt-y:           { input: 1.00,  output: 4.00 }" in pricing  # disputed: kept
-    assert f"# Last checked: {dt.date.today().isoformat()}" in pricing
+    assert "ollama/llama3.2:3b" not in pricing  # unchecked: not added without --force
+    assert f"checked: {today}" in pricing and "# trailing comment block" in pricing
+
+    catalog_text = (config_dir / "catalog.yaml").read_text()
+    assert "# my header — keep me" in catalog_text and "# me" in catalog_text
     catalog = config.load_catalog(config_dir)
     entry = catalog.models["anthropic/claude-x-1"]
     assert entry.quality == 4 and entry.context_window == 200000  # quality untouched
-    assert config.load_pricing(config_dir).models["anthropic/claude-x-1"].input == 3.0
+    assert catalog.models["ollama/llama3.2:3b"].context_window == 128000  # a new line
+    assert catalog.checked == dt.date.today()
+
+
+def test_sync_force_adds_a_new_target_with_regex_special_characters(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sync_prices, "fetch", lambda: (LITELLM, OPENROUTER))
+    sync_prices.main(["--config-dir", str(config_dir), "--write", "--force"])
+    loaded = config.load_pricing(config_dir)
+    assert loaded.models["ollama/llama3.2:3b"].input == 0.0
+    assert loaded.models["anthropic/claude-x-1"].input == 3.0  # not clobbered
+    text = (config_dir / "pricing.yaml").read_text()
+    # inserted inside the models block, before the trailing comment
+    assert text.index("ollama/llama3.2:3b") < text.index("# trailing comment block")
+
+
+def test_sync_doesnt_touch_files_when_nothing_is_applied(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    litellm = {"gpt-y": {"input_cost_per_token": 1.5e-06, "output_cost_per_token": 4e-06}}
+    monkeypatch.setattr(sync_prices, "fetch", lambda: (litellm, OPENROUTER))
+    assert sync_prices.main(["--config-dir", str(config_dir), "--write"]) == 1  # disputed only
+    assert (config_dir / "pricing.yaml").read_text() == PRICING_YAML
+    assert (config_dir / "catalog.yaml").read_text() == CATALOG_YAML
 
 
 def test_sync_reports_up_to_date(
@@ -242,10 +371,33 @@ def test_sync_reports_up_to_date(
     monkeypatch.setattr(sync_prices, "fetch", lambda: ({}, {}))
     assert sync_prices.main(["--config-dir", str(config_dir), "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["changes"] == [] and set(out["no_source"]) == {
-        "anthropic/claude-x-1",
-        "openai/gpt-y",
-    }
+    assert out["changes"] == []
+    assert set(out["no_source"]) == {"anthropic/claude-x-1", "openai/gpt-y", "ollama/llama3.2:3b"}
+
+
+def test_sync_target_found_by_full_id_is_not_reported_missing(config_dir: Path) -> None:
+    litellm = {"openai/gpt-y": {"input_cost_per_token": 1e-06, "output_cost_per_token": 4e-06}}
+    _, missing = sync_prices.diff(config_dir, litellm, {})
+    assert "openai/gpt-y" not in missing
+
+
+def test_sync_exit_codes(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def offline() -> Any:
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(sync_prices, "fetch", offline)
+    assert sync_prices.main(["--config-dir", str(config_dir)]) == sync_prices.EXIT_FETCH
+    monkeypatch.setattr(sync_prices, "fetch", lambda: (LITELLM, OPENROUTER))
+    (config_dir / "models.yaml").write_text("providers: [oops")  # broken config: not drift
+    assert sync_prices.main(["--config-dir", str(config_dir)]) == sync_prices.EXIT_INTERNAL
+
+
+def test_written_strings_are_valid_yaml() -> None:
+    import yaml
+
+    for value in ["plain", "yes", "1.5", "a: b", "x\ny", "{oops}"]:
+        line = sync_prices._flow({"k": value})
+        assert yaml.safe_load(f"v: {line}")["v"]["k"] == value
 
 
 def test_openrouter_id_guess() -> None:
@@ -254,11 +406,3 @@ def test_openrouter_id_guess() -> None:
         == "anthropic/claude-haiku-4.5"
     )
     assert sync_prices.openrouter_id("openai/gpt-6.1-sol") == "openai/gpt-6.1-sol"
-
-
-def test_sync_fetch_failure_is_not_drift(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def down() -> Any:
-        raise httpx.ConnectError("offline")
-
-    monkeypatch.setattr(sync_prices, "fetch", down)
-    assert sync_prices.main(["--config-dir", str(config_dir)]) == 2

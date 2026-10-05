@@ -1,9 +1,10 @@
 """Propose updates to config/pricing.yaml and config/catalog.yaml from public catalogs.
 
     python -m tools.sync_prices            # show the diff; exit 1 if anything changed
-    python -m tools.sync_prices --write    # apply changes both sources agree on
+    python -m tools.sync_prices --write    # apply prices both sources agree on, and facts
 
-Exit codes: 0 up to date, 1 changes found, 2 the catalogs couldn't be fetched.
+Exit codes: 0 up to date · 1 changes found · 2 bad arguments (argparse) ·
+3 the catalogs couldn't be fetched · 4 internal error. Only 1 means drift.
 
 No provider publishes prices through an API, so this reads two community catalogs:
 
@@ -11,9 +12,15 @@ No provider publishes prices through an API, so this reads two community catalog
   context windows and capability flags.
 - OpenRouter's /models API (cross-check): its own IDs, prices per token.
 
-Prices drive budgets and spend reports, so nothing changes silently. The diff is printed
-for review, and a price the two sources disagree on is flagged and not written unless
-`--force` is given. Quality scores in catalog.yaml are the operator's and are never changed.
+Prices drive budgets and spend reports, so nothing changes silently:
+
+- A price change is `agreed` when both sources give the same value. `--write` applies only
+  those. `disputed` (they differ) and `unchecked` (OpenRouter has no such model) need
+  `--force`, after checking the provider's pricing page.
+- Facts (context window, max output, capabilities) don't affect billing; `--write` applies them.
+- Remote values are validated (finite, non-negative prices; positive integer sizes) before
+  they are compared, printed or written, so bad remote data can't reach the files or issues.
+- Quality scores in catalog.yaml are the operator's and are never changed.
 """
 
 from __future__ import annotations
@@ -21,11 +28,13 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import re
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import yaml
@@ -35,6 +44,7 @@ LITELLM_URL = (
 )
 OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
 PRICE_FIELDS = ("input", "output", "cached_input")
+FACT_FIELDS = ("context_window", "max_output_tokens", "capabilities")
 CAPABILITIES = {  # LiteLLM flag → catalog capability
     "supports_function_calling": "tools",
     "supports_vision": "vision",
@@ -44,6 +54,9 @@ CAPABILITIES = {  # LiteLLM flag → catalog capability
 SKIP_TYPES = {"fake"}  # never priced from public sources
 TOLERANCE = 0.005  # relative difference treated as equal (rounding in the sources)
 
+EXIT_OK, EXIT_DRIFT, EXIT_FETCH, EXIT_INTERNAL = 0, 1, 3, 4
+Status = Literal["agreed", "disputed", "unchecked"]
+
 
 @dataclass
 class Change:
@@ -52,19 +65,49 @@ class Change:
     current: Any
     proposed: Any
     check: Any = None  # the cross-check source's value, if it has one
-    agreed: bool = True  # False: the sources disagree, so it needs a human decision
+    status: Status = "agreed"
+
+    @property
+    def is_price(self) -> bool:
+        return self.field in PRICE_FIELDS
+
+    @property
+    def safe(self) -> bool:
+        """Applied by --write without --force."""
+        return not self.is_price or self.status == "agreed"
 
     def row(self) -> str:
-        flag = "" if self.agreed else "  ⚠ sources disagree"
+        flag = {
+            "agreed": "",
+            "disputed": "  ⚠ sources disagree",
+            "unchecked": "  ⚠ unchecked: not on OpenRouter",
+        }[self.status if self.is_price else "agreed"]
         check = f"  (openrouter: {self.check})" if self.check is not None else ""
         change = f"{self.current!s:>12} → {self.proposed!s:<12}"
         return f"{self.target:42} {self.field:18} {change}{check}{flag}"
 
 
+# --- validation of remote values ---------------------------------------------
+
+
 def per_million(per_token: Any) -> float | None:
-    if per_token in (None, ""):
+    """USD per token → per 1M tokens. Anything that isn't a finite, non-negative number
+    (strings, NaN, inf, negatives) is treated as unknown."""
+    if isinstance(per_token, bool):
         return None
-    return round(float(per_token) * 1_000_000, 6)
+    try:
+        value = float(per_token)
+    except TypeError, ValueError:
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return round(value * 1_000_000, 6)
+
+
+def positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def same(a: float | None, b: float | None) -> bool:
@@ -96,6 +139,14 @@ def targets(models_yaml: dict[str, Any], pricing: dict[str, Any]) -> list[str]:
     return keep
 
 
+def source_for(
+    target: str, litellm: dict[str, Any], entry: dict[str, Any]
+) -> dict[str, Any] | None:
+    model = target.partition("/")[2]
+    src = litellm.get(entry.get("litellm_id") or model) or litellm.get(target)
+    return src if isinstance(src, dict) else None
+
+
 def propose(
     target: str,
     litellm: dict[str, Any],
@@ -103,12 +154,12 @@ def propose(
     price: dict[str, Any],
     entry: dict[str, Any],
 ) -> list[Change]:
-    model = target.partition("/")[2]
-    src = litellm.get(entry.get("litellm_id") or model) or litellm.get(target)
-    if not src:
+    src = source_for(target, litellm, entry)
+    if src is None:
         return []
     check = openrouter.get(entry.get("openrouter_id") or openrouter_id(target))
-    check_prices = (check or {}).get("pricing") or {}
+    check_prices = check.get("pricing") if isinstance(check, dict) else None
+    check_prices = check_prices if isinstance(check_prices, dict) else {}
     proposed = {
         "input": per_million(src.get("input_cost_per_token")),
         "output": per_million(src.get("output_cost_per_token")),
@@ -124,21 +175,29 @@ def propose(
         new, cur, other = proposed[f], price.get(f), checked[f]
         if new is None or same(new, cur):
             continue
-        out.append(Change(target, f, cur, new, other, other is None or same(new, other)))
+        status: Status = (
+            "unchecked" if other is None else "agreed" if same(new, other) else "disputed"
+        )
+        out.append(Change(target, f, cur, new, other, status))
 
-    facts = {
-        "context_window": src.get("max_input_tokens"),
-        "max_output_tokens": src.get("max_output_tokens"),
-        "capabilities": sorted(c for flag, c in CAPABILITIES.items() if src.get(flag)),
+    facts: dict[str, Any] = {
+        "context_window": positive_int(src.get("max_input_tokens")),
+        "max_output_tokens": positive_int(src.get("max_output_tokens")),
+        "capabilities": sorted(c for flag, c in CAPABILITIES.items() if src.get(flag) is True),
     }
     for f, new in facts.items():
-        if new in (None, []) or new == entry.get(f):
+        current = entry.get(f)
+        if f == "capabilities" and isinstance(current, list):
+            current = sorted(current)  # order isn't a change
+        if new in (None, []) or new == current:
             continue
         out.append(Change(target, f, entry.get(f), new))
     return out
 
 
 # --- writing -----------------------------------------------------------------
+
+_PLAIN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./:-]*")
 
 
 def _price(v: float) -> str:
@@ -147,42 +206,72 @@ def _price(v: float) -> str:
     return f"{whole}.{frac.ljust(2, '0')}"
 
 
+def _scalar(v: Any, prices: bool) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int | float):
+        if not math.isfinite(v):
+            raise ValueError(f"refusing to write non-finite number {v!r}")
+        return _price(float(v)) if prices else str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_scalar(x, prices) for x in v) + "]"
+    s = str(v)
+    # Plain only when it can't be read as anything else; otherwise a quoted YAML string.
+    return s if _PLAIN.fullmatch(s) and yaml.safe_load(s) == s else json.dumps(s)
+
+
 def _flow(values: dict[str, Any], prices: bool = False) -> str:
-    def fmt(v: Any) -> str:
-        if prices and isinstance(v, int | float) and not isinstance(v, bool):
-            return _price(float(v))
-        if isinstance(v, list):
-            return "[" + ", ".join(map(str, v)) + "]"
-        return str(v)
-
-    return "{ " + ", ".join(f"{k}: {fmt(v)}" for k, v in values.items()) + " }"
+    return "{ " + ", ".join(f"{k}: {_scalar(v, prices)}" for k, v in values.items()) + " }"
 
 
-def write_pricing(path: Path, changes: list[Change], today: str) -> None:
-    """Rewrite only the changed lines (one model per line), keeping comments."""
-    text = path.read_text()
-    current = yaml.safe_load(text).get("models", {})
-    by_target: dict[str, dict[str, Any]] = {}
-    for c in changes:
-        if c.field in PRICE_FIELDS:
-            by_target.setdefault(c.target, dict(current.get(c.target) or {}))[c.field] = c.proposed
+def _patch_models(text: str, updates: dict[str, dict[str, Any]], prices: bool, note: str) -> str:
+    """Replace `  target: { … }` lines under `models:` in place, keeping indentation, the
+    alignment after the colon and any trailing comment. Targets without a line are
+    inserted at the end of the `models:` block."""
     lines = text.splitlines()
-    for target, values in by_target.items():
-        ordered = {f: values[f] for f in PRICE_FIELDS if values.get(f) is not None}
-        # Keep the indent, the column alignment after the colon, and any trailing comment.
-        pattern = re.compile(rf"^(\s*){re.escape(target)}:(\s*)\{{[^}}]*\}}(.*)$")
+    for target, values in updates.items():
+        pattern = re.compile(
+            rf"^(\s+)({re.escape(target)}|\"{re.escape(target)}\"):(\s*)\{{[^}}]*\}}(.*)$"
+        )
         for i, line in enumerate(lines):
             if m := pattern.match(line):
-                flow = _flow(ordered, prices=True)
-                lines[i] = f"{m.group(1)}{target}:{m.group(2)}{flow}{m.group(3)}"
+                lines[i] = (
+                    f"{m.group(1)}{m.group(2)}:{m.group(3)}{_flow(values, prices)}{m.group(4)}"
+                )
                 break
-        else:  # a target that had no price yet
-            lines.append(
-                f"  {target}: {_flow(ordered, prices=True)}  # added by sync_prices {today}"
-            )
-    out = "\n".join(lines) + "\n"
-    out = re.sub(r"# Last checked: [0-9-]+", f"# Last checked: {today}", out, count=1)
+        else:
+            # After the last indented line of the block; the block ends at the first
+            # non-blank line in column 0 (the next key, or a comment block).
+            start = next(i for i, line in enumerate(lines) if line.rstrip() == "models:")
+            end = start + 1
+            for i in range(start + 1, len(lines)):
+                if lines[i].startswith((" ", "\t")):
+                    end = i + 1
+                elif lines[i].strip():
+                    break
+            lines.insert(end, f"  {target}: {_flow(values, prices)}  # {note}")
+    return "\n".join(lines) + "\n"
+
+
+def write_pricing(path: Path, changes: list[Change], today: str) -> bool:
+    """Apply price changes. Returns whether anything was written."""
+    updates_raw = [c for c in changes if c.is_price]
+    if not updates_raw:
+        return False
+    text = path.read_text()
+    current = (yaml.safe_load(text) or {}).get("models") or {}
+    updates: dict[str, dict[str, Any]] = {}
+    for c in updates_raw:
+        updates.setdefault(c.target, dict(current.get(c.target) or {}))[c.field] = c.proposed
+    ordered = {
+        t: {f: v[f] for f in PRICE_FIELDS if v.get(f) is not None}
+        | {k: x for k, x in v.items() if k not in PRICE_FIELDS}
+        for t, v in updates.items()
+    }
+    out = _patch_models(text, ordered, prices=True, note=f"added by sync_prices {today}")
+    out = re.sub(r"(?m)^checked: .*$", f"checked: {today}", out, count=1)
     path.write_text(out)
+    return True
 
 
 CATALOG_HEADER = """\
@@ -191,23 +280,32 @@ CATALOG_HEADER = """\
 # catalogs — review the diff before committing. quality: YOUR score, 1 (basic) to 5
 # (frontier), for your own use cases; the sync never changes it.
 # Optional per model: litellm_id / openrouter_id when the source uses a different ID.
+
+checked: {today}
+models:
 """
 
 
-def write_catalog(path: Path, catalog: dict[str, Any], changes: list[Change], today: str) -> None:
-    models: dict[str, dict[str, Any]] = {
-        t: dict(v or {}) for t, v in (catalog.get("models") or {}).items()
+def write_catalog(path: Path, changes: list[Change], today: str) -> bool:
+    """Apply fact changes in place (comments and other keys are kept). Returns whether
+    anything was written."""
+    facts = [c for c in changes if not c.is_price]
+    if not facts:
+        return False
+    text = path.read_text() if path.exists() else CATALOG_HEADER.format(today=today)
+    current = (yaml.safe_load(text) or {}).get("models") or {}
+    updates: dict[str, dict[str, Any]] = {}
+    for c in facts:
+        updates.setdefault(c.target, dict(current.get(c.target) or {}))[c.field] = c.proposed
+    order = (*FACT_FIELDS, "quality")
+    ordered = {
+        t: {k: v[k] for k in order if k in v} | {k: x for k, x in v.items() if k not in order}
+        for t, v in updates.items()
     }
-    for c in changes:
-        if c.field not in PRICE_FIELDS:
-            models.setdefault(c.target, {})[c.field] = c.proposed
-    order = ("context_window", "max_output_tokens", "capabilities", "quality")
-    lines = [CATALOG_HEADER, f"checked: {today}", "models:"]
-    for t in sorted(models):
-        v = models[t]
-        ordered = {k: v[k] for k in order if k in v} | {k: v[k] for k in v if k not in order}
-        lines.append(f"  {t}: {_flow(ordered)}")
-    path.write_text("\n".join(lines) + "\n")
+    out = _patch_models(text, ordered, prices=False, note=f"added by sync_prices {today}")
+    out = re.sub(r"(?m)^checked: .*$", f"checked: {today}", out, count=1)
+    path.write_text(out)
+    return True
 
 
 # --- CLI ---------------------------------------------------------------------
@@ -217,7 +315,11 @@ def fetch() -> tuple[dict[str, Any], dict[str, Any]]:
     with httpx.Client(timeout=60, follow_redirects=True) as http:
         litellm = http.get(LITELLM_URL).raise_for_status().json()
         data = http.get(OPENROUTER_URL).raise_for_status().json()["data"]
-    return litellm, {m["id"]: m for m in data}
+    if not isinstance(litellm, dict) or not isinstance(data, list):
+        raise ValueError("unexpected catalog format")
+    return litellm, {
+        m["id"]: m for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)
+    }
 
 
 def diff(
@@ -226,58 +328,62 @@ def diff(
     models_yaml = yaml.safe_load((config_dir / "models.yaml").read_text())
     pricing = yaml.safe_load((config_dir / "pricing.yaml").read_text())
     catalog_path = config_dir / "catalog.yaml"
-    catalog = yaml.safe_load(catalog_path.read_text()) if catalog_path.exists() else {}
+    catalog = (yaml.safe_load(catalog_path.read_text()) if catalog_path.exists() else None) or {}
     changes: list[Change] = []
     missing: list[str] = []
     for t in targets(models_yaml, pricing):
         price = (pricing.get("models") or {}).get(t) or {}
-        entry = ((catalog or {}).get("models") or {}).get(t) or {}
-        found = propose(t, litellm, openrouter, price, entry)
-        if not found and not (litellm.get(entry.get("litellm_id") or t.partition("/")[2])):
+        entry = (catalog.get("models") or {}).get(t) or {}
+        if source_for(t, litellm, entry) is None:
             missing.append(t)
-        changes += found
+            continue
+        changes += propose(t, litellm, openrouter, price, entry)
     return changes, missing
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("--config-dir", type=Path, default=Path("config"))
-    p.add_argument("--write", action="store_true", help="apply changes the sources agree on")
-    p.add_argument("--force", action="store_true", help="with --write: also apply disputed ones")
+    p.add_argument("--write", action="store_true", help="apply agreed prices and all facts")
+    p.add_argument(
+        "--force", action="store_true", help="with --write: also disputed/unchecked prices"
+    )
     p.add_argument("--json", action="store_true", help="machine-readable output")
     args = p.parse_args(argv)
 
     try:
         litellm, openrouter = fetch()
-    except (httpx.HTTPError, ValueError, KeyError) as exc:
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         print(f"could not fetch the price catalogs: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2  # not drift: nothing was compared
-    changes, missing = diff(args.config_dir, litellm, openrouter)
-    if args.json:
-        print(
-            json.dumps({"changes": [c.__dict__ for c in changes], "no_source": missing}, indent=2)
-        )
-    else:
-        for c in changes:
-            print(c.row())
-        if missing:
-            print(f"\nno public source (kept as is): {', '.join(missing)}")
-        if not changes:
-            print("pricing and catalog are up to date")
-    if args.write and changes:
-        apply = [c for c in changes if c.agreed or args.force]
-        today = dt.date.today().isoformat()
-        write_pricing(args.config_dir / "pricing.yaml", apply, today)
-        catalog_path = args.config_dir / "catalog.yaml"
-        catalog = yaml.safe_load(catalog_path.read_text()) if catalog_path.exists() else {}
-        write_catalog(catalog_path, catalog or {}, apply, today)
-        skipped = len(changes) - len(apply)
-        print(
-            f"\nwrote {len(apply)} change(s)"
-            + (f"; {skipped} disputed, skipped" if skipped else "")
-        )
-        print("review with `git diff config/`, then `make reload`")
-    return 1 if changes else 0
+        return EXIT_FETCH  # not drift: nothing was compared
+    try:
+        changes, missing = diff(args.config_dir, litellm, openrouter)
+        if args.json:
+            rows = [c.__dict__ for c in changes]
+            print(json.dumps({"changes": rows, "no_source": missing}, indent=2))
+        else:
+            for c in changes:
+                print(c.row())
+            if missing:
+                print(f"\nno public source (kept as is): {', '.join(missing)}")
+            if not changes:
+                print("pricing and catalog are up to date")
+        if args.write and changes:
+            apply = [c for c in changes if c.safe or args.force]
+            today = dt.date.today().isoformat()
+            wrote = write_pricing(args.config_dir / "pricing.yaml", apply, today)
+            wrote |= write_catalog(args.config_dir / "catalog.yaml", apply, today)
+            held = len(changes) - len(apply)
+            print(
+                f"\nwrote {len(apply)} change(s)"
+                + (f"; {held} held back (need --force)" if held else "")
+            )
+            if wrote:
+                print("review with `git diff config/`, then `make reload`")
+    except Exception:
+        traceback.print_exc()
+        return EXIT_INTERNAL
+    return EXIT_DRIFT if changes else EXIT_OK
 
 
 if __name__ == "__main__":

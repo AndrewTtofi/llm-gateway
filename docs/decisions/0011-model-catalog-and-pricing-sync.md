@@ -45,13 +45,25 @@ each replica only sees its own traffic.
 ## Decision
 - **Sync tool plus review (option 3).** `tools/sync_prices.py` (`make prices`):
   - LiteLLM is the primary source and OpenRouter the cross-check.
-  - It prints a diff and exits 1 on drift. `--write` applies only the changes the two sources
-    agree on (within 0.5%). Disputed prices need `--force`, after checking the provider's
-    pricing page.
+  - It prints a diff and exits 1 on drift (3: the catalogs couldn't be fetched; 4: internal
+    error).
+  - Each price change has a status:
+    - `agreed`: both sources give it, within 0.5%;
+    - `disputed`: the sources differ;
+    - `unchecked`: OpenRouter has no such model, and its ID is only a guess.
+  - `--write` applies agreed prices and all model facts. Facts don't affect billing. Disputed
+    and unchecked prices need `--force`, after checking the provider's pricing page.
+  - Remote values are validated before they are compared, printed or written: prices must be
+    finite and non-negative, sizes positive integers. Strings are written as quoted YAML when
+    needed.
+  - Files are patched line by line, so comments and other keys survive. A file is only
+    rewritten, and its `checked:` date only bumped, when a change is applied to it.
+  - The gateway also rejects negative or non-finite prices when it loads `pricing.yaml`.
   - Fake and `dev_only` providers are never looked up. Local models with no public source are
     reported and left alone.
   - A weekly workflow (`.github/workflows/prices.yml`) runs the check and opens or updates one
-    issue on drift. It has read-only repo access and never edits config.
+    labelled issue on drift, and closes it when the drift is gone. It only touches issues it
+    opened. It has read-only repo access and never edits config.
 - **`config/catalog.yaml`** holds per-target facts:
   - `context_window`, `max_output_tokens` and `capabilities` (tools, vision, reasoning,
     json_schema) are synced.
@@ -70,9 +82,16 @@ each replica only sees its own traffic.
 ## Consequences
 - Apps can choose a model, or an alias, from data instead of guesswork.
 - Price drift is noticed within a week and fixed through a normal reviewed PR.
-- Live stats are per replica and since that replica's start. Behind a load balancer, two
-  calls may show different numbers. For fleet-wide history, use Prometheus and Grafana.
-  Latency depends on answer length, so TTFT is the fairer comparison between models.
+- Live stats are per replica and cover at most the last 15 minutes. Under heavy traffic the
+  2 000-sample cap is reached sooner, and `window_seconds` reports the span actually covered.
+  Behind a load balancer, two calls may show different numbers. For fleet-wide history, use
+  Prometheus and Grafana.
+- Latency mixes streamed and non-streamed requests and depends on answer length. TTFT is the
+  fairer comparison between models.
+- A stream that fails after its first token still counts as a successful *attempt*.
+  Disconnected requests (499) are excluded from latency.
+- Breaker state is read for all targets concurrently. While the breaker store is failing open,
+  it's reported as `unknown` rather than a guessed `closed`.
 - Long-context price tiers (e.g. OpenAI above 272K input tokens) and batch prices aren't
   modelled. The gateway bills the standard short-context rate.
 - **Next step: policy routing.** Clients ask for `auto` with hints (optimise for cost,

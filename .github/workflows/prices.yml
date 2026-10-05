@@ -1,14 +1,19 @@
 name: prices
 # Weekly check of config/pricing.yaml + catalog.yaml against public catalogs (ADR 0011).
-# It never edits config: if anything drifted, it opens (or updates) one issue with the
-# diff, for a human to review and apply with `make prices ARGS=--write`.
+# It never edits config. If anything drifted, it opens (or updates) one labelled issue with
+# the diff, for a human to review and apply with `make prices ARGS=--write`; when the drift
+# is gone, it closes that issue.
 on:
   schedule: [{ cron: "17 6 * * 1" }]   # Mondays 06:17 UTC
   workflow_dispatch:
 
 permissions:
   contents: read
-  issues: write   # only to open/update the drift issue
+  issues: write   # only to open/update/close the drift issue
+
+env:
+  LABEL: price-drift
+  TITLE: Model prices or catalog out of date
 
 jobs:
   check:
@@ -26,22 +31,37 @@ jobs:
           set +e
           python -m tools.sync_prices > diff.txt
           rc=$?
-          echo "drift=$rc" >> "$GITHUB_OUTPUT"
+          set -e
           cat diff.txt
-          [ "$rc" -le 1 ]   # 2 = couldn't fetch: fail the run instead of filing an issue
-      - name: open or update the drift issue
-        if: steps.diff.outputs.drift == '1'
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # 0 up to date, 1 drift; anything else (fetch failed, internal error) fails the run
+          [ "$rc" -le 1 ]
+      - name: find the bot's open drift issue
+        id: issue
         env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          # Only an issue this workflow opened (label + bot author), never someone else's.
+          number=$(gh issue list --state open --label "$LABEL" --author "app/github-actions" \
+            --json number -q '.[0].number // empty')
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+      - name: open or update it
+        if: steps.diff.outputs.rc == '1'
+        env: { GH_TOKEN: "${{ github.token }}", NUMBER: "${{ steps.issue.outputs.number }}" }
         run: |
           {
             echo "Public price catalogs differ from \`config/\` (checked $(date -u +%F))."
             echo
-            echo '```'; cat diff.txt; echo '```'
+            # ~~~~ fence: the diff can't close it; @ is defused so nothing can mention anyone
+            echo '~~~~'; sed 's/~~~~/~ ~ ~ ~/g; s/@/@\xe2\x80\x8b/g' diff.txt; echo '~~~~'
             echo
-            echo 'Review, then run `make prices ARGS=--write` (disputed values need `--force`),'
-            echo 'check `git diff config/` against the providers'"'"' pricing pages, and open a PR.'
+            echo 'Review, then run `make prices ARGS=--write` (disputed/unchecked prices need'
+            echo '`--force`), check `git diff config/` against the providers'"'"' pricing pages,'
+            echo 'and open a PR.'
           } > body.md
-          title="Model prices or catalog out of date"
-          number=$(gh issue list --state open --search "in:title \"$title\"" --json number -q '.[0].number')
-          if [ -n "$number" ]; then gh issue edit "$number" --body-file body.md
-          else gh issue create --title "$title" --body-file body.md; fi
+          gh label create "$LABEL" --color FBCA04 --description "Pricing config drift" 2>/dev/null || true
+          if [ -n "$NUMBER" ]; then gh issue edit "$NUMBER" --body-file body.md
+          else gh issue create --title "$TITLE" --label "$LABEL" --body-file body.md; fi
+      - name: close it when there's no drift
+        if: steps.diff.outputs.rc == '0' && steps.issue.outputs.number != ''
+        env: { GH_TOKEN: "${{ github.token }}", NUMBER: "${{ steps.issue.outputs.number }}" }
+        run: gh issue close "$NUMBER" --comment "Prices and catalog match the public catalogs again."

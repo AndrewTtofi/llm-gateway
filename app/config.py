@@ -94,13 +94,18 @@ class Limits(BaseModel):
     tiers: dict[str, Tier]
 
 
+# A negative or non-finite price would corrupt spend and let keys past their budgets.
+_PRICE = Field(default=None, ge=0, allow_inf_nan=False)
+
+
 class Price(BaseModel):
-    input: float | None = None  # USD per 1M tokens; None = unknown
-    output: float | None = None
-    cached_input: float | None = None  # cache reads; None = billed as normal input
+    input: float | None = _PRICE  # USD per 1M tokens; None = unknown
+    output: float | None = _PRICE
+    cached_input: float | None = _PRICE  # cache reads; None = billed as normal input
 
 
 class Pricing(BaseModel):
+    checked: date | None = None  # when prices were last compared with public catalogs
     currency: str = "USD"
     models: dict[str, Price] = {}
 
@@ -124,6 +129,9 @@ class Pricing(BaseModel):
         ) / 1_000_000
 
 
+Capability = Literal["tools", "vision", "reasoning", "json_schema"]
+
+
 class CatalogEntry(BaseModel):
     """Facts about one target, for /v1/catalog (ADR 0011). Unknown = None."""
 
@@ -131,7 +139,7 @@ class CatalogEntry(BaseModel):
 
     context_window: int | None = Field(default=None, gt=0)
     max_output_tokens: int | None = Field(default=None, gt=0)
-    capabilities: list[Literal["tools", "vision", "reasoning", "json_schema"]] = []
+    capabilities: list[Capability] = []
     quality: int | None = Field(default=None, ge=1, le=5)  # the operator's score
 
 

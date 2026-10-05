@@ -10,22 +10,27 @@ Version plan: each completed phase bumps the minor version
 ## [Unreleased]
 
 ### Added
-- `GET /v1/catalog`: price, a blended price, context window, capabilities, quality score, breaker state and live per-model stats for the calling key's models. Live stats are latency, TTFT and error rate over this replica's last 15 minutes. Supports filters and sorting (ADR 0011)
+- `GET /v1/catalog`: for the calling key's models, returns:
+  - price and a blended price;
+  - context window, capabilities and quality score;
+  - breaker state and live per-model stats (latency, TTFT and error rate over this replica's last 15 minutes).
+  Supports filters and sorting (ADR 0011)
 - `config/catalog.yaml`: model facts plus the operator's quality score
-- `make prices` (`tools/sync_prices.py`): compares pricing and catalog with LiteLLM's price list and OpenRouter's API, and prints a reviewed diff. `--write` applies only the changes both sources agree on
-- Weekly `prices` workflow: opens or updates one issue when prices drift
-- Wiki page "Choosing models"
-
-### Fixed
-- OpenAI cached-input prices were missing from `pricing.yaml`, so cache reads were billed at the full input price
-
-### Added
+- `make prices` (`tools/sync_prices.py`): compares pricing and catalog with LiteLLM's price list and OpenRouter's API, and prints a diff for review. `--write` applies prices both sources agree on, plus model facts. Prices that are disputed, or that only one source has, need `--force`. Remote values are validated before use
+- Weekly `prices` workflow: opens, updates or closes one labelled issue as prices drift
+- `pricing.yaml` has a `checked:` date; prices are validated on load (no negative or non-finite values)
 - Wiki (`docs/wiki/`, published to the GitHub Wiki tab with `scripts/publish_wiki.sh`):
   - getting started, core concepts, architecture;
   - providers and translation, routing and reliability, keys/limits/budgets;
   - observability, configuration and API references;
-  - operations, testing and benchmarks, security;
+  - choosing models, operations, testing and benchmarks, security;
   - a multi-app use case, subscriptions and provider terms, FAQ, glossary.
+
+### Changed
+- `/v1/models` lists every direct model `resolve` accepts (the same set as `/v1/catalog`)
+
+### Fixed
+- OpenAI cached-input prices were missing from `pricing.yaml`, so cache reads were billed at the full input price
 
 ## [1.1.0] - 2026-10-05 (Phase 8 — Anthropic Messages API)
 

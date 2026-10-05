@@ -6,7 +6,7 @@ Keep "Current state" short and always true.
 
 ## Current state
 - **Phase:** 8 — extensions. First: inbound Anthropic Messages API (`phase-8-messages-api`)
-- **Branch:** `phase-8-messages-api` · `v1.0.0` tagged + released on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
+- **Branch:** `phase-8-cost-catalog` (on top of `docs-wiki`) · `v1.0.0` tagged + released on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
 - **Status:**
   - PR #9 (`/v1/messages`, v1.1.0) is waiting on CI after the GitHub outage.
   - The `docs-wiki` branch has the wiki (17 pages + publish script).

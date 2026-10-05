@@ -60,6 +60,16 @@ def _ms(values: list[float]) -> dict[str, float] | None:
     return {"p50": round(_pct(values, 50) * 1000, 1), "p95": round(_pct(values, 95) * 1000, 1)}
 
 
+def _covered(t: _Target | None, window: float) -> float:
+    if t is None:
+        return window
+    now, span = _clock(), window
+    for samples in (t.attempts, t.served):
+        if len(samples) == samples.maxlen:
+            span = min(span, now - samples[0][0])
+    return span
+
+
 def snapshot(target: str, window: float = WINDOW_SECONDS) -> dict[str, Any]:
     """Stats over the last `window` seconds; `requests: 0` and nulls when there's no data."""
     t = _targets.get(target)
@@ -67,7 +77,9 @@ def snapshot(target: str, window: float = WINDOW_SECONDS) -> dict[str, Any]:
     attempts = [ok for at, ok in (t.attempts if t else ()) if at >= since]
     served = [(lat, ttft) for at, lat, ttft in (t.served if t else ()) if at >= since]
     return {
-        "window_seconds": int(window),
+        # Under heavy traffic the sample cap is reached before the window ends: report
+        # the span the numbers actually cover.
+        "window_seconds": int(_covered(t, window)),
         "requests": len(served),
         "attempts": len(attempts),
         "error_rate": round(1 - sum(attempts) / len(attempts), 4) if attempts else None,
