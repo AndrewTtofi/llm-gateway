@@ -28,16 +28,28 @@ class OpenAICompatAdapter(ProviderAdapter):
         connect = float(t.get("connect", 5))
         # Non-streaming: the provider sends nothing until the whole answer is generated,
         # so the read timeout has to cover the full generation → `total`.
-        self._timeout = httpx.Timeout(float(t.get("total", 300)), connect=connect)
+        pool_wait = float(t.get("pool", 5))
+        # pool: how long to wait for a free connection when all are busy. Short, so a
+        # saturated provider fails fast and the router falls back instead of queueing.
+        self._timeout = httpx.Timeout(float(t.get("total", 300)), connect=connect, pool=pool_wait)
         # Streaming: the read timeout bounds silence between chunks (`stream_idle`); the
         # wait for the first chunk (prompt processing) has its own `first_token` budget.
-        self._stream_timeout = httpx.Timeout(float(t.get("stream_idle", 120)), connect=connect)
+        self._stream_timeout = httpx.Timeout(
+            float(t.get("stream_idle", 120)), connect=connect, pool=pool_wait
+        )
         self._first_token = float(t.get("first_token", 30))
         headers = {}
         key_env = cfg.get("api_key_env")
         if key_env and (key := os.environ.get(key_env)):
             headers["Authorization"] = f"Bearer {key}"
-        self._client = httpx.AsyncClient(base_url=str(cfg.get("base_url", "")), headers=headers)
+        lim = cfg.get("limits", {})
+        limits = httpx.Limits(
+            max_connections=int(lim.get("max_connections", 100)),
+            max_keepalive_connections=int(lim.get("max_keepalive", 20)),
+        )
+        self._client = httpx.AsyncClient(
+            base_url=str(cfg.get("base_url", "")), headers=headers, limits=limits
+        )
 
     async def chat(self, model: str, request: dict[str, Any]) -> dict[str, Any]:
         body = {**request, "model": model, "stream": False}

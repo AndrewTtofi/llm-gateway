@@ -77,12 +77,12 @@ Learn: provider API differences, adapter pattern, config-driven design.
 
 ### Phase 3 — Reliability: fallback routing (days 7–9)
 Goal: provider failures are invisible to the client.
-- [ ] Per-call timeouts (connect, first token, total) from config
-- [ ] Retry with exponential backoff + jitter on 429/5xx/timeouts
-- [ ] Fallback chain per alias; response header `x-gateway-provider` shows who served it
-- [ ] Circuit breaker per provider (closed → open → half-open), state in Redis
-- [ ] Mid-stream failure policy decided and documented in `docs/decisions/` (ADR)
-- [ ] Fake "chaos provider" adapter for tests (random 500/429/latency)
+- [x] Per-call timeouts (connect, first token, total) from config
+- [x] Retry with exponential backoff + jitter on 429/5xx/timeouts
+- [x] Fallback chain per alias; response header `x-gateway-provider` shows who served it
+- [x] Circuit breaker per provider (closed → open → half-open), state in Redis
+- [x] Mid-stream failure policy decided and documented in `docs/decisions/` (ADR)
+- [x] Fake "chaos provider" adapter for tests (random 500/429/latency)
 
 DoD: with the primary provider forced to fail, 100% of requests succeed via fallback; breaker opens and recovers.
 Learn: resilience patterns applied to LLM traffic.

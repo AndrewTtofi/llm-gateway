@@ -1,7 +1,9 @@
 # Model registry — the ONLY place models are named.
 # Timeouts (seconds): connect · first_token = wait for the first stream event ·
 # stream_idle = max silence between stream events (thinking models pause long) ·
-# total = non-streaming read (the whole answer arrives at once).
+# stream_total = hard cap on a whole stream · total = non-streaming read (the whole
+# answer arrives at once) · pool = wait for a free connection when all are busy.
+# limits: connection pool size per provider (requests beyond it wait `pool` seconds).
 # Change a model: edit here, then `make reload` (no restart, no code change).
 # Verify current model IDs in each provider's docs before adding them.
 
@@ -10,7 +12,8 @@ providers:
     type: anthropic
     base_url: https://api.anthropic.com
     api_key_env: ANTHROPIC_API_KEY
-    timeouts: { connect: 5, first_token: 30, stream_idle: 300, total: 300 }
+    timeouts: { connect: 5, first_token: 30, stream_idle: 300, stream_total: 900, total: 300, pool: 5 }
+    limits: { max_connections: 100, max_keepalive: 20 }
     default_max_tokens: 16000   # Anthropic requires max_tokens; used when the client omits it
     # What each model accepts. The adapter translates OpenAI params accordingly.
     # Check the provider's model docs when adding a model; unlisted models get `defaults`.
@@ -27,16 +30,32 @@ providers:
     type: openai
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
-    timeouts: { connect: 5, first_token: 30, stream_idle: 120, total: 300 }
+    timeouts: { connect: 5, first_token: 30, stream_idle: 120, stream_total: 900, total: 300, pool: 5 }
+    limits: { max_connections: 100, max_keepalive: 20 }
   ollama:
     type: openai          # Ollama exposes an OpenAI-compatible API
     base_url: ${OLLAMA_BASE_URL}
     api_key_env: null
-    timeouts: { connect: 2, first_token: 60, stream_idle: 120, total: 600 }
-  fake:                   # chaos/test provider, never used in prod aliases
+    timeouts: { connect: 2, first_token: 60, stream_idle: 120, stream_total: 1200, total: 600, pool: 5 }
+    limits: { max_connections: 20, max_keepalive: 5 }
+  fake:                   # chaos provider for tests and demos — never in production aliases
     type: fake
-    failure_rate: 0.3
-    latency_ms: [50, 2000]
+    timeouts: { first_token: 10, stream_total: 60 }
+    # Each "model" is a failure profile:
+    #   failure_rate      share of calls that fail before the first token
+    #   fail_status       statuses to fail with (random pick)
+    #   latency_ms        [min, max] added before answering
+    #   mid_stream_failure_rate  share of streams that die after the first chunk
+    #   chunk_delay_ms    pause between streamed chunks
+    #   down_window       { period_s, down_s }: fails for the first down_s of every period_s
+    #                     (an outage that comes back — for watching the breaker recover)
+    models:
+      ok:     { failure_rate: 0.0, latency_ms: [5, 20] }
+      flaky:  { failure_rate: 0.3, fail_status: [429, 500, 503], latency_ms: [50, 300] }
+      down:   { failure_rate: 1.0, fail_status: [503] }
+      slow:   { failure_rate: 0.0, latency_ms: [3000, 5000] }
+      blip:   { down_window: { period_s: 60, down_s: 20 }, fail_status: [503] }
+      broken-stream: { mid_stream_failure_rate: 1.0 }
 
 # Aliases are what clients send as `model`. Each is an ordered fallback chain.
 aliases:
@@ -58,21 +77,36 @@ aliases:
   local:
     chain:
       - ollama/llama3.2:3b
-  chaos:
+  chaos:            # 30% failures on the primary; fallback hides them
     chain:
       - fake/flaky
       - ollama/llama3.2:3b
+  chaos-down:       # primary always down: the breaker opens, traffic flows to the fallback
+    chain:
+      - fake/down
+      - fake/ok
+  chaos-blip:       # primary down 20s of every minute: watch the breaker open and recover
+    chain:
+      - fake/blip
+      - fake/ok
 
 # Allow clients to request `provider/model` directly (bypassing aliases)?
 allow_direct_models: true
 
+# Retry the same target before falling back to the next one (ADR 0004).
 retry:
-  max_attempts_per_provider: 2
-  backoff_base_ms: 250
-  backoff_max_ms: 4000
+  max_attempts_per_provider: 2          # 1 = no retries
+  backoff_base_ms: 250                  # full jitter: sleep random(0, min(max, base * 2^n))
+  backoff_max_ms: 4000                  # a longer retry-after skips to the next target
   retry_on_status: [408, 409, 429, 500, 502, 503, 504, 529]
 
+# One breaker per provider/model target (ADR 0004).
 circuit_breaker:
+  store: redis              # redis (shared across instances) | memory (single process)
   failure_threshold: 5      # failures within window to open
   window_seconds: 60
-  open_seconds: 30          # then half-open, one probe request
+  open_seconds: 30          # then half-open: one probe request
+  probe_timeout_seconds: 330 # longer than the slowest call (timeouts.total), or a slow
+                             # but healthy probe would let a second probe through
+  redis_timeout_ms: 100      # Redis is a LAN hop. On errors the breaker fails open and
+                             # skips Redis for 5s, so an outage doesn't slow every request

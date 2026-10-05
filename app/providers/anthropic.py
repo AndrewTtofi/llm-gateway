@@ -35,16 +35,28 @@ class AnthropicAdapter(ProviderAdapter):
         connect = float(t.get("connect", 5))
         # Same reasoning as the OpenAI adapter: non-streaming reads must cover the whole
         # generation; streaming reads only the longest gap (before the first token).
-        self._timeout = httpx2.Timeout(float(t.get("total", 300)), connect=connect)
-        self._stream_timeout = httpx2.Timeout(float(t.get("stream_idle", 300)), connect=connect)
+        pool_wait = float(t.get("pool", 5))  # fail fast when all connections are busy
+        self._timeout = httpx2.Timeout(float(t.get("total", 300)), connect=connect, pool=pool_wait)
+        self._stream_timeout = httpx2.Timeout(
+            float(t.get("stream_idle", 300)), connect=connect, pool=pool_wait
+        )
         self._first_token = float(t.get("first_token", 30))
         self._default_max_tokens = int(cfg.get("default_max_tokens", 4096))
         key_env = cfg.get("api_key_env")
         self._key_env = str(key_env or "")
         key = os.environ.get(self._key_env) if key_env else None
+        lim = cfg.get("limits", {})
+        limits = httpx2.Limits(
+            max_connections=int(lim.get("max_connections", 100)),
+            max_keepalive_connections=int(lim.get("max_keepalive", 20)),
+        )
         self._client: anthropic.AsyncAnthropic | None = (
             anthropic.AsyncAnthropic(
-                api_key=key, base_url=cfg.get("base_url") or None, max_retries=0
+                api_key=key,
+                base_url=cfg.get("base_url") or None,
+                max_retries=0,
+                # The SDK's own client class keeps its defaults; only the pool changes.
+                http_client=anthropic.DefaultAsyncHttpxClient(limits=limits),
             )
             if key
             else None

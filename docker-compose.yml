@@ -2,6 +2,8 @@ services:
   gateway:
     build: .
     env_file: .env
+    environment:
+      GATEWAY_ENABLE_FAKE: "1"       # dev only: loads the chaos provider + chaos aliases
     ports: ["8000:8000"]
     volumes:
       - ./config:/app/config:ro      # edit YAML on host, `make reload` picks it up

@@ -4,7 +4,7 @@ tiers:
     requests_per_minute: 60
     tokens_per_minute: 50000
     monthly_budget_usd: 10
-    allowed_aliases: [fast, local, chaos]
+    allowed_aliases: [fast, local]   # chaos aliases exist only with GATEWAY_ENABLE_FAKE=1
   standard:
     requests_per_minute: 300
     tokens_per_minute: 200000

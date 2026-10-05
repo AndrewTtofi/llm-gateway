@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config, main
+from app import config, main, providers
 
 ADMIN = {"Authorization": "Bearer gw_admin_test"}
 
@@ -67,7 +67,7 @@ def test_sighup_handler_reloads_and_survives_errors(cfg_dir: Path) -> None:
 
 
 def test_provider_config_change_gets_a_fresh_adapter(cfg_dir: Path) -> None:
-    pool = main.pool
+    pool = providers.pool
     a1, _, _ = main.resolve_target("local")
     assert main.resolve_target("local")[0] is a1  # reused while config is unchanged
     (cfg_dir / "models.yaml").write_text(
@@ -77,4 +77,25 @@ def test_provider_config_change_gets_a_fresh_adapter(cfg_dir: Path) -> None:
     )
     config.reload_registry()
     a2, _, _ = main.resolve_target("local")
-    assert a2 is not a1 and pool is main.pool
+    assert a2 is not a1 and pool is providers.pool
+
+
+async def test_retired_adapter_is_closed_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from app.providers import AdapterPool
+
+    monkeypatch.setattr(AdapterPool, "grace_seconds", staticmethod(lambda cfg: 0.05))
+    pool = AdapterPool()
+    cfg = {"type": "fake", "models": {}}
+    old = pool.get("chaos", cfg)
+    closed = asyncio.Event()
+
+    async def mark_closed() -> None:
+        closed.set()
+
+    monkeypatch.setattr(old, "aclose", mark_closed)
+    new = pool.get("chaos", {**cfg, "seed": 1})  # config changed → new adapter
+    assert new is not old and not closed.is_set()  # in-flight requests may still use it
+    await asyncio.wait_for(closed.wait(), timeout=1)
+    await pool.aclose()

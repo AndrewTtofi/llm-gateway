@@ -215,3 +215,34 @@ async def test_disconnect_raises_client_disconnected() -> None:
 
     with pytest.raises(main.ClientDisconnected):
         await main.cancel_on_disconnect(Request({"type": "http"}, receive), asyncio.sleep(10))
+
+
+@pytest.mark.usefixtures("registry")
+async def test_upstream_closed_when_client_leaves_during_the_first_chunk() -> None:
+    """Review blocker: the committed-stream wrapper hadn't started yet, so closing it
+    didn't reach the upstream. Disconnect while the *first* chunk is being written."""
+    from app.routing import router
+    from app.schemas import ChatCompletionRequest
+
+    upstream = HangingStream()
+    use_transport(lambda req: httpx.Response(200, stream=upstream))
+    body = ChatCompletionRequest.model_validate(
+        {"model": "local", "messages": [{"role": "user", "content": "x"}], "stream": True}
+    )
+    (first, chunks), _ = await router.route_stream(body)
+    resp = main.SSEResponse(main.relay_sse(first, chunks), upstream=chunks, headers={})
+    writing = asyncio.Event()
+
+    async def receive() -> dict[str, Any]:
+        await writing.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(msg: dict[str, Any]) -> None:
+        if msg["type"] == "http.response.body":
+            writing.set()
+            await asyncio.Event().wait()  # stuck writing the first chunk
+
+    await asyncio.wait_for(
+        resp({"type": "http", "asgi": {"spec_version": "2.3"}}, receive, send), 2
+    )
+    await asyncio.wait_for(upstream.closed.wait(), timeout=2)
