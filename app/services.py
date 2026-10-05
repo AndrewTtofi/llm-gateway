@@ -7,9 +7,11 @@ here rather than holding their own reference.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from redis.asyncio import Redis
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app import config
@@ -38,9 +40,10 @@ _engine: AsyncEngine | None = None
 
 
 async def start() -> None:
-    global keys, limiter, spend, usage, _redis, _engine, _writer
+    global keys, limiter, spend, usage, _redis, _engine, _writer, started
     if config.settings.gateway_stores == "memory":
         router.store = MemoryBreakerStore()
+        started = True
         return
     timeout = config.registry.circuit_breaker.redis_timeout_ms / 1000
     _redis = Redis.from_url(
@@ -59,10 +62,12 @@ async def start() -> None:
         if config.registry.circuit_breaker.store == "memory"
         else RedisBreakerStore(_redis)
     )
+    started = True
 
 
 async def stop() -> None:
-    global _redis, _engine, _writer
+    global _redis, _engine, _writer, started
+    started = False
     if _writer is not None:
         await _writer.stop()  # flush queued usage rows before the engine goes
         _writer = None
@@ -72,6 +77,30 @@ async def stop() -> None:
     if _engine is not None:
         await _engine.dispose()
         _engine = None
+
+
+started = False  # set once start() has finished
+
+
+async def dependencies() -> dict[str, str]:
+    """Reachability of shared dependencies, for /readyz. Informational: the gateway keeps
+    serving without them (limits fail open, cached keys keep working)."""
+    out: dict[str, str] = {}
+    timeout = config.settings.db_timeout_seconds
+    if _redis is not None:
+        try:
+            await asyncio.wait_for(_redis.ping(), timeout)
+            out["redis"] = "ok"
+        except Exception:
+            out["redis"] = "unreachable"
+    if _engine is not None:
+        try:
+            async with asyncio.timeout(timeout), _engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            out["postgres"] = "ok"
+        except Exception:
+            out["postgres"] = "unreachable"
+    return out
 
 
 def status() -> dict[str, Any]:

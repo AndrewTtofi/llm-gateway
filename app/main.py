@@ -113,7 +113,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await services.stop()
 
 
-app = FastAPI(title="LLM Gateway", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="LLM Gateway", version="1.0.0", lifespan=lifespan)
 
 
 class RequestContext:
@@ -148,7 +148,7 @@ class RequestContext:
             status = status or 500  # crashed before a response went out
             raise
         finally:
-            if not str(scope.get("path", "")).startswith(("/metrics", "/healthz")):
+            if not str(scope.get("path", "")).startswith(("/metrics", "/healthz", "/readyz")):
                 obs_log.access.info(
                     "http",
                     method=scope.get("method"),
@@ -257,7 +257,22 @@ Admin = Annotated[None, Depends(require_admin)]
 
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
+    """Liveness: the process is up and its event loop answers."""
     return {"status": "ok"}
+
+
+@app.get("/readyz", response_model=None)
+async def readyz() -> dict[str, Any] | JSONResponse:
+    """Readiness: may this instance take traffic? Only its own state decides — not
+    shared dependencies. If Redis being down made every replica "not ready", the load
+    balancer would drop all of them at once and a degraded gateway (limits fail open,
+    cached keys keep working) would become a total outage. Dependencies are reported
+    for dashboards and humans."""
+    deps = await services.dependencies()
+    if not services.started:
+        return JSONResponse({"status": "starting", "dependencies": deps}, status_code=503)
+    degraded = any(v != "ok" for v in deps.values())
+    return {"status": "degraded" if degraded else "ready", "dependencies": deps}
 
 
 @app.get("/v1/models")

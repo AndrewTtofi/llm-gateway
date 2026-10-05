@@ -9,6 +9,20 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-05 (Phase 7 — ship it)
+
+### Added
+- `/readyz` readiness endpoint: `503` until startup completes, then `200` with Redis/Postgres status (`ready` / `degraded`). Shared dependencies don't fail readiness, which avoids pulling every replica at once
+- Grafana image renderer (compose profile `screenshots`) for reproducible dashboard screenshots; `docs/img/dashboard.png`
+- `docs/WRITEUP.md`: project write-up and a LinkedIn draft
+
+### Changed
+- README rewritten: what "OpenAI-compatible" means (client API format; routes to Claude, OpenAI, Ollama and any OpenAI-compatible API), architecture diagram, quickstart, aliases, Claude translation, headers, keys, observability, results, deployment notes, ADR index
+- Dashboard "spend per key" marks revoked keys
+
+### Fixed
+- Grafana refusing to start with a renderer configured and the default renderer token: the token is now shared via `GRAFANA_RENDERER_TOKEN`
+
 ## [0.6.0] - 2026-10-05 (Phase 6 — prove it: load, chaos, overhead, SLOs)
 
 ### Added

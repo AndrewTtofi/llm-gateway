@@ -119,9 +119,9 @@ Goal: evidence it works under stress.
 DoD: numbers in the README, reproducible with one command.
 
 ### Phase 7 — Ship it (days 19–20)
-- [ ] README: architecture diagram, quickstart, design decisions, results, screenshots
-- [ ] Tag `v1.0.0`, update CHANGELOG
-- [ ] Short write-up / LinkedIn post on what you learned
+- [x] README: architecture diagram, quickstart, design decisions, results, screenshots
+- [x] Tag `v1.0.0`, update CHANGELOG
+- [x] Short write-up / LinkedIn post on what you learned
 - [ ] Optional: deploy to a small VM or Cloud Run behind auth
 
 ### Phase 8+ — Extensions (later projects on this codebase)
