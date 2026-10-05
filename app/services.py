@@ -62,12 +62,18 @@ async def start() -> None:
         if config.registry.circuit_breaker.store == "memory"
         else RedisBreakerStore(_redis)
     )
+    global _deps, _deps_task
+    _deps = await check_dependencies()
+    _deps_task = asyncio.create_task(_refresh_dependencies())
     started = True
 
 
 async def stop() -> None:
-    global _redis, _engine, _writer, started
+    global _redis, _engine, _writer, _deps_task, started
     started = False
+    if _deps_task is not None:
+        _deps_task.cancel()
+        _deps_task = None
     if _writer is not None:
         await _writer.stop()  # flush queued usage rows before the engine goes
         _writer = None
@@ -81,26 +87,55 @@ async def stop() -> None:
 
 started = False  # set once start() has finished
 
+# /readyz reads a cached status, refreshed in the background, so the probe never waits on
+# I/O: a hung Postgres must not make every replica's probe time out at once, and probe
+# traffic must not take connections from the request path's pool.
+DEPENDENCY_CHECK_INTERVAL = 5.0
+DEPENDENCY_CHECK_TIMEOUT = 0.5
+_deps: dict[str, str] = {}
+_deps_task: asyncio.Task[None] | None = None
 
-async def dependencies() -> dict[str, str]:
-    """Reachability of shared dependencies, for /readyz. Informational: the gateway keeps
-    serving without them (limits fail open, cached keys keep working)."""
-    out: dict[str, str] = {}
-    timeout = config.settings.db_timeout_seconds
-    if _redis is not None:
+
+async def check_dependencies(limit_s: float = DEPENDENCY_CHECK_TIMEOUT) -> dict[str, str]:
+    """Probe Redis and Postgres concurrently, each bounded by `limit_s`."""
+    timeout = limit_s
+    redis, engine = _redis, _engine  # stop() may clear them meanwhile
+
+    async def ping_redis(r: Redis) -> str:
         try:
-            await asyncio.wait_for(_redis.ping(), timeout)
-            out["redis"] = "ok"
+            await asyncio.wait_for(r.ping(), timeout)
+            return "ok"
         except Exception:
-            out["redis"] = "unreachable"
-    if _engine is not None:
+            return "unreachable"
+
+    async def ping_postgres(e: AsyncEngine) -> str:
         try:
-            async with asyncio.timeout(timeout), _engine.connect() as conn:
+            async with asyncio.timeout(timeout), e.connect() as conn:
                 await conn.execute(text("SELECT 1"))
-            out["postgres"] = "ok"
+            return "ok"
         except Exception:
-            out["postgres"] = "unreachable"
-    return out
+            return "unreachable"
+
+    checks: dict[str, Any] = {}
+    if redis is not None:
+        checks["redis"] = ping_redis(redis)
+    if engine is not None:
+        checks["postgres"] = ping_postgres(engine)
+    results = await asyncio.gather(*checks.values())
+    return dict(zip(checks, results, strict=True))
+
+
+async def _refresh_dependencies() -> None:
+    global _deps
+    while True:
+        _deps = await check_dependencies()
+        await asyncio.sleep(DEPENDENCY_CHECK_INTERVAL)
+
+
+def dependencies() -> dict[str, str]:
+    """Last known reachability of shared dependencies, for /readyz. Informational: the
+    gateway keeps serving without them (limits fail open, cached keys keep working)."""
+    return dict(_deps)
 
 
 def status() -> dict[str, Any]:

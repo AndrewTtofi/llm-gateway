@@ -4,7 +4,7 @@
 
 I'm a platform/DevOps engineer, and I used this project to learn AI engineering. The result
 is a self-hosted gateway. Apps send OpenAI-format requests to one endpoint, and the gateway
-routes each request to Claude, OpenAI or a local Ollama model. It falls back when a provider
+routes each request to Claude, OpenAI or a local Ollama model (Claude and Ollama run live; OpenAI so far only against mocks). It falls back when a provider
 fails, limits every API key by requests, tokens and dollars, and records what each request cost.
 
 I built it in seven phases. Each phase had a definition of done, tests, and an ADR for every
@@ -50,7 +50,7 @@ it turned out to be most of the work.
 - Gateway overhead: **+2.6 ms p50 / +3.8 ms p95**, or **0.8%** of a realistic time to first token
 - One replica holds **200** concurrent streams within 10% of a direct connection; 1 → 2 replicas: **445 → 614 req/s**
 - Provider outage: **5** requests went to the dead provider before the breaker opened, and **0** errors reached clients
-- **100%** of requests were served through provider, Redis and Postgres failures; **90/90** streams survived a SIGTERM
+- **100%** of requests were served through provider, Redis and Postgres failures. The trade-off: while Redis is down, limits and budgets are off, and while Postgres is down, keys not in the cache get 503. **90/90** streams survived a SIGTERM.
 
 Code, ADRs and full results: https://github.com/AndrewTtofi/llm-gateway
 
@@ -79,8 +79,8 @@ Code, ADRs and full results: https://github.com/AndrewTtofi/llm-gateway
 > 🔹 My first benchmarks were wrong. Measuring the test rig before the system saved me from
 > publishing nonsense.
 >
-> 🔹 Most of it is classic reliability work: breakers, fail-open dependencies, readiness probes,
-> SLO burn-rate alerts, graceful shutdown.
+> 🔹 Most of it is classic reliability work: breakers, fail-open dependencies (choosing what to
+> give up when Redis dies), readiness probes, SLO burn-rate alerts, graceful shutdown.
 >
 > Result: +3.8 ms p95 overhead, and 0 client-visible errors during a provider outage.
 >

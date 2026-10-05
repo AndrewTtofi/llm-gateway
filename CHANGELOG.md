@@ -18,7 +18,10 @@ Version plan: each completed phase bumps the minor version
 
 ### Changed
 - README rewritten: what "OpenAI-compatible" means (client API format; routes to Claude, OpenAI, Ollama and any OpenAI-compatible API), architecture diagram, quickstart, aliases, Claude translation, headers, keys, observability, results, deployment notes, ADR index
-- Dashboard "spend per key" marks revoked keys
+- Dashboard "spend per key" shows one row per key (named, revoked keys marked); the key-prefix column was dropped
+- `/readyz` reads a cached dependency status refreshed every 5 s (checks run concurrently, 0.5 s timeout), so probes never wait on a hung dependency
+- Docker image starts uvicorn with `--timeout-graceful-shutdown 30`
+- README: use cases, FAQ (subscriptions vs API keys, Anthropic SDK / Claude Code), accuracy fixes from review
 
 ### Fixed
 - Grafana refusing to start with a renderer configured and the default renderer token: the token is now shared via `GRAFANA_RENDERER_TOKEN`

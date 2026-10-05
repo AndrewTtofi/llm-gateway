@@ -118,7 +118,8 @@ panel("table", "Spend per key — this month", 12, 9, 0, 35, [sql(
     "round(100.0 * avg(CASE WHEN u.fallback THEN 1 ELSE 0 END), 1) AS fallback_pct "
     "FROM usage_log u LEFT JOIN api_keys k ON k.id = u.key_id "
     "WHERE u.created_at >= date_trunc('month', now()) "
-    "GROUP BY 1 ORDER BY spend_usd DESC")], ds=PG,
+    "GROUP BY u.key_id, k.name, u.key_prefix, k.revoked_at "  # per key, not per name
+    "ORDER BY spend_usd DESC")], ds=PG,
     desc="Exact, from the usage log (ADR 0008).")
 panel("timeseries", "Spend per key over time", 12, 9, 12, 35, [sql(
     "SELECT $__timeGroupAlias(u.created_at, $__interval), coalesce(k.name, u.key_prefix) AS metric, "

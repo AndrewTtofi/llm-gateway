@@ -46,6 +46,7 @@ services:
       GRAFANA_PG_USER: gateway          # dev only: use a read-only role in production
       GRAFANA_PG_PASSWORD: gateway
       # Dashboard screenshots (docs): `docker compose --profile screenshots up -d renderer`
+      # Renderer runs only with `--profile screenshots`; without it, image export just fails.
       GF_RENDERING_SERVER_URL: http://renderer:8081/render
       GF_RENDERING_CALLBACK_URL: http://grafana:3000/
       # Grafana refuses to start with the renderer's default token; both sides share this.

@@ -9,7 +9,7 @@ Keep "Current state" short and always true.
 - **Branch:** `phase-7-ship` · `v0.6.0` on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
 - **Status:** README rewritten, `/readyz`, dashboard screenshot, write-up + LinkedIn draft (`docs/WRITEUP.md`, not posted), version 1.0.0
 - **Next up:** merge → tag `v1.0.0`; optional deploy (owner to pick: Cloud Run / ECS / VM); then Phase 8 extensions
-- **Blockers:** none. Owner: rotate the Anthropic key (it was pasted in chat); `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
+- **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** deploy target
 
 ---

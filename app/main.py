@@ -268,9 +268,9 @@ async def readyz() -> dict[str, Any] | JSONResponse:
     balancer would drop all of them at once and a degraded gateway (limits fail open,
     cached keys keep working) would become a total outage. Dependencies are reported
     for dashboards and humans."""
-    deps = await services.dependencies()
     if not services.started:
-        return JSONResponse({"status": "starting", "dependencies": deps}, status_code=503)
+        return JSONResponse({"status": "starting"}, status_code=503)
+    deps = services.dependencies()  # cached; refreshed in the background
     degraded = any(v != "ok" for v in deps.values())
     return {"status": "degraded" if degraded else "ready", "dependencies": deps}
 

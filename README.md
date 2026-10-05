@@ -1,17 +1,19 @@
 # LLM Gateway
 
 A self-hosted gateway that sits between your applications and LLM providers. Apps talk to
-**one endpoint with one API format**. The gateway picks the provider, falls back when one
+**one endpoint** in the OpenAI request format, which most SDKs and tools already speak. The gateway picks the provider, falls back when one
 fails, enforces per-key rate limits and budgets, and records what every request cost.
 
 **"OpenAI-compatible" describes the API the gateway exposes, not the providers behind it.**
-Clients use the OpenAI chat-completions format, which most SDKs and tools already speak.
+Clients use the OpenAI chat-completions format. Internally every request is that one format,
+which is what lets a request that started on Claude fall back to another provider. More
+inbound formats can be added; the Anthropic Messages API (`/v1/messages`) is next on the roadmap.
 Behind the gateway, requests can go to:
 
 | Provider | How |
 |----------|-----|
 | **Anthropic Claude** (Opus, Sonnet, Haiku) | Native adapter on the official SDK. It translates messages, tools, streaming, usage and errors both ways. Claude is the first choice in most built-in aliases. |
-| **OpenAI** | Passthrough |
+| **OpenAI** | Passthrough (covered by mocked tests; not yet run against the live API) |
 | **Ollama** (local models, free) | Ollama's OpenAI-compatible API |
 | **Any OpenAI-compatible API** (vLLM, LM Studio, OpenRouter, Together, …) | Add it in `config/models.yaml`; no code change |
 
@@ -32,6 +34,8 @@ The client never learns which provider answered unless it reads the `x-gateway-p
 
 ![Grafana dashboard: request rate, fallback rate, p95 latency, time to first token, circuit breakers, spend per key](docs/img/dashboard.png)
 
+<sub>Local demo traffic. The spend figures come from a fake provider priced high on purpose to exercise budgets; they are not real spend.</sub>
+
 ## Why
 
 When several apps call LLMs directly, each app repeats the same work and the same failures:
@@ -48,9 +52,22 @@ The gateway moves all of that into one place that the platform team owns:
 | **Routing** | Apps ask for an alias (`fast`, `smart`, `balanced`, `local`). `config/models.yaml` maps each alias to an ordered chain of models. To change models, edit YAML and run `make reload`; apps don't change. |
 | **Reliability** | Transient errors are retried with jittered backoff, then the next model in the chain is tried. A circuit breaker per model, shared across replicas in Redis, stops traffic to a provider that is down. |
 | **Streaming** | SSE relay. Errors before the first token can still fall back. After the first token, errors are reported in-band so a client never gets half of one answer spliced to another. When a client disconnects, the upstream request is cancelled. |
-| **Limits** | Every key has requests/min, tokens/min (estimated up front, corrected to actual usage afterwards) and a monthly USD budget. Limits are enforced across replicas with one Redis Lua script per request. |
+| **Limits** | Every key has requests/min, tokens/min (estimated up front, corrected to actual usage afterwards) and a monthly USD budget. Admission is one atomic Redis Lua script, so limits hold across replicas. |
 | **Cost** | Each request is priced from `config/pricing.yaml`, including cached-token rates, and written to a Postgres usage log for per-key reports. |
 | **Observability** | Prometheus metrics (never labelled by key), a Grafana dashboard provisioned as code, SLO burn-rate alerts, and JSON logs with a request id. Prompt content is never logged. |
+
+## Use cases
+
+| Situation | What the gateway does |
+|-----------|-----------------------|
+| **A product feature depends on one LLM provider.** When the provider has an outage or returns 429/529 "overloaded", the feature goes down. | The `smart` / `fast` chains fail over to a second provider, or a local model, before the first token. Users see a slightly different model, not an error. |
+| **Several teams share an Anthropic/OpenAI account.** Nobody knows who spent what, and one runaway job can drain the month's budget. | One key per team or service, with its own tokens/min and monthly USD budget. The dashboard and `usage_log` show exact spend per key. A key that hits its budget gets `429 insufficient_quota` instead of a surprise invoice. |
+| **A support chatbot or other customer-facing assistant.** Latency and availability matter more than which model answers. | Streaming with time-to-first-token SLOs and burn-rate alerts. Circuit breakers stop sending traffic to a degraded provider within seconds. |
+| **Overnight batch jobs** (summarising tickets, tagging documents, evaluations) compete with interactive traffic for the same provider rate limits. | Give the batch key a low tokens/min and its own budget so it can't starve the chatbot. Route it to a cheaper alias such as `fast`. |
+| **Moving to a new model**, or comparing a cheaper one. | Change the alias chain in `config/models.yaml` and run `make reload`. Every app moves at once, with no deploys. Per-target latency, error and cost panels show whether the new model is better. |
+| **Sensitive or offline workloads, or a dev laptop with no API budget.** | The `local` alias routes to Ollama on your own hardware, so prompts never leave the machine. Ollama also serves as the last fallback in the `fast` and `balanced` chains. |
+| **Internal tools built on LangChain, LlamaIndex or the OpenAI SDK.** | Point `base_url` at the gateway and use a gateway key. Provider API keys stay in one place and never reach app config or laptops. |
+| **Security and compliance want an audit trail.** | Every request has a usage row (key, model, tokens, cost, latency, status) and a request id that correlates with logs. Prompt content is never stored. |
 
 ## Architecture
 
@@ -82,8 +99,8 @@ reconcile actual tokens and cost → write a usage row in the background.
 
 If Redis or Postgres fails, the gateway degrades instead of going down:
 
-- **Redis down:** limits and breakers fail open.
-- **Postgres down:** cached keys are served stale, and usage rows are dropped and counted.
+- **Redis down:** rate limits, budgets and breakers fail open.
+- **Postgres down:** recently used keys are served from cache, keys not in the cache get `503`, and usage rows are dropped and counted.
 
 Chat traffic keeps flowing in both cases. [RESULTS.md](docs/RESULTS.md) has the chaos tests.
 
@@ -127,7 +144,8 @@ curl -si localhost:8000/v1/chat/completions -H "Authorization: Bearer $GW_KEY" \
   -d '{"model":"chaos-down","messages":[{"role":"user","content":"hi"}]}' | grep x-gateway
 # x-gateway-provider: fake/ok
 # x-gateway-fallback: true
-# x-gateway-attempts: 1     ← the breaker is open, so the dead primary isn't even tried
+# x-gateway-attempts: 1     ← after the first few requests: the breaker has opened,
+#                              so the dead primary isn't even tried
 ```
 
 The primary of `chaos-blip` is down for 20 s of every minute. Keep sending requests and
@@ -210,8 +228,8 @@ All models, aliases, chains and prices live in `config/`. The application code c
 ```yaml
 # config/models.yaml
 aliases:
-  smart:
-    chain: [anthropic/claude-opus-5-5, openai/<model>, ollama/llama3.2:3b]
+  support-bot:   # a new alias: apps send model="support-bot"
+    chain: [anthropic/claude-sonnet-5-5, openai/<model>, ollama/llama3.2:3b]
 ```
 
 Run `make reload` and the change applies without a restart. [docs/CHANGING-MODELS.md](docs/CHANGING-MODELS.md)
@@ -238,7 +256,7 @@ Grafana provisions the **LLM Gateway** dashboard at startup (pictured above). It
 
 The dashboard is code: edit `config/grafana/build_dashboard.py`, run it, and commit both.
 
-- **Metrics:** `gateway_*` on an internal port (`:9100/metrics`), labelled by alias, target and status only.
+- **Metrics:** `gateway_*` on an internal port (`:9100/metrics`). Labels come from bounded sets (alias, target, status, outcome, reason, …), never the API key.
 - **Usage log:** the `usage_log` table has one row per request: key, alias, target, tokens, cost, latency, TTFT, attempts and status.
 - **Logs:** JSON lines with `request_id`. They record prompt length, never content.
 - **SLOs:** `config/prometheus-rules.yml` has multi-window burn-rate alerts on the availability error budget and a p95 TTFT alert. It also alerts on an open breaker, dropped usage rows, event-loop lag and the gateway being down.
@@ -251,13 +269,13 @@ Haiku timing. Runs are paired request by request, so the mock's own randomness c
 
 | | |
 |---|---|
-| Gateway overhead | **+2.6 ms p50 / +3.8 ms p95** per request · **+4.2 ms (0.8%)** on a realistic time to first token |
+| Gateway overhead | **+2.6 ms p50 / +3.8 ms p95** per request · **+4.25 ms (0.8%)** on a realistic time to first token |
 | Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **200** streams; the core saturates at **400** |
 | Throughput, 1 → 2 replicas | **445 → 614 req/s** (the test rig tops out at 951) |
 | Rate-limit accuracy across 2 replicas | **−0.06%** of the configured limit |
 | Budget overshoot, 50 concurrent streams | **+3.4%** (≈2.8 requests) |
 | Provider outage | **5** requests went to the dead provider before the breaker opened · **0** errors reached clients |
-| Provider down/slow, Redis slow/down, Postgres down | **100%** of requests served in each case (while Redis is down, limits are off) |
+| Provider down/slow, Redis slow/down, Postgres down | **100%** of requests served in each case (while Redis is down, limits and budgets are off; while Postgres is down, uncached keys get `503`) |
 | SIGTERM with open streams | **90/90** streams completed |
 
 To reproduce:
@@ -275,12 +293,33 @@ behind a load balancer, with managed Redis and Postgres.
 
 - **Health checks:**
   - `/healthz` is the liveness check.
-  - `/readyz` returns `503` until startup finishes and `200` after.
+  - `/readyz` returns `503` until startup finishes and `200` after. It reads a status that a background task refreshes every 5 s, so a probe never waits on a hung database.
   - The `/readyz` body reports Redis and Postgres status, but their failures don't make it fail. Every replica shares those dependencies, so failing readiness would pull all replicas at once, while the gateway can serve without them.
 - **Migrations:** the image's default command runs `alembic upgrade head` and then starts the server, which is fine for a single instance. With several replicas, run migrations once per deploy as a job, and start replicas with `uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30`. `docker-compose.bench.yml` shows this setup.
 - **Load balancer:** streams can run for minutes. Set idle and request timeouts above `stream_total` in `models.yaml`, and turn off response buffering for `text/event-stream`.
 - **Shutdown:** on `SIGTERM`, uvicorn waits up to `--timeout-graceful-shutdown` for open streams to finish. Give the orchestrator a longer termination grace period than that.
-- **Network:** keep `:9100/metrics` and `/admin/*` internal. Pass secrets as environment variables from your secret store.
+- **Network:** keep `:9100/metrics`, `/admin/*` and ideally `/readyz` (its body names your dependencies) reachable only from inside your network and the load balancer. Pass secrets as environment variables from your secret store.
+
+## FAQ
+
+**Does it work with a ChatGPT Plus or Claude Pro/Max subscription?** No, and that's by design.
+Those subscriptions cover the consumer apps (chatgpt.com, claude.ai, the Claude desktop and
+mobile apps, and Claude Code signed in with your account). They don't come with API
+credentials, and the providers' terms don't allow their login tokens to be reused to serve
+other applications. The gateway uses **API keys**, which are billed per token from the
+provider console (console.anthropic.com, platform.openai.com). That billing model is why
+per-key budgets and cost tracking matter. A self-hosted model through Ollama costs nothing per
+token. The gateway can, however, give *your* users subscription-like plans: tiers in
+`config/limits.yaml` (rate limits, monthly budget, allowed models) work as plans, and each key
+is a subscriber.
+
+**Can Claude Code or the Anthropic SDK point at it?** Not yet, because they speak the Anthropic
+Messages API, not OpenAI's. An inbound `/v1/messages` endpoint is planned next. Claude Code
+would then set `ANTHROPIC_BASE_URL` to the gateway and use a gateway key, backed by an API key
+rather than a subscription.
+
+**Is it only for chat?** For now, yes: `/v1/chat/completions` (including tools, images and
+streaming) and `/v1/models`. Embeddings and the newer Responses API are not implemented.
 
 ## Design decisions
 

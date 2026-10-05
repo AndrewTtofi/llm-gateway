@@ -62,7 +62,7 @@ async def test_readyz_stays_ready_when_a_shared_dependency_is_down(
 ) -> None:
     from app import services
 
-    async def down() -> dict[str, str]:
+    def down() -> dict[str, str]:
         return {"redis": "unreachable", "postgres": "ok"}
 
     monkeypatch.setattr(services, "started", True)
