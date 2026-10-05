@@ -26,8 +26,14 @@ Version plan: each completed phase bumps the minor version
   - choosing models, operations, testing and benchmarks, security;
   - a multi-app use case, subscriptions and provider terms, FAQ, glossary.
 
+- Top models from each company: Claude Fable 5.1, plus new providers `gemini` (Gemini 3.1 Pro), `xai` (Grok 4.7), `mistral` (Mistral Medium 3.5) and `deepseek` (V4.1 Flash). All have verified IDs, endpoints and prices. A new `frontier` alias chains them, and `standard` keys may use it (ADR 0012)
+- Per-provider and per-model parameter rules for OpenAI-compatible APIs (`params`: allow/drop/rename/values; `tools: false`, `vision: false`). A request a model can't serve skips it instead of failing the chain
+- `/v1/catalog`: `configured` per model, and only the capabilities the gateway can use. Catalog facts can be `pinned`
+
 ### Changed
 - `/v1/models` lists every direct model `resolve` accepts (the same set as `/v1/catalog`)
+- An OpenAI-compatible provider without its API key falls back immediately instead of sending an unauthenticated request
+- OpenAI requests send `max_completion_tokens`. GPT-6 Astra and Sol drop sampling parameters and skip requests with tools (tool calling needs the Responses API)
 
 ### Fixed
 - OpenAI cached-input prices were missing from `pricing.yaml`, so cache reads were billed at the full input price

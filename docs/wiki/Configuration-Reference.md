@@ -10,7 +10,7 @@ Configuration has two layers:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, … | — | Provider keys; the variable name is set per provider by `api_key_env` |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY` | — | Provider keys; the variable name is set per provider by `api_key_env`. A provider without its key is skipped |
 | `OLLAMA_BASE_URL` | — | Referenced from `models.yaml` as `${OLLAMA_BASE_URL}` |
 | `GATEWAY_ADMIN_KEY` | empty (admin API disabled) | Bearer token for `/admin/*` |
 | `REDIS_URL` | `redis://localhost:6379/0` | Buckets, spend and breakers |
@@ -50,7 +50,9 @@ providers:
 | `limits` | Connection pool per provider; requests beyond it wait `timeouts.pool` |
 | `models` | Known models with per-model capability flags (Anthropic), or failure profiles (`fake`) |
 | `defaults` | Flags for models not listed |
-| `stream_usage: false` | (openai type) the server rejects `stream_options`; usage is estimated |
+| `stream_usage: false` | (openai type) don't send `stream_options`; usage is taken from the stream if the provider sends it, otherwise estimated |
+| `params` | (openai type) `allow` / `drop` / `rename` / `values`, per provider and per model. See [Providers and translation → Parameter rules](Providers-and-Translation.md#parameter-rules) |
+| `tools: false`, `vision: false` | (openai type, per model) requests needing them skip this target |
 | `dev_only: true` | Loaded only with `GATEWAY_ENABLE_FAKE=1` (e.g. the benchmark mock) |
 
 ### Aliases

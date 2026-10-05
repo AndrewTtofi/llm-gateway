@@ -1,7 +1,20 @@
 """Adapter for OpenAI and any OpenAI-compatible API (Ollama, vLLM, Groq, OpenRouter, …).
 
-The internal format *is* OpenAI's, so this adapter only handles transport:
-auth, timeouts, SSE parsing and error mapping.
+The internal format *is* OpenAI's, so this adapter mostly handles transport: auth,
+timeouts, SSE parsing and error mapping. "OpenAI-compatible" APIs still differ in what
+they accept, so each provider (and model) can declare it in config (ADR 0012):
+
+    params:
+      allow: [...]        # only these request fields are sent (strict APIs reject the rest)
+      drop: [...]         # never sent
+      rename: {a: b}      # sent under another name (max_tokens → max_completion_tokens)
+      values: {k: [...]}  # field sent only with one of these values (reasoning_effort)
+    tools: false          # model can't call tools on this API → try the next target
+    vision: false         # model doesn't take images → try the next target
+
+A provider rejecting a parameter returns 400, which the router treats as the client's
+fault and does *not* fall back on, so these rules matter: they keep a fallback chain
+working across providers that disagree about parameters.
 """
 
 from __future__ import annotations
@@ -16,9 +29,62 @@ import httpx
 from app.providers.base import (
     ProviderAdapter,
     ProviderError,
+    UnsupportedRequest,
     first_then_rest,
     upstream_status_error,
 )
+
+# Always sent: the request is meaningless without them.
+ESSENTIAL = frozenset({"model", "messages", "stream", "stream_options"})
+
+
+def rules_for(cfg: dict[str, Any], model: str) -> dict[str, Any]:
+    """Provider `params`/`tools`/`vision`, overlaid with `models.<model>`'s."""
+    base = cfg.get("params") or {}
+    spec = (cfg.get("models") or {}).get(model) or {}
+    own = spec.get("params") or {}
+    return {
+        "allow": set(own.get("allow") or base.get("allow") or ()),
+        "drop": set(base.get("drop") or ()) | set(own.get("drop") or ()),
+        "rename": {**(base.get("rename") or {}), **(own.get("rename") or {})},
+        "values": {**(base.get("values") or {}), **(own.get("values") or {})},
+        "tools": spec.get("tools", cfg.get("tools", True)),
+        "vision": spec.get("vision", cfg.get("vision", True)),
+    }
+
+
+def _has_images(request: dict[str, Any]) -> bool:
+    for msg in request.get("messages") or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list) and any(
+            isinstance(p, dict) and p.get("type") == "image_url" for p in content
+        ):
+            return True
+    return False
+
+
+def shape_request(
+    name: str, cfg: dict[str, Any], model: str, request: dict[str, Any]
+) -> dict[str, Any]:
+    """Fit an OpenAI-format request to what this provider/model accepts."""
+    rules = rules_for(cfg, model)
+    if request.get("tools") and not rules["tools"]:
+        raise UnsupportedRequest(f"{name}/{model} can't call tools through this API")
+    if not rules["vision"] and _has_images(request):
+        raise UnsupportedRequest(f"{name}/{model} doesn't accept images")
+    body = dict(request)
+    for old, new in rules["rename"].items():
+        if old in body:
+            value = body.pop(old)
+            body.setdefault(new, value)  # if the client sent both, the new name wins
+    for field in rules["drop"]:
+        body.pop(field, None)
+    if rules["allow"]:
+        body = {k: v for k, v in body.items() if k in rules["allow"] or k in ESSENTIAL}
+    for field, allowed in rules["values"].items():
+        if field in body and body[field] not in allowed:
+            del body[field]  # an unsupported value: let the provider use its default
+    return body
 
 
 class OpenAICompatAdapter(ProviderAdapter):
@@ -66,7 +132,11 @@ class OpenAICompatAdapter(ProviderAdapter):
 
     async def chat(self, model: str, request: dict[str, Any]) -> dict[str, Any]:
         self._require_key()
-        body = {**request, "model": model, "stream": False}
+        body = {
+            **shape_request(self.name, self.cfg, model, request),
+            "model": model,
+            "stream": False,
+        }
         try:
             resp = await self._client.post("/chat/completions", json=body, timeout=self._timeout)
         except httpx.HTTPError as exc:
@@ -83,7 +153,11 @@ class OpenAICompatAdapter(ProviderAdapter):
 
     async def stream(self, model: str, request: dict[str, Any]) -> AsyncGenerator[dict[str, Any]]:
         self._require_key()
-        body = {**request, "model": model, "stream": True}
+        body = {
+            **shape_request(self.name, self.cfg, model, request),
+            "model": model,
+            "stream": True,
+        }
         if self.cfg.get("stream_usage") is False:  # provider rejects stream_options
             body.pop("stream_options", None)
         try:

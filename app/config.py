@@ -142,6 +142,11 @@ class CatalogEntry(BaseModel):
     capabilities: list[Capability] = []
     quality: int | None = Field(default=None, ge=1, le=5)  # the operator's score
 
+    def model_dump_public(self) -> dict[str, Any]:
+        return self.model_dump(
+            include={"context_window", "max_output_tokens", "capabilities", "quality"}
+        )
+
 
 class Catalog(BaseModel):
     checked: date | None = None  # when the synced facts were last checked

@@ -417,3 +417,20 @@ def test_catalog_marks_providers_without_a_key(
     monkeypatch.delenv("MOCK_API_KEY")
     rows = {r["id"]: r for r in client.get("/v1/catalog").json()["data"]}
     assert rows["mock/tiny"]["configured"] is False
+
+
+def test_catalog_hides_capabilities_the_gateway_cannot_use(
+    client: TestClient, priced: None, registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(registry.providers["mock"], "models", {"tiny": {"tools": False}})
+    tiny = next(r for r in client.get("/v1/catalog").json()["data"] if r["id"] == "mock/tiny")
+    assert "tools" not in tiny["capabilities"]  # the model has it; this API path doesn't
+
+
+def test_sync_leaves_pinned_facts_alone(config_dir: Path) -> None:
+    (config_dir / "catalog.yaml").write_text(
+        "models:\n  anthropic/claude-x-1: { capabilities: [tools], pinned: [capabilities] }\n"
+    )
+    found = changes_by_key(sync_prices.diff(config_dir, LITELLM, OPENROUTER)[0])
+    assert ("anthropic/claude-x-1", "capabilities") not in found
+    assert ("anthropic/claude-x-1", "context_window") in found  # not pinned

@@ -123,6 +123,22 @@ edits config itself. Prices bill your teams, so changes go through review (ADR 0
 **Not modelled:** long-context price tiers (e.g. above 272K input tokens on some OpenAI
 models) and batch pricing. The standard rate is used.
 
+## The `frontier` alias
+
+The strongest model from each company, best first:
+
+1. Claude Fable 5.1
+2. Claude Opus 5.5
+3. GPT-6 Astra
+4. Gemini 3.1 Pro
+5. Grok 4.7
+6. Mistral Medium 3.5
+7. DeepSeek V4.1 Flash
+
+Requests with tools skip GPT-6 Astra, which can't call tools through chat completions.
+Providers without an API key are skipped too. Check `GET /v1/catalog?sort=quality` to see
+what each one costs and which are `configured`.
+
 ## Coming next: policy routing
 
 Instead of picking a model in the app, an app will be able to say what it needs, for example

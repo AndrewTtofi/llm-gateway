@@ -17,7 +17,7 @@ import os
 import secrets
 import signal
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
@@ -35,6 +35,7 @@ from app.metering import Meter
 from app.observability import live, metrics
 from app.observability import logging as obs_log
 from app.providers.base import ProviderAdapter
+from app.providers.openai_compat import rules_for
 from app.ratelimit import estimate_prompt_tokens
 from app.routing import router
 from app.routing.router import AllTargetsFailed, Routed, UnknownModel
@@ -377,7 +378,9 @@ async def model_catalog(
                 "configured": _configured(reg.providers.get(t.partition("/")[0])),
                 "in_aliases": [n for n, chain in aliases.items() if t in chain],
                 "pricing": row_price,
-                **facts.model_dump(),
+                **facts.model_dump_public(),
+                # What the gateway can use, not just what the model can do (ADR 0012).
+                "capabilities": _usable(facts.capabilities, reg.providers, t),
                 "circuit": "unknown",  # filled in below, all targets at once
                 "live": live.snapshot(t),
             }
@@ -393,6 +396,19 @@ async def model_catalog(
         "aliases": [{"id": n, "chain": chain} for n, chain in aliases.items()],
         "data": rows,
     }
+
+
+def _usable(caps: Sequence[str], providers: dict[str, dict[str, Any]], target: str) -> list[str]:
+    provider, _, model = target.partition("/")
+    cfg = providers.get(provider) or {}
+    if cfg.get("type") != "openai":
+        return list(caps)
+    rules = rules_for(cfg, model)
+    return [
+        c
+        for c in caps
+        if not (c == "tools" and not rules["tools"]) and not (c == "vision" and not rules["vision"])
+    ]
 
 
 def _configured(provider: dict[str, Any] | None) -> bool:

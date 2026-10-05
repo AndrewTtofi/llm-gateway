@@ -26,12 +26,80 @@ providers:
       claude-opus-5-5:           { sampling: false, forced_tool_choice: false, effort: true, refusal_fallback: true }
       claude-sonnet-5-5:         { sampling: false, forced_tool_choice: false, effort: true, refusal_fallback: true }
       claude-haiku-4-5-20251001: { sampling: true,  forced_tool_choice: true,  effort: false }
+      # Anthropic's top model (GA 2026-09-01). Rejects sampling params, forced tool_choice,
+      # prefill and disabling thinking; refusal fallback goes to Anthropic's permitted models.
+      claude-fable-5-1:          { sampling: false, forced_tool_choice: false, effort: true, refusal_fallback: true }
   openai:
     type: openai
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     timeouts: { connect: 5, first_token: 30, stream_idle: 120, stream_total: 900, total: 300, pool: 5 }
     limits: { max_connections: 100, max_keepalive: 20 }
+    # What each "OpenAI-compatible" API accepts differs; see ADR 0012 and openai_compat.py.
+    params:
+      rename: { max_tokens: max_completion_tokens }   # max_tokens is legacy on reasoning models
+    models:
+      # GPT-6 reasoning models: no sampling params; effort can't be "none"; tool calling
+      # needs the Responses API, so requests with tools skip to the next target (ADR 0012).
+      gpt-6-astra:
+        tools: false
+        params:
+          drop: [temperature, top_p, logprobs, top_logprobs]
+          values: { reasoning_effort: [low, medium, high, xhigh, max] }
+      gpt-6.1-sol:
+        tools: false
+        params:
+          drop: [temperature, top_p, logprobs, top_logprobs]
+          values: { reasoning_effort: [low, medium, high, xhigh, max] }
+  gemini:                 # Google, through its OpenAI-compatibility layer (itself beta)
+    type: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    timeouts: { connect: 5, first_token: 60, stream_idle: 300, stream_total: 1800, total: 600, pool: 5 }
+    limits: { max_connections: 100, max_keepalive: 20 }
+    params:
+      values: { reasoning_effort: [minimal, low, medium, high] }   # thinking can't be turned off
+    models:
+      gemini-3.1-pro-preview: {}   # preview: Google has no GA 3.1 Pro yet
+  xai:
+    type: openai
+    base_url: https://api.x.ai/v1
+    api_key_env: XAI_API_KEY
+    timeouts: { connect: 5, first_token: 60, stream_idle: 300, stream_total: 1800, total: 600, pool: 5 }
+    limits: { max_connections: 100, max_keepalive: 20 }
+    params:
+      # Reasoning models reject these (stop sequences are dropped, not honoured).
+      drop: [presence_penalty, frequency_penalty, stop]
+      values: { reasoning_effort: [low, medium, high, xhigh] }
+    models:
+      grok-4.7: {}
+  mistral:
+    type: openai
+    base_url: https://api.mistral.ai/v1
+    api_key_env: MISTRAL_API_KEY
+    stream_usage: false   # stream_options isn't a Mistral parameter; usage arrives anyway
+    timeouts: { connect: 5, first_token: 60, stream_idle: 300, stream_total: 1800, total: 600, pool: 5 }
+    limits: { max_connections: 100, max_keepalive: 20 }
+    params:
+      # Mistral rejects unknown fields (422), so only its documented ones are sent.
+      # reasoning_effort is left out: with it, content arrives as a list of chunks.
+      allow: [max_tokens, temperature, top_p, stop, random_seed, response_format, tools,
+              tool_choice, parallel_tool_calls, presence_penalty, frequency_penalty, n]
+      rename: { max_completion_tokens: max_tokens, seed: random_seed }
+    models:
+      mistral-medium-3-5-26-04: {}   # Mistral Medium 3.5, the flagship (pinned ID)
+  deepseek:
+    type: openai
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    timeouts: { connect: 5, first_token: 60, stream_idle: 300, stream_total: 1800, total: 600, pool: 5 }
+    limits: { max_connections: 100, max_keepalive: 20 }
+    params:
+      rename: { max_completion_tokens: max_tokens }
+      values: { reasoning_effort: [none, low, high, max] }
+    models:
+      # V4.1 Flash: DeepSeek says it beats V4-Pro, which is being phased out.
+      deepseek-flash: {}
   ollama:
     type: openai          # Ollama exposes an OpenAI-compatible API
     base_url: ${OLLAMA_BASE_URL}
@@ -69,6 +137,17 @@ providers:
 
 # Aliases are what clients send as `model`. Each is an ordered fallback chain.
 aliases:
+  # The strongest model from each company, best first. Requests with tools skip GPT-6
+  # Astra (tools need OpenAI's Responses API). Providers without a key are skipped.
+  frontier:
+    chain:
+      - anthropic/claude-fable-5-1
+      - anthropic/claude-opus-5-5
+      - openai/gpt-6-astra
+      - gemini/gemini-3.1-pro-preview
+      - xai/grok-4.7
+      - mistral/mistral-medium-3-5-26-04
+      - deepseek/deepseek-flash
   fast:
     chain:
       - anthropic/claude-haiku-4-5-20251001

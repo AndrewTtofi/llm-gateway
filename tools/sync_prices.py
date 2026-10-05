@@ -185,7 +185,10 @@ def propose(
         "max_output_tokens": positive_int(src.get("max_output_tokens")),
         "capabilities": sorted(c for flag, c in CAPABILITIES.items() if src.get(flag) is True),
     }
+    pinned = entry.get("pinned") or []  # facts the operator checked by hand: never proposed
     for f, new in facts.items():
+        if f in pinned:
+            continue
         current = entry.get(f)
         if f == "capabilities" and isinstance(current, list):
             current = sorted(current)  # order isn't a change
@@ -279,7 +282,8 @@ CATALOG_HEADER = """\
 # context_window / max_output_tokens / capabilities: synced by `make prices` from public
 # catalogs — review the diff before committing. quality: YOUR score, 1 (basic) to 5
 # (frontier), for your own use cases; the sync never changes it.
-# Optional per model: litellm_id / openrouter_id when the source uses a different ID.
+# Optional per model: litellm_id / openrouter_id when the source uses a different ID;
+# pinned: [field, …] for facts you checked by hand, which the sync then leaves alone.
 
 checked: {today}
 models:

@@ -11,6 +11,7 @@ Keep "Current state" short and always true.
   - PR #9 (`/v1/messages`, v1.1.0) is waiting on CI after the GitHub outage.
   - The `docs-wiki` branch has the wiki (17 pages + publish script).
   - `phase-8-cost-catalog` has the model catalog, `/v1/catalog` and `make prices` + the weekly drift issue (ADR 0011). `make test` 322.
+  - `phase-8-frontier-models` (on the catalog branch) adds Fable 5.1, Gemini, xAI, Mistral, DeepSeek, the `frontier` alias and per-provider parameter rules (ADR 0012). `make test` 356. The new providers are untested live: no keys yet.
 - **Next up:**
   1. Merge #9 → tag v1.1.0, then the wiki PR, then the catalog PR.
   2. Owner: enable Wikis and restrict editing to collaborators, then run `scripts/publish_wiki.sh`.
