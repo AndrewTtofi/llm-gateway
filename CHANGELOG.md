@@ -10,6 +10,16 @@ Version plan: each completed phase bumps the minor version
 ## [Unreleased]
 
 ### Added
+- `GET /v1/catalog`: price, a blended price, context window, capabilities, quality score, breaker state and live per-model stats for the calling key's models. Live stats are latency, TTFT and error rate over this replica's last 15 minutes. Supports filters and sorting (ADR 0011)
+- `config/catalog.yaml`: model facts plus the operator's quality score
+- `make prices` (`tools/sync_prices.py`): compares pricing and catalog with LiteLLM's price list and OpenRouter's API, and prints a reviewed diff. `--write` applies only the changes both sources agree on
+- Weekly `prices` workflow: opens or updates one issue when prices drift
+- Wiki page "Choosing models"
+
+### Fixed
+- OpenAI cached-input prices were missing from `pricing.yaml`, so cache reads were billed at the full input price
+
+### Added
 - Wiki (`docs/wiki/`, published to the GitHub Wiki tab with `scripts/publish_wiki.sh`):
   - getting started, core concepts, architecture;
   - providers and translation, routing and reliability, keys/limits/budgets;

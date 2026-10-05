@@ -18,8 +18,8 @@ from typing import Any
 
 from app import config
 from app.auth import ApiKey, EffectiveLimits
+from app.observability import live, metrics
 from app.observability import logging as obs_log
-from app.observability import metrics
 from app.observability.usage import UsageRecord, UsageSink
 from app.ratelimit import Limiter, SpendTracker
 
@@ -234,6 +234,11 @@ class Meter:
             metrics.requests.labels(self.alias_label, target, status_label).inc()
             for t, outcome in self.attempts:
                 metrics.attempts.labels(t, outcome).inc()
+                if not outcome.startswith(("skipped:", "unsupported")):
+                    # A client-fault answer means the provider is healthy (ADR 0004).
+                    live.record_attempt(t, outcome == "ok" or outcome.startswith("client:"))
+            if target and self.status < 400 and not self.error_code:
+                live.record_served(target, target_latency, target_ttft)
             if target:
                 metrics.duration.labels(target, str(self.streamed).lower()).observe(target_latency)
                 if target_ttft is not None:

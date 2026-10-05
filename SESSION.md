@@ -7,14 +7,30 @@ Keep "Current state" short and always true.
 ## Current state
 - **Phase:** 8 — extensions. First: inbound Anthropic Messages API (`phase-8-messages-api`)
 - **Branch:** `phase-8-messages-api` · `v1.0.0` tagged + released on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
-- **Status:** `/v1/messages` + `count_tokens` done, tested with the real Anthropic SDK; Claude Code verified against the fake provider. `make test` 310
-- **Next up:** review + merge; then lossless prompt caching / thinking for Anthropic targets via `/v1/messages` (ADR 0010 consequences), or another Phase 8 extension
+- **Status:**
+  - PR #9 (`/v1/messages`, v1.1.0) is waiting on CI after the GitHub outage.
+  - The `docs-wiki` branch has the wiki (17 pages + publish script).
+  - `phase-8-cost-catalog` has the model catalog, `/v1/catalog` and `make prices` + the weekly drift issue (ADR 0011). `make test` 322.
+- **Next up:**
+  1. Merge #9 → tag v1.1.0, then the wiki PR, then the catalog PR.
+  2. Owner: enable Wikis and restrict editing to collaborators, then run `scripts/publish_wiki.sh`.
+  3. Then policy routing (`model: auto` + hints, built on the catalog), or lossless caching/thinking for `/v1/messages`.
 - **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 12
+**Did**
+- Researched subscription terms across providers (wiki: Subscriptions-and-Terms). No credential reuse. Pass-through is documented for Claude Code and Codex but not built
+- Wiki in `docs/wiki/` (17 pages incl. a multi-app use case), `scripts/publish_wiki.sh`
+- Model catalog (`config/catalog.yaml`), `GET /v1/catalog` (prices, capabilities, quality, breaker, live stats), `make prices` sync with review, weekly drift workflow. ADR 0011
+
+**Learned**
+- No provider exposes prices via API; LiteLLM (provider IDs, capabilities) + OpenRouter (cross-check) agree on current prices
+- The sync immediately found missing OpenAI cached-input prices (cache reads were billed at full input price)
 
 ### 2026-10-05 — Session 11
 **Did**

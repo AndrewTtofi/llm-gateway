@@ -18,10 +18,10 @@ import signal
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
@@ -31,8 +31,8 @@ from app import config, messages_api, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
+from app.observability import live, metrics
 from app.observability import logging as obs_log
-from app.observability import metrics
 from app.providers.base import ProviderAdapter
 from app.ratelimit import estimate_prompt_tokens
 from app.routing import router
@@ -311,6 +311,100 @@ async def list_models(key: Authenticated) -> dict[str, object]:
             if lim.allows(m)
         ]
     return {"object": "list", "data": data}
+
+
+# Blended price for sorting: a typical 3:1 mix of input to output tokens.
+BLEND_INPUT, BLEND_OUTPUT = 3, 1
+SortBy = Literal["name", "price", "quality", "ttft", "latency"]
+Capability = Literal["tools", "vision", "reasoning", "json_schema"]
+
+
+@app.get("/v1/catalog", response_model=None)
+async def model_catalog(
+    key: Authenticated,
+    capability: Annotated[list[Capability], Query()] = [],  # noqa: B006 — FastAPI copies it
+    min_context: int = 0,
+    sort: SortBy = "name",
+) -> dict[str, Any] | JSONResponse:
+    """What this key can use, with price, capabilities, quality and live performance, so
+    apps can choose a model for their use case (ADR 0011). Live stats are this replica's
+    view of the last 15 minutes."""
+    lim = key_limits(key)
+    verdict = await services.limiter.take(key.id, lim.requests_per_minute, lim.tokens_per_minute, 0)
+    if not verdict.allowed:
+        metrics.rejected.labels("rate_limit").inc()
+        return error_response(
+            429,
+            "Rate limit reached for this key.",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            headers=verdict.headers(),
+        )
+    reg, prices, cat = config.registry, config.pricing.models, config.catalog.models
+    aliases = {n: a.chain for n, a in reg.aliases.items() if lim.allows(n)}
+    targets = dict.fromkeys(t for chain in aliases.values() for t in chain)
+    if reg.allow_direct_models:
+        targets |= dict.fromkeys(t for t in sorted(reg.known_targets()) if lim.allows(t))
+
+    rows: list[dict[str, Any]] = []
+    for t in targets:
+        facts = cat.get(t) or config.CatalogEntry()
+        if any(c not in facts.capabilities for c in capability):
+            continue
+        if min_context and (facts.context_window or 0) < min_context:
+            continue
+        price = prices.get(t)
+        pricing = None
+        if price is not None and price.input is not None and price.output is not None:
+            blended = (BLEND_INPUT * price.input + BLEND_OUTPUT * price.output) / (
+                BLEND_INPUT + BLEND_OUTPUT
+            )
+            pricing = {
+                "input": price.input,
+                "output": price.output,
+                "cached_input": price.cached_input,
+                "blended": round(blended, 6),
+                "unit": f"{config.pricing.currency} per 1M tokens",
+            }
+        try:
+            circuit = str(await router.store.state(t))
+        except Exception:
+            circuit = "unknown"
+        rows.append(
+            {
+                "id": t,
+                "provider": t.partition("/")[0],
+                "callable_directly": reg.allow_direct_models and lim.allows(t),
+                "in_aliases": [n for n, chain in aliases.items() if t in chain],
+                "pricing": pricing,
+                **facts.model_dump(),
+                "circuit": circuit,
+                "live": live.snapshot(t),
+            }
+        )
+    rows.sort(key=lambda r: _catalog_sort_key(r, sort))
+    return {
+        "object": "catalog",
+        "prices_checked": config.catalog.checked,
+        "blend": f"{BLEND_INPUT}:{BLEND_OUTPUT} input:output tokens",
+        "aliases": [{"id": n, "chain": chain} for n, chain in aliases.items()],
+        "data": rows,
+    }
+
+
+def _catalog_sort_key(row: dict[str, Any], sort: str) -> tuple[Any, ...]:
+    """Unknown values sort last; ties break by id."""
+    big = float("inf")
+    if sort == "price":
+        value: float = row["pricing"]["blended"] if row["pricing"] else big
+    elif sort == "quality":
+        value = -row["quality"] if row["quality"] is not None else big
+    elif sort in ("ttft", "latency"):
+        stat = row["live"][f"{sort}_ms"]
+        value = stat["p50"] if stat else big
+    else:
+        value = 0
+    return (value, row["id"])
 
 
 @app.post("/v1/chat/completions", response_model=None)

@@ -1,0 +1,16 @@
+# Model facts for GET /v1/catalog (and, later, policy routing). ADR 0011.
+# context_window / max_output_tokens / capabilities: synced by `make prices` from public
+# catalogs — review the diff before committing. quality: YOUR score, 1 (basic) to 5
+# (frontier), for your own use cases; the sync never changes it.
+# Starting quality scores are a rough guide (larger/newer = higher); adjust to your evals.
+# Optional per model: litellm_id / openrouter_id when the source uses a different ID.
+
+checked: 2026-10-05
+models:
+  anthropic/claude-haiku-4-5-20251001: { context_window: 200000, max_output_tokens: 64000, capabilities: [json_schema, reasoning, tools, vision], quality: 3 }
+  anthropic/claude-opus-5-5: { context_window: 1000000, max_output_tokens: 128000, capabilities: [json_schema, reasoning, tools, vision], quality: 5 }
+  anthropic/claude-sonnet-5-5: { context_window: 1000000, max_output_tokens: 128000, capabilities: [json_schema, reasoning, tools, vision], quality: 4 }
+  openai/gpt-6-astra: { context_window: 922000, max_output_tokens: 128000, capabilities: [json_schema, reasoning, tools, vision], quality: 5 }
+  openai/gpt-6-luna: { context_window: 922000, max_output_tokens: 128000, capabilities: [json_schema, reasoning, tools, vision], quality: 2 }
+  openai/gpt-6.1-sol: { context_window: 922000, max_output_tokens: 128000, capabilities: [json_schema, reasoning, tools, vision], quality: 4 }
+  ollama/llama3.2:3b: { context_window: 128000, max_output_tokens: 8192, capabilities: [tools], quality: 1 }  # local; no public source — set by hand

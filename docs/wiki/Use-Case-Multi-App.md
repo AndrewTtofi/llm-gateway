@@ -218,5 +218,5 @@ everywhere, and the provider keys never need rotating, because apps never had th
 - Keys can't be edited; issue a new key and revoke the old one.
 - Budgets are per key, with no per-team roll-up. Use the usage log, grouping by a naming
   convention such as `team-app-env`.
-- Routing is by alias order, not by cost or quality per request. Price- and capability-aware
-  model selection is on the roadmap.
+- Routing is by alias order. Apps can already compare models with `GET /v1/catalog`
+  ([Choosing models](Choosing-Models.md)). Per-request policy routing (`auto` + hints) is next.

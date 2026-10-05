@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings
 
 
@@ -123,6 +124,22 @@ class Pricing(BaseModel):
         ) / 1_000_000
 
 
+class CatalogEntry(BaseModel):
+    """Facts about one target, for /v1/catalog (ADR 0011). Unknown = None."""
+
+    model_config = ConfigDict(extra="ignore")  # source-ID hints etc. are for the sync tool
+
+    context_window: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    capabilities: list[Literal["tools", "vision", "reasoning", "json_schema"]] = []
+    quality: int | None = Field(default=None, ge=1, le=5)  # the operator's score
+
+
+class Catalog(BaseModel):
+    checked: date | None = None  # when the synced facts were last checked
+    models: dict[str, CatalogEntry] = {}
+
+
 _ENV = re.compile(r"\$\{(\w+)\}")
 
 
@@ -163,18 +180,29 @@ def load_pricing(config_dir: Path) -> Pricing:
     return Pricing.model_validate(yaml.safe_load((config_dir / "pricing.yaml").read_text()))
 
 
+def load_catalog(config_dir: Path) -> Catalog:
+    path = config_dir / "catalog.yaml"  # optional: without it the catalog shows prices only
+    return (
+        Catalog.model_validate(yaml.safe_load(path.read_text()) or {})
+        if path.exists()
+        else Catalog()
+    )
+
+
 settings = Settings()
 registry = load_registry(settings.config_dir, settings.gateway_enable_fake)
 limits = load_limits(settings.config_dir)
 pricing = load_pricing(settings.config_dir)
+catalog = load_catalog(settings.config_dir)
 
 
 def reload_registry() -> Registry:
-    """Reload models, limits and pricing together. If any file is broken, raise and keep
-    all three as they were — never a half-applied config."""
-    global registry, limits, pricing
+    """Reload models, limits, pricing and the catalog together. If any file is broken,
+    raise and keep all of them as they were — never a half-applied config."""
+    global registry, limits, pricing, catalog
     new_registry = load_registry(settings.config_dir, settings.gateway_enable_fake)
     new_limits = load_limits(settings.config_dir)
     new_pricing = load_pricing(settings.config_dir)
-    registry, limits, pricing = new_registry, new_limits, new_pricing
+    new_catalog = load_catalog(settings.config_dir)
+    registry, limits, pricing, catalog = new_registry, new_limits, new_pricing, new_catalog
     return registry

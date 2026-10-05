@@ -1,0 +1,47 @@
+name: prices
+# Weekly check of config/pricing.yaml + catalog.yaml against public catalogs (ADR 0011).
+# It never edits config: if anything drifted, it opens (or updates) one issue with the
+# diff, for a human to review and apply with `make prices ARGS=--write`.
+on:
+  schedule: [{ cron: "17 6 * * 1" }]   # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # only to open/update the drift issue
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: "3.14", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install --require-hashes -r requirements-dev.txt
+      - name: compare
+        id: diff
+        run: |
+          set +e
+          python -m tools.sync_prices > diff.txt
+          rc=$?
+          echo "drift=$rc" >> "$GITHUB_OUTPUT"
+          cat diff.txt
+          [ "$rc" -le 1 ]   # 2 = couldn't fetch: fail the run instead of filing an issue
+      - name: open or update the drift issue
+        if: steps.diff.outputs.drift == '1'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          {
+            echo "Public price catalogs differ from \`config/\` (checked $(date -u +%F))."
+            echo
+            echo '```'; cat diff.txt; echo '```'
+            echo
+            echo 'Review, then run `make prices ARGS=--write` (disputed values need `--force`),'
+            echo 'check `git diff config/` against the providers'"'"' pricing pages, and open a PR.'
+          } > body.md
+          title="Model prices or catalog out of date"
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number -q '.[0].number')
+          if [ -n "$number" ]; then gh issue edit "$number" --body-file body.md
+          else gh issue create --title "$title" --body-file body.md; fi

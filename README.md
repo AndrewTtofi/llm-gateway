@@ -53,7 +53,8 @@ The gateway moves all of that into one place that the platform team owns:
 | **Reliability** | Transient errors are retried with jittered backoff, then the next model in the chain is tried. A circuit breaker per model, shared across replicas in Redis, stops traffic to a provider that is down. |
 | **Streaming** | SSE relay. Errors before the first token can still fall back. After the first token, errors are reported in-band so a client never gets half of one answer spliced to another. When a client disconnects, the upstream request is cancelled. |
 | **Limits** | Every key has requests/min, tokens/min (estimated up front, corrected to actual usage afterwards) and a monthly USD budget. Admission is one atomic Redis Lua script, so limits hold across replicas. |
-| **Cost** | Each request is priced from `config/pricing.yaml`, including cached-token rates, and written to a Postgres usage log for per-key reports. |
+| **Cost** | Each request is priced from `config/pricing.yaml`, including cached-token rates, and written to a Postgres usage log for per-key reports. `make prices` checks prices against public catalogs, and a weekly job flags drift for review. |
+| **Choosing models** | `GET /v1/catalog` gives apps price, capabilities, a quality score and live latency, TTFT and error rate for every model they may use, so they can pick the cheapest or best fit ([guide](docs/wiki/Choosing-Models.md)). |
 | **Observability** | Prometheus metrics (never labelled by key), a Grafana dashboard provisioned as code, SLO burn-rate alerts, and JSON logs with a request id. Prompt content is never logged. |
 
 ## Documentation
@@ -293,7 +294,8 @@ covers adding a provider, a model or a price.
 |------|---------|
 | `.env` | Secrets and service URLs (see `.env.example`) |
 | `config/models.yaml` | Providers, models, capability flags, aliases, timeouts, retry and breaker settings |
-| `config/pricing.yaml` | $ per 1M input / output / cached tokens per model |
+| `config/pricing.yaml` | $ per 1M input / output / cached tokens per model (`make prices` to check) |
+| `config/catalog.yaml` | Context window, capabilities and your quality score per model |
 | `config/limits.yaml` | Rate limits, budgets and allowed aliases per tier |
 
 ## Observability
@@ -393,6 +395,7 @@ Each non-obvious choice has an ADR in [docs/decisions/](docs/decisions/):
 | [0008](docs/decisions/0008-observability.md) | Usage log, metrics with bounded labels, logs without prompts |
 | [0009](docs/decisions/0009-benchmarking.md) | How the gateway is benchmarked |
 | [0010](docs/decisions/0010-anthropic-messages-inbound.md) | Inbound Anthropic Messages API, translated at the edge |
+| [0011](docs/decisions/0011-model-catalog-and-pricing-sync.md) | Model catalog, and price sync with review |
 
 ## Development
 
