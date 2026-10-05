@@ -110,4 +110,4 @@ See [docs/decisions/](docs/decisions/).
 _Load and chaos test results land here in Phase 6._
 
 ## License
-MIT
+[MIT](LICENSE)
