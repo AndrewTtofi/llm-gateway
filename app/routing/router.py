@@ -185,6 +185,17 @@ async def _route[T](
     raise AllTargetsFailed(routed, other_error, all_open=False)
 
 
+def _quarantine_reason(exc: ProviderError, reg: Registry) -> str | None:
+    """A fixed, bounded description (it ends up in alerts), or None to not quarantine."""
+    if exc.code in QUOTA_CODES:
+        return "quota exhausted"
+    if exc.status in reg.self_healing.quarantine_status:
+        return {401: "authentication failed", 403: "permission denied", 404: "model not found"}.get(
+            exc.status, f"HTTP {exc.status}"
+        )
+    return None
+
+
 @dataclass
 class _Ok[T]:
     value: T
@@ -236,6 +247,11 @@ async def _try_target[T](
                 if await store.record_failure(target, cb, ticket):
                     log.warning("circuit opened for %s", target)
                 settled = True
+                if kind is Kind.GATEWAY and (reason := _quarantine_reason(exc, reg)):
+                    # Bad key, unknown model, exhausted quota: won't heal in seconds.
+                    sh = reg.self_healing
+                    await store.quarantine(target, cb, sh.quarantine_seconds, reason)
+                    log.warning("quarantined %s for %ss: %s", target, sh.quarantine_seconds, reason)
                 if kind is Kind.TRANSIENT and attempt + 1 < tries:
                     delay = backoff_seconds(attempt, reg.retry, exc)
                     if delay is not None:

@@ -87,12 +87,28 @@ class BreakerConfig(BaseModel):
     redis_timeout_ms: int = Field(default=100, ge=10)
 
 
+class SelfHealing(BaseModel):
+    """Background recovery and alerting (ADR 0019)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    probes: bool = True  # probe half-open targets in the background, not with user traffic
+    probe_interval_seconds: float = Field(default=10, gt=0)
+    probe_max_tokens: int = Field(default=16, ge=1, le=64)  # Responses API minimum is 16
+    # Faults that won't heal in seconds: hold the breaker open longer.
+    quarantine_seconds: float = Field(default=600, gt=0)
+    quarantine_status: list[int] = [401, 403, 404]
+    alert_webhook_env: str | None = "ALERT_WEBHOOK_URL"  # env var holding the URL; unset = off
+    alert_min_interval_seconds: float = Field(default=60, ge=0)  # per target and state, fleet-wide
+
+
 class Registry(BaseModel):
     providers: dict[str, dict[str, Any]]
     aliases: dict[str, Alias]
     allow_direct_models: bool = True
     retry: RetryConfig = Field(default_factory=RetryConfig)
     circuit_breaker: BreakerConfig = Field(default_factory=BreakerConfig)
+    self_healing: SelfHealing = Field(default_factory=SelfHealing)
 
     def known_targets(self) -> set[str]:
         """provider/model names the gateway knows: alias chains + models listed per provider."""

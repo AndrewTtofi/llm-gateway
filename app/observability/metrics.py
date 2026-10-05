@@ -90,3 +90,15 @@ cache = Counter(
     ["mode", "result"],
     registry=registry,
 )
+probes = Counter(
+    "gateway_probes_total",
+    "Background probes of half-open targets: recovered, failed, skipped, busy (ADR 0019).",
+    ["target", "result"],
+    registry=registry,
+)
+alerts = Counter(
+    "gateway_alerts_total",
+    "Alert webhook posts: sent, failed (ADR 0019).",
+    ["result"],
+    registry=registry,
+)

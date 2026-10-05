@@ -35,7 +35,7 @@ from app.observability import live, metrics
 from app.observability import logging as obs_log
 from app.providers.base import ProviderAdapter
 from app.ratelimit import estimate_prompt_tokens
-from app.routing import policy, router
+from app.routing import policy, router, selfheal
 from app.routing.router import AllTargetsFailed, Routed, UnknownModel
 from app.schemas import ChatCompletionRequest, StreamOptions
 
@@ -59,9 +59,10 @@ def reload_from_signal() -> None:
         log.exception("config reload on SIGHUP failed; keeping the previous config")
 
 
-async def poll_breakers(interval: float = 15.0) -> None:
-    """Keep gateway_circuit_state current (the state lives in Redis, shared). Targets
-    removed by a config reload are dropped, so they don't linger as "open"."""
+async def poll_breakers(interval: float = 15.0, alerts: selfheal.Alerts | None = None) -> None:
+    """Keep gateway_circuit_state current (the state lives in Redis, shared) and turn
+    state changes into alerts. Targets removed by a config reload are dropped, so they
+    don't linger as "open"."""
     known: set[str] = set()
     while True:
         try:
@@ -74,6 +75,8 @@ async def poll_breakers(interval: float = 15.0) -> None:
                 with contextlib.suppress(Exception):
                     state = await router.store.state(t)
                     metrics.breaker.labels(t).set(metrics.BREAKER_VALUE.get(str(state), 0))
+                    if alerts is not None:
+                        await alerts.observe(t, str(state))
         except Exception:
             log.exception("breaker poll failed")
         await asyncio.sleep(interval)
@@ -93,8 +96,10 @@ async def measure_loop_lag(interval: float = 0.5) -> None:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     obs_log.configure(config.settings.log_level)
     await services.start()
-    poller = asyncio.create_task(poll_breakers())
+    alerts = selfheal.Alerts(redis=services.redis_client())
+    poller = asyncio.create_task(poll_breakers(alerts=alerts))
     lag = asyncio.create_task(measure_loop_lag())
+    prober = asyncio.create_task(selfheal.probe_loop())  # ADR 0019
     metrics_server = None
     if config.settings.metrics_port:
         # Separate port: /metrics can be firewalled off while the API stays public.
@@ -105,7 +110,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.add_signal_handler(signal.SIGHUP, reload_from_signal)  # `kill -HUP <pid>`
     yield
-    for task in (poller, lag):
+    for task in (poller, lag, prober):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task

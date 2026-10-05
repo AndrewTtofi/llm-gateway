@@ -26,6 +26,7 @@ x-gateway: &gateway
     MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
     DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
   volumes:
     - ./config:/app/config:ro            # models, pricing, catalog, limits (reload: POST /admin/reload)
   read_only: true

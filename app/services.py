@@ -90,6 +90,12 @@ async def stop() -> None:
 
 started = False  # set once start() has finished
 
+
+def redis_client() -> Redis | None:
+    """The shared Redis client (None in memory mode), for features that need their own keys."""
+    return _redis
+
+
 # /readyz reads a cached status, refreshed in the background, so the probe never waits on
 # I/O: a hung Postgres must not make every replica's probe time out at once, and probe
 # traffic must not take connections from the request path's pool.
