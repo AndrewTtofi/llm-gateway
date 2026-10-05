@@ -128,13 +128,15 @@ def test_untranslatable_request_is_400(client: TestClient, fake: FakeAnthropic) 
     assert not fake.requests  # never sent upstream
 
 
-def test_missing_api_key_is_a_clear_502(
+def test_missing_api_key_is_skipped_and_a_generic_503(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("TEST_ANTHROPIC_KEY")
     resp = post(client, model="claude-old")
-    assert resp.status_code == 502
-    assert "TEST_ANTHROPIC_KEY is not set" in resp.json()["error"]["message"]
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "all_providers_unavailable"
+    assert "TEST_ANTHROPIC_KEY" not in resp.text  # env var names stay internal
+    assert resp.headers["x-gateway-attempts"] == "0"  # skipped, not called
 
 
 SECRET = "invalid x-api-key sk-ant-api03-SECRETSECRET for org 1234-abcd"  # noqa: S105 (fake)

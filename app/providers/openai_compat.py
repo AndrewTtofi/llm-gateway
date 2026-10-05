@@ -20,6 +20,7 @@ working across providers that disagree about parameters.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -34,8 +35,13 @@ from app.providers.base import (
     upstream_status_error,
 )
 
-# Always sent: the request is meaningless without them.
-ESSENTIAL = frozenset({"model", "messages", "stream", "stream_options"})
+log = logging.getLogger(__name__)
+
+# Always sent: the request is meaningless without them. (stream_options is the adapter's
+# business: only sent when streaming, and not to providers with `stream_usage: false`.)
+ESSENTIAL = frozenset({"model", "messages", "stream"})
+# Fields that only make sense with tools; removed for a `tools: false` model.
+TOOL_FIELDS = ("tools", "tool_choice", "parallel_tool_calls", "functions", "function_call")
 
 
 def rules_for(cfg: dict[str, Any], model: str) -> dict[str, Any]:
@@ -44,7 +50,8 @@ def rules_for(cfg: dict[str, Any], model: str) -> dict[str, Any]:
     spec = (cfg.get("models") or {}).get(model) or {}
     own = spec.get("params") or {}
     return {
-        "allow": set(own.get("allow") or base.get("allow") or ()),
+        # A model's own `allow` replaces the provider's (an empty list clears it).
+        "allow": set(own["allow"] if "allow" in own else base.get("allow") or ()),
         "drop": set(base.get("drop") or ()) | set(own.get("drop") or ()),
         "rename": {**(base.get("rename") or {}), **(own.get("rename") or {})},
         "values": {**(base.get("values") or {}), **(own.get("values") or {})},
@@ -53,11 +60,12 @@ def rules_for(cfg: dict[str, Any], model: str) -> dict[str, Any]:
     }
 
 
-def _has_images(request: dict[str, Any]) -> bool:
+def _has_non_text(request: dict[str, Any]) -> bool:
+    """Any content part that isn't text: images, files (PDF), audio, …"""
     for msg in request.get("messages") or []:
         content = msg.get("content") if isinstance(msg, dict) else None
         if isinstance(content, list) and any(
-            isinstance(p, dict) and p.get("type") == "image_url" for p in content
+            isinstance(p, dict) and p.get("type") not in ("text", "refusal") for p in content
         ):
             return True
     return False
@@ -66,13 +74,20 @@ def _has_images(request: dict[str, Any]) -> bool:
 def shape_request(
     name: str, cfg: dict[str, Any], model: str, request: dict[str, Any]
 ) -> dict[str, Any]:
-    """Fit an OpenAI-format request to what this provider/model accepts."""
+    """Fit an OpenAI-format request to what this provider/model accepts. Returns a new
+    dict; the caller's request is never changed.
+
+    Order: rename → drop → allow → values. So `drop`, `allow` and `values` name fields
+    as they're *sent* (after renaming)."""
     rules = rules_for(cfg, model)
-    if request.get("tools") and not rules["tools"]:
-        raise UnsupportedRequest(f"{name}/{model} can't call tools through this API")
-    if not rules["vision"] and _has_images(request):
-        raise UnsupportedRequest(f"{name}/{model} doesn't accept images")
     body = dict(request)
+    if not rules["tools"]:
+        if body.get("tools") or body.get("functions"):
+            raise UnsupportedRequest(f"{name}/{model} can't call tools through this API")
+        for field in TOOL_FIELDS:  # e.g. an empty tools list, a stray tool_choice
+            body.pop(field, None)
+    if not rules["vision"] and _has_non_text(body):
+        raise UnsupportedRequest(f"{name}/{model} accepts text only")
     for old, new in rules["rename"].items():
         if old in body:
             value = body.pop(old)
@@ -112,7 +127,8 @@ class OpenAICompatAdapter(ProviderAdapter):
             if key := os.environ.get(key_env):
                 headers["Authorization"] = f"Bearer {key}"
             else:
-                self._configured = False  # fail fast below instead of a certain 401
+                self._configured = False  # skipped by the router instead of a certain 401
+                log.warning("%s: %s is not set; its models will be skipped", name, key_env)
         lim = cfg.get("limits", {})
         limits = httpx.Limits(
             max_connections=int(lim.get("max_connections", 100)),
@@ -121,6 +137,10 @@ class OpenAICompatAdapter(ProviderAdapter):
         self._client = httpx.AsyncClient(
             base_url=str(cfg.get("base_url", "")), headers=headers, limits=limits
         )
+
+    @property
+    def configured(self) -> bool:
+        return self._configured
 
     def _require_key(self) -> None:
         """A provider whose key isn't set can't serve: fall back without a network call
@@ -137,6 +157,7 @@ class OpenAICompatAdapter(ProviderAdapter):
             "model": model,
             "stream": False,
         }
+        body.pop("stream_options", None)  # only valid with stream: true
         try:
             resp = await self._client.post("/chat/completions", json=body, timeout=self._timeout)
         except httpx.HTTPError as exc:
@@ -158,7 +179,11 @@ class OpenAICompatAdapter(ProviderAdapter):
             "model": model,
             "stream": True,
         }
-        if self.cfg.get("stream_usage") is False:  # provider rejects stream_options
+        # The gateway always asks for streamed usage (ADR 0007), unless the provider doesn't
+        # take stream_options; then usage comes from the stream if sent, or is estimated.
+        if self.cfg.get("stream_usage") is not False and request.get("stream_options"):
+            body["stream_options"] = request["stream_options"]
+        else:
             body.pop("stream_options", None)
         try:
             async with self._client.stream(

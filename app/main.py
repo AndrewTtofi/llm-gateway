@@ -13,7 +13,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import secrets
 import signal
 import time
@@ -375,7 +374,9 @@ async def model_catalog(
                 "provider": t.partition("/")[0],
                 "callable_directly": reg.allow_direct_models and lim.allows(t),
                 # False: the provider's API key isn't set, so calls fall through to the next target
-                "configured": _configured(reg.providers.get(t.partition("/")[0])),
+                "configured": _configured(
+                    t.partition("/")[0], reg.providers.get(t.partition("/")[0])
+                ),
                 "in_aliases": [n for n, chain in aliases.items() if t in chain],
                 "pricing": row_price,
                 **facts.model_dump_public(),
@@ -411,11 +412,14 @@ def _usable(caps: Sequence[str], providers: dict[str, dict[str, Any]], target: s
     ]
 
 
-def _configured(provider: dict[str, Any] | None) -> bool:
-    if provider is None:
+def _configured(name: str, cfg: dict[str, Any] | None) -> bool:
+    """Ask the adapter: the router skips exactly what this reports as unconfigured."""
+    if cfg is None:
         return False
-    key_env = provider.get("api_key_env")
-    return not key_env or bool(os.environ.get(key_env))
+    try:
+        return providers.pool.get(name, cfg).configured
+    except providers.UnsupportedProvider:
+        return False
 
 
 async def _circuits(targets: list[str]) -> list[str]:

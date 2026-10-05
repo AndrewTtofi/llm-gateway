@@ -32,7 +32,8 @@ Version plan: each completed phase bumps the minor version
 
 ### Changed
 - `/v1/models` lists every direct model `resolve` accepts (the same set as `/v1/catalog`)
-- An OpenAI-compatible provider without its API key falls back immediately instead of sending an unauthenticated request
+- A provider without its API key is skipped, like an open breaker: no call, no breaker effect, not counted as an attempt. If nothing else can serve, clients get a generic 503 that doesn't name the env var (previously a 502 that did)
+- Live smoke tests for each new provider (`tests/e2e/test_live_providers.py`, run by `make test-live`; skipped while a key is missing)
 - OpenAI requests send `max_completion_tokens`. GPT-6 Astra and Sol drop sampling parameters and skip requests with tools (tool calling needs the Responses API)
 
 ### Fixed

@@ -136,7 +136,11 @@ The strongest model from each company, best first:
 7. DeepSeek V4.1 Flash
 
 Requests with tools skip GPT-6 Astra, which can't call tools through chat completions.
-Providers without an API key are skipped too. Check `GET /v1/catalog?sort=quality` to see
+Providers without an API key are skipped too.
+
+Budgets reserve the estimated cost at the chain's *first* target (Fable 5.1, $10 / $50)
+and settle at the real price of whichever model served. A `frontier` request therefore
+briefly holds more budget than a cheaper fallback ends up spending. Check `GET /v1/catalog?sort=quality` to see
 what each one costs and which are `configured`.
 
 ## Coming next: policy routing

@@ -62,6 +62,10 @@ class AnthropicAdapter(ProviderAdapter):
             else None
         )
 
+    @property
+    def configured(self) -> bool:
+        return self._client is not None
+
     def _require_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
             raise ProviderError(

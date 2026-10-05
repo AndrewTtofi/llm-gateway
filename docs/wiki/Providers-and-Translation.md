@@ -24,8 +24,9 @@ ID. Unknown fields pass through, so new OpenAI parameters work without a gateway
   The provider's raw message is shown to the client only for client-caused 400/413/422,
   because other errors can contain key fragments, org IDs or internal hostnames (ADR 0002).
 
-- **Missing key:** a provider whose `api_key_env` isn't set is skipped straight away, with no
-  network call, and `/v1/catalog` shows its models as `configured: false`.
+- **Missing key:** a provider whose `api_key_env` isn't set is skipped, like an open breaker:
+  no network call and no breaker effect. `/v1/catalog` shows its models as
+  `configured: false`. Keys are read when the gateway starts, so restart it after adding one.
 
 ### Parameter rules
 
@@ -60,9 +61,16 @@ providers:
 | `values` | Sent only with one of these values; otherwise removed, so the provider uses its default |
 | `tools: false` / `vision: false` | A request with tools or images skips this target and the chain continues. `/v1/catalog` doesn't list the capability |
 
-Model rules overlay provider rules. Dropped parameters change behaviour silently: xAI's
-reasoning models don't honour `stop`, for example. That's the trade for a chain that keeps
-working.
+Model rules overlay provider rules. They apply in the order rename → drop → allow →
+values, so `drop`, `allow` and `values` use the names fields are *sent* under.
+`stream_options` is only ever sent on streams, and not to providers with
+`stream_usage: false`.
+
+Dropped parameters change behaviour silently: xAI's reasoning models don't honour `stop`,
+for example. That's the trade for a chain that keeps working.
+
+`make test-live` runs a chat, a stream and a tool call against each provider whose key is
+set. Run it after adding a key, or when a provider ships a new model.
 
 | Provider | What its rules handle |
 |----------|-----------------------|

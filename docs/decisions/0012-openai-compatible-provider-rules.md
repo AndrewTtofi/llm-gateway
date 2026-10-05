@@ -39,17 +39,30 @@ client.
 ## Decision
 Option 3 (`app/providers/openai_compat.py::shape_request`, configured in `models.yaml`):
 
-- **Rules:** model rules overlay provider rules. `drop` is a union; `rename` and `values`
-  merge; a model's `allow` replaces the provider's. `model`, `messages`, `stream` and
-  `stream_options` are always kept (`stream_usage: false` still removes the last one).
+- **Rules:** model rules overlay provider rules.
+  - `drop` is a union; `rename` and `values` merge.
+  - A model's `allow` replaces the provider's, and `allow: []` clears it. A model can't
+    cancel a provider-level `drop` or `rename`.
+  - The order is rename → drop → allow → values, so later rules name fields as sent.
+  - `model`, `messages` and `stream` are always kept. `stream_options` is the adapter's
+    decision: it's sent only when streaming, and never with `stream_usage: false`.
 - **Unsupported values:** a value outside `values` is removed, so the provider uses its
   default rather than failing.
-- **Capability gates:** a request with tools for a `tools: false` model, or with images for a
-  `vision: false` model, raises `UnsupportedRequest`. The router then skips that target, so
-  it doesn't count against the breaker, and the chain continues.
-- **Missing keys:** a provider whose `api_key_env` isn't set now fails fast and falls back
-  without a network call. Previously it sent an unauthenticated request and got a 401.
-  `/v1/catalog` shows `configured: false` for its models.
+- **Capability gates:** these raise `UnsupportedRequest`, and the router then skips that
+  target. It doesn't count against the breaker, and the chain continues.
+  - A `tools: false` model gets a request with tools or legacy `functions`. Empty tool
+    fields are simply removed.
+  - A `vision: false` model gets a request with any non-text content part (images, files,
+    audio).
+  - If every target is skipped this way, the client gets a 400 `unsupported_parameter`.
+- **Missing keys:** a provider whose `api_key_env` isn't set is skipped by the router
+  (`skipped:unconfigured`), like an open breaker.
+  - No call is made, the breaker isn't touched, and it doesn't count in `x-gateway-attempts`.
+    Previously it sent an unauthenticated request and got a 401.
+  - A warning is logged once, when the adapter starts.
+  - If nothing else can serve, the client gets a generic 503 `all_providers_unavailable`.
+    The env var name is never sent to clients.
+  - `/v1/catalog` shows `configured: false`, asking the same adapter the router uses.
 - **Capabilities shown:** `/v1/catalog` lists the capabilities the gateway can use, which
   can be fewer than the model has. Catalog facts confirmed by hand can be `pinned`, so the
   price sync doesn't keep proposing the public catalogs' values.

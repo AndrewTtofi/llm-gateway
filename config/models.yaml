@@ -37,7 +37,9 @@ providers:
     limits: { max_connections: 100, max_keepalive: 20 }
     # What each "OpenAI-compatible" API accepts differs; see ADR 0012 and openai_compat.py.
     params:
-      rename: { max_tokens: max_completion_tokens }   # max_tokens is legacy on reasoning models
+      # max_tokens is legacy on reasoning models; api.openai.com accepts the new name on all
+      # current chat models. (An older OpenAI-compatible proxy might not.)
+      rename: { max_tokens: max_completion_tokens }
     models:
       # GPT-6 reasoning models: no sampling params; effort can't be "none"; tool calling
       # needs the Responses API, so requests with tools skip to the next target (ADR 0012).

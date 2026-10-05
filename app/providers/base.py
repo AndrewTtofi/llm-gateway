@@ -107,10 +107,20 @@ async def first_then_rest[T](
         yield event
 
 
+class NotConfigured(Exception):
+    """The provider has no credentials (its api_key_env isn't set): skipped, not failed."""
+
+
 class ProviderAdapter(ABC):
     def __init__(self, name: str, cfg: dict[str, Any]):
         self.name = name
         self.cfg = cfg
+
+    @property
+    def configured(self) -> bool:
+        """Has what it needs to make calls. The router skips unconfigured providers
+        without calling them or touching their breakers."""
+        return True
 
     @abstractmethod
     async def chat(self, model: str, request: dict[str, Any]) -> dict[str, Any]:

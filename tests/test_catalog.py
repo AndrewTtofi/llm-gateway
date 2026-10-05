@@ -414,7 +414,11 @@ def test_catalog_marks_providers_without_a_key(
     rows = {r["id"]: r for r in client.get("/v1/catalog").json()["data"]}
     assert rows["mock/tiny"]["configured"] is True
     assert rows["chaos/ok"]["configured"] is True  # no key needed
+    from app import providers
+    from app.providers import AdapterPool
+
     monkeypatch.delenv("MOCK_API_KEY")
+    monkeypatch.setattr(providers, "pool", AdapterPool())  # keys are read when adapters start
     rows = {r["id"]: r for r in client.get("/v1/catalog").json()["data"]}
     assert rows["mock/tiny"]["configured"] is False
 
