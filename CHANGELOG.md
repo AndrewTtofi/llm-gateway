@@ -9,6 +9,23 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-05 (Phase 6 — prove it: load, chaos, overhead, SLOs)
+
+### Added
+- Benchmark rig (`docker-compose.bench.yml`): mock OpenAI-compatible LLM replaying real Claude timing, a second gateway replica, Toxiproxy in front of Redis + Postgres, in-network load generator (Phase 6, ADR 0009)
+- `tests/load/loadgen.py` — open/closed-loop load generator timing TTFT and every inter-chunk gap; `run_bench.py` scenarios (overhead, capacity, scaling, accuracy, breaker, chaos, lifecycle); `report.py` → `docs/RESULTS.md`
+- `docs/RESULTS.md`: gateway overhead, capacity, scaling, accuracy, breaker detection/recovery, chaos, operations, SLO alerts — with charts
+- SLOs and multi-window burn-rate alerts in `config/prometheus-rules.yml` (loaded by Prometheus, validated with promtool)
+- `server-timing: admit;dur=…` response header (gateway admission time)
+- `gateway_event_loop_lag_seconds` metric; `usage_log.estimated_tokens` (migration 0003)
+- `dev_only: true` providers (like the `bench` mock) load only with `GATEWAY_ENABLE_FAKE=1`
+- `gateway_ttft_e2e_seconds` (client-side time to first token, incl. fallbacks) — the TTFT SLO uses it; `gateway_auth_stale_served_total`
+
+### Changed
+- ADR 0004 documents the measured cost of a stalled provider (`attempts × first_token` before fallback)
+- Time to first token is measured to the first chunk carrying output (not the empty role chunk)
+- Dev stack ports bind to 127.0.0.1 only; the bench rig runs migrations once (one-shot `migrate` service) and Prometheus scrapes both replicas
+
 ## [0.5.0] - 2026-10-05 (Phase 5 — observability + cost)
 
 ### Added

@@ -25,8 +25,15 @@ duration = Histogram(
 )
 ttft = Histogram(
     "gateway_ttft_seconds",
-    "Time to first token (streams).",
+    "Time to first token of the attempt that served (streams) — per-target debugging.",
     ["target"],
+    buckets=TTFT_BUCKETS,
+    registry=registry,
+)
+ttft_e2e = Histogram(
+    "gateway_ttft_e2e_seconds",
+    "Time to first token as the client sees it: from the request arriving, including "
+    "admission, failed attempts and fallback (streams). The TTFT SLO uses this.",
     buckets=TTFT_BUCKETS,
     registry=registry,
 )
@@ -65,3 +72,14 @@ usage_dropped = Counter(
 )
 
 BREAKER_VALUE = {"closed": 0, "half_open": 1, "open": 2}
+loop_lag = Histogram(
+    "gateway_event_loop_lag_seconds",
+    "How late a 0.5 s timer fires: time the event loop was blocked or saturated.",
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5),
+    registry=registry,
+)
+auth_stale = Counter(
+    "gateway_auth_stale_served_total",
+    "Requests authenticated from a stale cached key because the key store was down.",
+    registry=registry,
+)

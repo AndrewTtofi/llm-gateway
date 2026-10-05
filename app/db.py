@@ -70,6 +70,7 @@ class UsageRow(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer)
     cached_tokens: Mapped[int] = mapped_column(Integer)
     usage_estimated: Mapped[bool] = mapped_column(Boolean)  # no provider usage: estimated
+    estimated_tokens: Mapped[int | None] = mapped_column(Integer)  # pre-call estimate
     cost_usd: Mapped[float | None] = mapped_column(Float)  # None = unpriced model
     latency_ms: Mapped[int] = mapped_column(Integer)
     ttft_ms: Mapped[int | None] = mapped_column(Integer)  # streams only

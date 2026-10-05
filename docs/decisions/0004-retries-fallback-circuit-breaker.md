@@ -62,6 +62,10 @@ and in tests; the shared test suite runs against both.
 
 ## Consequences
 - Worst-case latency grows with chain length × attempts × timeouts; timeouts per
-  provider are the control. Revisit with a total routing deadline if Phase 6 shows it.
+  provider are the control. Measured in Phase 6: a provider that stalls before its first
+  token costs `max_attempts_per_provider × first_token` (2 × 5 s = 10 s on the bench) for
+  each request until the breaker opens — then ~15 ms. A timeout is a transient failure,
+  so it's retried; consider `max_attempts_per_provider: 1` for providers whose stalls are
+  usually not transient, or a total routing deadline.
 - Breakers only learn from real traffic; there are no background health checks yet.
 - Streams can only be retried/fallen back before the first chunk — see ADR 0005.

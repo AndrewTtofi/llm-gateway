@@ -11,6 +11,7 @@ from typing import Any
 import structlog
 
 request_id: ContextVar[str] = ContextVar("request_id", default="-")
+request_started: ContextVar[float] = ContextVar("request_started", default=0.0)
 _VALID_ID = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 _HANDLER = "gateway-json"
 

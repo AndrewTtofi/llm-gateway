@@ -244,6 +244,9 @@ class CachedKeys:
         except Exception:
             if hit is not None and now - hit[1] < self.stale_ttl:
                 log.warning("key store unavailable; serving a cached key (stale-if-error)")
+                from app.observability import metrics  # local: avoid an import cycle
+
+                metrics.auth_stale.inc()
                 return None if hit[0].revoked else hit[0]
             raise
         if key is None:

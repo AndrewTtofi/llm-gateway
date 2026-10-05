@@ -111,10 +111,10 @@ Learn: LLM-specific metrics (TTFT, tokens/sec, cost).
 
 ### Phase 6 — Prove it (days 16–18)
 Goal: evidence it works under stress.
-- [ ] k6 or Locust load test script in `tests/load/`
-- [ ] Chaos scenarios: provider down, provider slow, rate-limit storm
-- [ ] Gateway overhead measured (p50/p95 added latency vs direct calls)
-- [ ] Results written up in `docs/RESULTS.md` with charts
+- [x] k6 or Locust load test script in `tests/load/`  _(own asyncio load generator: k6 can't time SSE chunks — ADR 0009)_
+- [x] Chaos scenarios: provider down, provider slow, rate-limit storm
+- [x] Gateway overhead measured (p50/p95 added latency vs direct calls)
+- [x] Results written up in `docs/RESULTS.md` with charts
 
 DoD: numbers in the README, reproducible with one command.
 

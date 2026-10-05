@@ -75,11 +75,22 @@ async def poll_breakers(interval: float = 15.0) -> None:
         await asyncio.sleep(interval)
 
 
+async def measure_loop_lag(interval: float = 0.5) -> None:
+    """A timer that should fire every `interval`; how late it fires is how long the event
+    loop couldn't run anything — blocking calls or CPU saturation show up here first."""
+    loop = asyncio.get_running_loop()
+    while True:
+        start = loop.time()
+        await asyncio.sleep(interval)
+        metrics.loop_lag.observe(max(0.0, loop.time() - start - interval))
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     obs_log.configure(config.settings.log_level)
     await services.start()
     poller = asyncio.create_task(poll_breakers())
+    lag = asyncio.create_task(measure_loop_lag())
     metrics_server = None
     if config.settings.metrics_port:
         # Separate port: /metrics can be firewalled off while the API stays public.
@@ -90,9 +101,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.add_signal_handler(signal.SIGHUP, reload_from_signal)  # `kill -HUP <pid>`
     yield
-    poller.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await poller
+    for task in (poller, lag):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     if metrics_server is not None:
         metrics_server.shutdown()
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
@@ -101,7 +113,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await services.stop()
 
 
-app = FastAPI(title="LLM Gateway", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="LLM Gateway", version="0.6.0", lifespan=lifespan)
 
 
 class RequestContext:
@@ -121,6 +133,7 @@ class RequestContext:
         rid = obs_log.new_request_id(incoming)
         token = obs_log.request_id.set(rid)
         start, status = time.perf_counter(), 0
+        started_token = obs_log.request_started.set(start)
 
         async def send_with_id(message: Any) -> None:
             nonlocal status
@@ -144,6 +157,7 @@ class RequestContext:
                     ms=round((time.perf_counter() - start) * 1000),
                 )
             obs_log.request_id.reset(token)
+            obs_log.request_started.reset(started_token)
 
 
 app.add_middleware(RequestContext)
@@ -337,6 +351,11 @@ async def chat_completions(
         body.stream_options = (body.stream_options or StreamOptions()).model_copy(
             update={"include_usage": True}
         )
+    # Server-Timing: how long the gateway took to admit the request (auth, model check,
+    # budget, rate limits) before routing it — the gateway's fixed cost per request.
+    started = obs_log.request_started.get()
+    if started:
+        rl_headers["server-timing"] = f"admit;dur={(time.perf_counter() - started) * 1000:.2f}"
     return await (_stream if body.stream else _complete)(body, request, meter, rl_headers)
 
 
@@ -443,7 +462,6 @@ async def _stream(
         raise
     meter.target = routed.target
     meter.routed(routed)
-    meter.first_chunk_at = time.perf_counter()  # the first chunk was pulled before the 200
     return SSEResponse(
         relay_sse(first, chunks, meter),
         upstream=chunks,

@@ -138,8 +138,13 @@ def load_registry(config_dir: Path, enable_fake: bool = False) -> Registry:
 
 
 def _drop_fake(raw: dict[str, Any]) -> None:
-    """Remove fake providers and their chain entries; drop aliases left empty."""
-    fake = {n for n, p in (raw.get("providers") or {}).items() if p.get("type") == "fake"}
+    """Remove test providers (type fake, or `dev_only: true`) and their chain entries;
+    drop aliases left empty."""
+    fake = {
+        n
+        for n, p in (raw.get("providers") or {}).items()
+        if p.get("type") == "fake" or p.get("dev_only")
+    }
     for name in fake:
         del raw["providers"][name]
     for alias in list(raw.get("aliases") or {}):

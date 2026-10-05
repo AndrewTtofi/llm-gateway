@@ -58,6 +58,15 @@ providers:
       broken-stream: { mid_stream_failure_rate: 1.0 }
       metered: {}             # always works; priced in pricing.yaml to exercise budgets
 
+  bench:                  # mock LLM for load tests (tests/load/mockllm.py) — dev only
+    type: openai
+    dev_only: true          # loaded only with GATEWAY_ENABLE_FAKE=1, like `fake`
+    base_url: http://mockllm:8080/v1
+    api_key_env: null
+    timeouts: { connect: 2, first_token: 5, stream_idle: 10, stream_total: 120, total: 60, pool: 5 }
+    limits: { max_connections: 2000, max_keepalive: 500 }
+    models: { fast: {}, realistic: {}, long: {}, slow: {}, primary: {}, backup: {} }
+
 # Aliases are what clients send as `model`. Each is an ordered fallback chain.
 aliases:
   fast:
@@ -90,6 +99,12 @@ aliases:
     chain:
       - fake/blip
       - fake/ok
+  # Phase 6 benchmarks (bench provider, dev only)
+  bench-fast:      { chain: [bench/fast] }
+  bench-realistic: { chain: [bench/realistic] }
+  bench-long:      { chain: [bench/long] }
+  bench-ha:        { chain: [bench/primary, bench/backup] }
+  bench-slow:      { chain: [bench/slow, bench/backup] }
 
 # Allow clients to request `provider/model` directly (bypassing aliases)?
 allow_direct_models: true

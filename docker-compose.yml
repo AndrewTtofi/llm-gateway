@@ -1,10 +1,11 @@
+# Ports bind to 127.0.0.1 only: this is a dev stack, nothing here should face a network.
 services:
   gateway:
     build: .
     env_file: .env
     environment:
       GATEWAY_ENABLE_FAKE: "1"       # dev only: loads the chaos provider + chaos aliases
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     volumes:
       - ./config:/app/config:ro      # edit YAML on host, `make reload` picks it up
       - ./app:/app/app               # live code reload in dev
@@ -17,7 +18,7 @@ services:
 
   redis:
     image: redis:8.10.2-alpine
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, retries: 10 }
 
   postgres:
@@ -26,18 +27,20 @@ services:
       POSTGRES_USER: gateway
       POSTGRES_PASSWORD: gateway
       POSTGRES_DB: gateway
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [pgdata:/var/lib/postgresql]   # PG18+: data lives in /var/lib/postgresql/<major>/docker
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U gateway"], interval: 5s, retries: 10 }
 
   prometheus:
     image: prom/prometheus:v3.15.0
-    volumes: ["./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
-    ports: ["9090:9090"]
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
 
   grafana:
     image: grafana/grafana:13.2.3
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GRAFANA_PG_USER: gateway          # dev only: use a read-only role in production

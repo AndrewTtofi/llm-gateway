@@ -1,6 +1,6 @@
 [project]
 name = "llm-gateway"
-version = "0.5.0"
+version = "0.6.0"
 requires-python = ">=3.14"
 
 [tool.ruff]
@@ -10,6 +10,11 @@ target-version = "py314"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
 ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+# Bench tooling: fixed-argv subprocess calls to docker, long report table strings,
+# psql queries built from uuid.UUID()-validated key ids.
+"tests/load/*" = ["S603", "S607", "E501", "S608"]  # S608: ids are uuid.UUID()-validated
 
 [tool.mypy]
 strict = true

@@ -71,3 +71,10 @@ def test_direct_models_must_be_known() -> None:
     assert reg.resolve("anthropic/claude-opus-5-5") == ["anthropic/claude-opus-5-5"]
     with pytest.raises(KeyError):
         reg.resolve("anthropic/claude-made-up")
+
+
+def test_dev_only_providers_load_only_when_enabled() -> None:
+    off = load_registry(Path("config"))
+    assert "bench" not in off.providers and "bench-fast" not in off.aliases
+    on = load_registry(Path("config"), enable_fake=True)
+    assert on.aliases["bench-ha"].chain == ["bench/primary", "bench/backup"]

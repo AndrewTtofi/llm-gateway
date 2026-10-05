@@ -32,7 +32,7 @@ for chunk in resp:
 | Retries, fallback chains, circuit breakers | ✅ |
 | Per-key request + token rate limits, USD budgets | ✅ |
 | Cost tracking, Prometheus metrics, Grafana dashboard | ✅ |
-| Load + chaos test results | Phase 6 |
+| Load + chaos test results | ✅ [RESULTS.md](docs/RESULTS.md) |
 
 ## Architecture
 
@@ -150,7 +150,24 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.
 See [docs/decisions/](docs/decisions/).
 
 ## Results
-_Load and chaos test results land here in Phase 6._
+
+Measured on one laptop against a mock provider that samples real Claude Haiku timing,
+paired request-by-request so the mock's randomness cancels out. Full numbers, charts
+and method in [docs/RESULTS.md](docs/RESULTS.md):
+
+| | |
+|---|---|
+| Gateway overhead | **+2.6 ms p50 / +3.8 ms p95** per request · **+4.2 ms (0.8%)** to a realistic time-to-first-token |
+| Concurrent streams, one replica (one core) | within 10% of the direct path up to **200**; its core saturates at **400** |
+| Throughput, 1 → 2 replicas | **445 → 614 req/s** (rig ceiling 951) |
+| Rate-limit accuracy across 2 replicas | **-0.06%** of the configured limit |
+| Budget overshoot, 50 concurrent streams | **+3.4%** (≈2.8 requests) |
+| Provider outage | **5** requests paid for the dead provider before the breaker opened · **0** client-visible errors |
+| Provider down/slow, Redis slow/down, Postgres down | **100%** of requests served in each (Redis outages turn limits and budgets off) |
+| SIGTERM with open streams | **90/90** streams completed |
+
+Reproduce: `docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d --build`,
+then `python tests/load/run_bench.py` and `python tests/load/report.py`.
 
 ## License
 [MIT](LICENSE)
