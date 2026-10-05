@@ -5,16 +5,27 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 6 — Prove it (`phase-6-results`, PR → `v0.6.0` on merge)
-- **Branch:** `phase-6-results` · `v0.5.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
-- **Status:** Phase 6 DoD met: numbers in README + docs/RESULTS.md, reproducible with the bench rig (`run_bench.py` + `report.py`). `make test` 268
-- **Next up:** review + merge Phase 6 → `v0.6.0`; then Phase 7 (ship: README polish, v1.0.0, write-up, optional deploy — owner to pick a cloud)
-- **Blockers:** none. Owner: rotate the Anthropic key (it was pasted in chat); `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
-- **Open questions:** none
+- **Phase:** 7 — Ship it (`phase-7-ship`, PR → `v1.0.0` on merge)
+- **Branch:** `phase-7-ship` · `v0.6.0` on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
+- **Status:** README rewritten, `/readyz`, dashboard screenshot, write-up + LinkedIn draft (`docs/WRITEUP.md`, not posted), version 1.0.0
+- **Next up:** merge → tag `v1.0.0`; optional deploy (owner to pick: Cloud Run / ECS / VM); then Phase 8 extensions
+- **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
+- **Open questions:** deploy target
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 10
+**Did**
+- Phase 7: README rewrite (leads with "OpenAI-compatible = the client API; Claude is the
+  default primary"), mermaid architecture, deploy notes; `/readyz`; Grafana image renderer
+  (profile `screenshots`) → `docs/img/dashboard.png`; `docs/WRITEUP.md`; v1.0.0
+
+**Learned**
+- Grafana 13 refuses to start with a renderer URL and the default renderer token: set a shared one
+- Readiness must not fail on shared deps (Redis/Postgres) or one blip removes every replica
+- Demo traffic must use realistic ratios: priced calls at 100% just show budgets exhausted
 
 ### 2026-10-05 — Session 9
 **Did**

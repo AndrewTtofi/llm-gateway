@@ -41,3 +41,31 @@ def test_reload_with_valid_key(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = client.post("/admin/reload", headers={"Authorization": "Bearer gw_admin_test"})
     assert resp.status_code == 200
     assert resp.json()["reloaded"] is True
+
+
+def test_readyz_ready_after_startup_and_reports_dependencies() -> None:
+    with TestClient(app) as c:  # runs the lifespan (in-memory stores in tests)
+        resp = c.get("/readyz")
+    assert resp.status_code == 200 and resp.json()["status"] == "ready"
+    assert resp.json()["dependencies"] == {}  # memory stores: nothing shared to check
+
+
+def test_readyz_is_503_before_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import services
+
+    monkeypatch.setattr(services, "started", False)
+    assert client.get("/readyz").status_code == 503
+
+
+async def test_readyz_stays_ready_when_a_shared_dependency_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import services
+
+    def down() -> dict[str, str]:
+        return {"redis": "unreachable", "postgres": "ok"}
+
+    monkeypatch.setattr(services, "started", True)
+    monkeypatch.setattr(services, "dependencies", down)
+    resp = client.get("/readyz")
+    assert resp.status_code == 200 and resp.json()["status"] == "degraded"
