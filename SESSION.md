@@ -6,7 +6,7 @@ Keep "Current state" short and always true.
 
 ## Current state
 - **Phase:** 2 — Multi-provider + model registry (built on `phase-2-providers`, in review)
-- **Branch:** `phase-2-providers` · `v0.1.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (private)
+- **Branch:** `phase-2-providers` · `v0.1.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
 - **Status:** Phase 2 built + reviewed; `make test` 115 passed, `make test-e2e` 2 passed, `make lint` clean. Claude paths verified only against a mocked API
 - **Next up:** owner adds `ANTHROPIC_API_KEY` to `.env` → `docker compose restart gateway` → `make test-live` (Phase 2 DoD against real Claude) → merge → tag `v0.2.0`
 - **Blockers:** Phase 2 DoD for `fast`/`smart` needs the Anthropic API key
@@ -29,6 +29,9 @@ Keep "Current state" short and always true.
 
 **Decided**
 - Official `anthropic` SDK over raw httpx (ADR 0003); mocks via `httpx2.MockTransport`
+- Repo goes public. History rewritten so commits use the GitHub noreply email; recreated as a fresh
+  public repo (PR numbers restarted — `#N` references in older notes point at the archive)
+- Never commit with the personal email; provider keys only in `.env`, never in chat or the repo
 
 **Learned**
 - Model differences (sampling params, forced tool choice, effort) belong in config, not `if model ==`
