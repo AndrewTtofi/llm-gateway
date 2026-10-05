@@ -1,4 +1,4 @@
-.PHONY: up down logs test test-e2e test-live lint fmt reload shell install lock migrate key prices
+.PHONY: up down logs test test-e2e test-live lint fmt reload shell install lock migrate key prices prune-usage
 
 up:
 	docker compose up -d --build
@@ -52,3 +52,7 @@ key:
 # Shows the diff; ARGS=--write applies changes both sources agree on. Review, then `make reload`.
 prices:
 	python -m tools.sync_prices $(ARGS)
+
+# Delete usage_log rows older than DAYS (default 90), in batches. Export first if needed.
+prune-usage:
+	docker compose exec gateway python -m app.maintenance prune --days $(or $(DAYS),90)

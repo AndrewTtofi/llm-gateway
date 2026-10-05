@@ -1,0 +1,25 @@
+# Production front door (docker-compose.prod.yml). Caddy gets and renews the TLS
+# certificate for $GATEWAY_DOMAIN automatically.
+{$GATEWAY_DOMAIN} {
+	encode zstd gzip
+
+	# Operator endpoints never leave the private network.
+	@private_only {
+		path /admin/* /metrics /readyz
+		not remote_ip private_ranges
+	}
+	respond @private_only "not found" 404
+
+	reverse_proxy gateway:8000 {
+		# Load-balanced across the gateway replicas; Caddy only sends traffic to ready ones.
+		lb_policy least_conn
+		health_uri /readyz
+		health_interval 10s
+		# Streams: send every chunk at once, and allow answers that take many minutes.
+		flush_interval -1
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+}
