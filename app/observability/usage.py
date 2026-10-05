@@ -39,6 +39,7 @@ class UsageRecord:
     latency_ms: int
     ttft_ms: int | None
     estimated_tokens: int | None = None  # what the limiter reserved before the call
+    team: str | None = None
 
     def row(self) -> dict[str, Any]:
         out = asdict(self)
@@ -49,6 +50,7 @@ class UsageRecord:
             ("alias", 200),
             ("target", 200),
             ("error_code", 100),
+            ("team", 100),
         ):
             if isinstance(out[col], str):
                 out[col] = out[col][:limit]

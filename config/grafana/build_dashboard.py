@@ -128,6 +128,20 @@ panel("timeseries", "Spend per key over time", 12, 9, 12, 35, [sql(
     "WHERE $__timeFilter(u.created_at) GROUP BY 1, 2 ORDER BY 1", "time_series")], ds=PG,
     unit="currencyUSD")
 
+# --- row 6: per team (Postgres) ---
+panel("table", "Spend per team — this month", 12, 8, 0, 44, [sql(
+    "SELECT coalesce(u.team, '(no team)') AS team, count(*) AS requests, "
+    "sum(u.prompt_tokens + u.completion_tokens) AS tokens, "
+    "round(sum(coalesce(u.cost_usd, 0))::numeric, 4) AS spend_usd "
+    "FROM usage_log u WHERE u.created_at >= date_trunc('month', now()) "
+    "GROUP BY 1 ORDER BY spend_usd DESC")], ds=PG,
+    desc="Team at request time (usage_log.team). Budgets: limits.yaml teams; GET /admin/teams.")
+panel("timeseries", "Spend per team over time", 12, 8, 12, 44, [sql(
+    "SELECT $__timeGroupAlias(u.created_at, $__interval), coalesce(u.team, '(no team)') AS metric, "
+    "sum(coalesce(u.cost_usd, 0)) AS value "
+    "FROM usage_log u WHERE $__timeFilter(u.created_at) GROUP BY 1, 2 ORDER BY 1", "time_series")],
+    ds=PG, unit="currencyUSD")
+
 dashboard = {
     "uid": "llm-gateway",
     "title": "LLM Gateway",

@@ -103,7 +103,13 @@ class Meter:
         self.reserved_usd = (
             _cost(likely_target, self.prompt_estimate, self.estimate - self.prompt_estimate) or 0.0
         )
-        await self.spend.add(self.key.id, self.reserved_usd)
+        await self._add_spend(self.reserved_usd)
+
+    async def _add_spend(self, usd: float) -> None:
+        """Month-to-date spend for the key and, if it has one, its team."""
+        await self.spend.add(self.key.id, usd)
+        if team := self.key.team_spend_id:
+            await self.spend.add(team, usd)
 
     def _count(self, content: Any, tool_calls: Any) -> None:
         self._chars += len(content) if isinstance(content, str) else 0
@@ -207,11 +213,11 @@ class Meter:
         try:
             if self.target is None:  # nothing reached a provider: undo the reservations
                 await self.limiter.adjust(self.key.id, tpm, -self.estimate)
-                await self.spend.add(self.key.id, -self.reserved_usd)
+                await self._add_spend(-self.reserved_usd)
                 return
             used = self._actual()
             await self.limiter.adjust(self.key.id, tpm, used.tokens - self.estimate)
-            await self.spend.add(self.key.id, used.usd - self.reserved_usd)
+            await self._add_spend(used.usd - self.reserved_usd)
         finally:
             # Recorded even if Redis just failed: that's when you most need the data.
             self._record(used)
@@ -280,6 +286,7 @@ class Meter:
             request_id=self.request_id,
             key_id=self.key.id,
             key_prefix=self.key.prefix,
+            team=self.key.team,
             alias=self.alias,
             target=self.target,
             status=self.status,

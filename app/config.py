@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # quick single-process run without the stack. Keys and limits then die with the process.
     gateway_stores: Literal["external", "memory"] = "external"
     db_timeout_seconds: float = 2.0  # pool wait, connect and query timeout on the request path
+    # Largest request body accepted (413 above it). Base64 images make bodies big:
+    # Anthropic allows up to 32 MB per request.
+    max_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     # Prometheus metrics on their own port (internal only). 0 = serve /metrics on the API port.
     metrics_port: int = 9100
 
@@ -89,9 +92,14 @@ class Tier(BaseModel):
     allowed_aliases: list[str]
 
 
+class Team(BaseModel):
+    monthly_budget_usd: float = Field(ge=0)
+
+
 class Limits(BaseModel):
     estimation: Estimation = Field(default_factory=Estimation)
     tiers: dict[str, Tier]
+    teams: dict[str, Team] = {}  # keys with `team` also count against the team's budget
 
 
 # A negative or non-finite price would corrupt spend and let keys past their budgets.

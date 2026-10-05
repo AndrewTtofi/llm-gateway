@@ -39,6 +39,7 @@ class ApiKeyRow(Base):
     tokens_per_minute: Mapped[int | None] = mapped_column(Integer)
     monthly_budget_usd: Mapped[float | None] = mapped_column(Float)
     allowed_aliases: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True))
+    team: Mapped[str | None] = mapped_column(String(100), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -57,6 +58,7 @@ class UsageRow(Base):
     request_id: Mapped[str] = mapped_column(String(64))
     key_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     key_prefix: Mapped[str] = mapped_column(String(16))
+    team: Mapped[str | None] = mapped_column(String(100))  # the key's team at request time
     alias: Mapped[str] = mapped_column(String(200))  # what the client asked for
     target: Mapped[str | None] = mapped_column(String(200))  # provider/model that served
     provider: Mapped[str | None] = mapped_column(String(100))

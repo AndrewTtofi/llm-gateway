@@ -165,6 +165,70 @@ class RequestContext:
             obs_log.request_started.reset(started_token)
 
 
+class BodyLimit:
+    """Pure ASGI: refuse request bodies over `max_body_bytes` with a 413, before any
+    handler reads them. A declared Content-Length is checked up front; a chunked body
+    (no length) is read up to the limit and replayed to the app."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope.get("method") in ("GET", "HEAD", "OPTIONS"):
+            await self.inner(scope, receive, send)
+            return
+        limit = config.settings.max_body_bytes
+        headers = dict(scope.get("headers") or [])
+        declared = headers.get(b"content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > limit
+            except ValueError:
+                too_big = False  # the server rejects malformed lengths itself
+            if too_big:
+                await self._reject(scope, send, limit)
+                return
+            await self.inner(scope, receive, send)
+            return
+        body, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break  # client went away; let the app see it below
+            size += len(message.get("body", b""))
+            if size > limit:
+                await self._reject(scope, send, limit)
+                return
+            body.append(message.get("body", b""))
+            if not message.get("more_body"):
+                break
+        replayed = False
+
+        async def replay() -> Any:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": b"".join(body), "more_body": False}
+            return await receive()  # disconnects still reach the app
+
+        await self.inner(scope, replay, send)
+
+    @staticmethod
+    async def _reject(scope: Any, send: Any, limit: int) -> None:
+        message = f"Request body is larger than {limit} bytes."
+        path = str(scope.get("path", ""))
+        if path == "/v1/messages" or path.startswith("/v1/messages/"):
+            resp = messages_api.error_response(413, message)
+        else:
+            resp = error_response(413, message, code="request_too_large")
+        await resp(scope, _no_receive, send)
+
+
+async def _no_receive() -> dict[str, Any]:
+    return {"type": "http.disconnect"}
+
+
+app.add_middleware(BodyLimit)  # inside RequestContext: rejections still get a request id
 app.add_middleware(RequestContext)
 
 
@@ -553,6 +617,19 @@ async def _chat(
         )
 
     # Budget: checked before the call against month-to-date spend (ADR 0007).
+    team_budget = config.limits.teams.get(key.team) if key.team else None
+    if (
+        team_budget is not None
+        and key.team_spend_id
+        and await services.spend.spent(key.team_spend_id) >= team_budget.monthly_budget_usd
+    ):
+        metrics.rejected.labels("budget").inc()
+        return error_response(
+            429,
+            "Monthly budget for this key's team is exhausted.",
+            "insufficient_quota",
+            "insufficient_quota",
+        )
     if await services.spend.spent(key.id) >= lim.monthly_budget_usd:
         metrics.rejected.labels("budget").inc()
         return error_response(
@@ -756,6 +833,7 @@ class NewKey(BaseModel):
 
     name: str = Field(min_length=1, max_length=100)
     tier: str
+    team: str | None = Field(default=None, min_length=1, max_length=100)
     requests_per_minute: int | None = Field(default=None, gt=0)
     tokens_per_minute: int | None = Field(default=None, gt=0)
     monthly_budget_usd: float | None = Field(default=None, ge=0)
@@ -767,6 +845,10 @@ async def create_key(new: NewKey, _: Admin) -> dict[str, Any] | JSONResponse:
     if new.tier not in config.limits.tiers:
         return error_response(
             400, f"unknown tier {new.tier!r}; one of {list(config.limits.tiers)}", param="tier"
+        )
+    if new.team is not None and new.team not in config.limits.teams:
+        return error_response(
+            400, f"unknown team {new.team!r}; one of {list(config.limits.teams)}", param="team"
         )
     overrides = new.model_dump(exclude={"name", "tier"}, exclude_none=True)
     key, plaintext = await services.keys.store.create(new.name, new.tier, overrides)
@@ -790,6 +872,59 @@ async def revoke_key(key_id: str, _: Admin) -> dict[str, Any] | JSONResponse:
         return error_response(404, "no active key with that id", code="key_not_found")
     services.keys.invalidate()  # this instance stops accepting it now; others within 30s
     return {"revoked": True, "id": key_id}
+
+
+class KeyUpdate(BaseModel):
+    """Fields to change; a field sent as null clears it (back to the tier's value)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    tier: str | None = None
+    team: str | None = Field(default=None, min_length=1, max_length=100)
+    requests_per_minute: int | None = Field(default=None, gt=0)
+    tokens_per_minute: int | None = Field(default=None, gt=0)
+    monthly_budget_usd: float | None = Field(default=None, ge=0)
+    allowed_aliases: list[str] | None = None
+
+
+@app.patch("/admin/keys/{key_id}", response_model=None)
+async def update_key(key_id: str, changes: KeyUpdate, _: Admin) -> dict[str, Any] | JSONResponse:
+    """Edit a key in place: name, tier, team, limits, allowed aliases. The plaintext key
+    doesn't change. Takes effect here now and on other replicas within 30 s."""
+    fields = changes.model_dump(include=changes.model_fields_set)
+    if fields.get("name", "") is None or fields.get("tier", "") is None:
+        return error_response(400, "name and tier can be changed but not cleared")
+    if (tier := fields.get("tier")) is not None and tier not in config.limits.tiers:
+        return error_response(
+            400, f"unknown tier {tier!r}; one of {list(config.limits.tiers)}", param="tier"
+        )
+    if (team := fields.get("team")) is not None and team not in config.limits.teams:
+        return error_response(
+            400, f"unknown team {team!r}; one of {list(config.limits.teams)}", param="team"
+        )
+    key = await services.keys.store.update(key_id, fields)
+    if key is None:
+        return error_response(404, "no active key with that id", code="key_not_found")
+    services.keys.invalidate()
+    return {**key.public(), "spent_this_month_usd": await services.spend.spent(key.id)}
+
+
+@app.get("/admin/teams")
+async def list_teams(_: Admin) -> dict[str, Any]:
+    """Teams from limits.yaml with their budget, month-to-date spend and active keys."""
+    keys = [k for k in await services.keys.store.list() if not k.revoked]
+    data = []
+    for name, team in config.limits.teams.items():
+        data.append(
+            {
+                "team": name,
+                "monthly_budget_usd": team.monthly_budget_usd,
+                "spent_this_month_usd": await services.spend.spent(f"team:{name}"),
+                "keys": sum(1 for k in keys if k.team == name),
+            }
+        )
+    return {"data": data}
 
 
 @app.post("/admin/reload", response_model=None)
