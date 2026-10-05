@@ -41,15 +41,16 @@ providers:
       # current chat models. (An older OpenAI-compatible proxy might not.)
       rename: { max_tokens: max_completion_tokens }
     models:
-      # GPT-6 reasoning models: no sampling params; effort can't be "none"; tool calling
-      # needs the Responses API, so requests with tools skip to the next target (ADR 0012).
+      # GPT-6 reasoning models: no sampling params; effort can't be "none". Tool calling
+      # needs the Responses API, so they're called through it (ADR 0014). For "pro"
+      # reasoning, add a model entry with `reasoning_mode: pro` once its price is known.
       gpt-6-astra:
-        tools: false
+        api: responses
         params:
           drop: [temperature, top_p, logprobs, top_logprobs]
           values: { reasoning_effort: [low, medium, high, xhigh, max] }
       gpt-6.1-sol:
-        tools: false
+        api: responses
         params:
           drop: [temperature, top_p, logprobs, top_logprobs]
           values: { reasoning_effort: [low, medium, high, xhigh, max] }
@@ -139,8 +140,7 @@ providers:
 
 # Aliases are what clients send as `model`. Each is an ordered fallback chain.
 aliases:
-  # The strongest model from each company, best first. Requests with tools skip GPT-6
-  # Astra (tools need OpenAI's Responses API). Providers without a key are skipped.
+  # The strongest model from each company, best first. Providers without a key are skipped.
   frontier:
     chain:
       - anthropic/claude-fable-5-1

@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 
 from app.extensions import strip_request
+from app.providers import openai_responses as responses
 from app.providers.base import (
     ProviderAdapter,
     ProviderError,
@@ -58,6 +59,9 @@ def rules_for(cfg: dict[str, Any], model: str) -> dict[str, Any]:
         "values": {**(base.get("values") or {}), **(own.get("values") or {})},
         "tools": spec.get("tools", cfg.get("tools", True)),
         "vision": spec.get("vision", cfg.get("vision", True)),
+        # "responses": this model is called through OpenAI's Responses API (ADR 0014)
+        "api": spec.get("api", cfg.get("api", "chat")),
+        "reasoning_mode": spec.get("reasoning_mode"),
     }
 
 
@@ -151,16 +155,24 @@ class OpenAICompatAdapter(ProviderAdapter):
                 f"{self.name} is not configured ({self._key_env} is not set)", status=None
             )
 
+    def _responses(self, model: str) -> tuple[bool, str | None]:
+        rules = rules_for(self.cfg, model)
+        return rules["api"] == "responses", rules["reasoning_mode"]
+
     async def chat(self, model: str, request: dict[str, Any]) -> dict[str, Any]:
         self._require_key()
-        body = {
-            **shape_request(self.name, self.cfg, model, request),
-            "model": model,
-            "stream": False,
-        }
+        shaped = shape_request(self.name, self.cfg, model, request)
+        use_responses, mode = self._responses(model)
+        if use_responses:
+            data = await self._post_json("/responses", responses.to_responses(shaped, model, mode))
+            return responses.from_responses(self.name, data)
+        body = {**shaped, "model": model, "stream": False}
         body.pop("stream_options", None)  # only valid with stream: true
+        return await self._post_json("/chat/completions", body)
+
+    async def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
-            resp = await self._client.post("/chat/completions", json=body, timeout=self._timeout)
+            resp = await self._client.post(path, json=body, timeout=self._timeout)
         except httpx.HTTPError as exc:
             raise _network_error(self.name, exc) from exc
         if resp.status_code >= 400:
@@ -175,25 +187,41 @@ class OpenAICompatAdapter(ProviderAdapter):
 
     async def stream(self, model: str, request: dict[str, Any]) -> AsyncGenerator[dict[str, Any]]:
         self._require_key()
-        body = {
-            **shape_request(self.name, self.cfg, model, request),
-            "model": model,
-            "stream": True,
-        }
+        shaped = shape_request(self.name, self.cfg, model, request)
+        use_responses, mode = self._responses(model)
+        if use_responses:
+            body = {**responses.to_responses(shaped, model, mode), "stream": True}
+            translator = responses.StreamTranslator(
+                self.name, bool((request.get("stream_options") or {}).get("include_usage"))
+            )
+            async for chunk in self._stream_from("/responses", body, translator):
+                yield chunk
+            return
+        body = {**shaped, "model": model, "stream": True}
         # The gateway always asks for streamed usage (ADR 0007), unless the provider doesn't
         # take stream_options; then usage comes from the stream if sent, or is estimated.
         if self.cfg.get("stream_usage") is not False and request.get("stream_options"):
             body["stream_options"] = request["stream_options"]
         else:
             body.pop("stream_options", None)
+        async for chunk in self._stream_from("/chat/completions", body, None):
+            yield chunk
+
+    async def _stream_from(
+        self, path: str, body: dict[str, Any], translator: responses.StreamTranslator | None
+    ) -> AsyncGenerator[dict[str, Any]]:
         try:
             async with self._client.stream(
-                "POST", "/chat/completions", json=body, timeout=self._stream_timeout
+                "POST", path, json=body, timeout=self._stream_timeout
             ) as resp:
                 if resp.status_code >= 400:
                     await resp.aread()
                     raise _status_error(self.name, resp.status_code, resp.text, resp.headers)
-                chunks = _parse_sse(self.name, resp)
+                chunks = (
+                    _parse_sse(self.name, resp)
+                    if translator is None
+                    else _parse_response_events(self.name, resp, translator)
+                )
                 async for chunk in first_then_rest(chunks, self._first_token, self.name):
                     yield chunk
         except httpx.HTTPError as exc:
@@ -227,6 +255,30 @@ async def _parse_sse(provider: str, resp: httpx.Response) -> AsyncGenerator[dict
             )
         yield chunk
     # No [DONE]: the connection closed mid-answer. Don't let it pass as complete.
+    raise ProviderError(f"{provider} stream ended early", retryable=True)
+
+
+async def _parse_response_events(
+    provider: str, resp: httpx.Response, translator: responses.StreamTranslator
+) -> AsyncGenerator[dict[str, Any]]:
+    """Responses API SSE: `event:` + `data:` pairs; the data carries its own `type`. The
+    stream ends with a terminal event (response.completed / .incomplete / .failed)."""
+    async for line in resp.aiter_lines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            event = None
+        if not isinstance(event, dict):
+            raise _invalid_response(provider, payload)
+        for chunk in translator.feed(event):
+            yield chunk
+        if translator.completed:
+            return
     raise ProviderError(f"{provider} stream ended early", retryable=True)
 
 

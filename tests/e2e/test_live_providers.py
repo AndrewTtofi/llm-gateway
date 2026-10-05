@@ -86,7 +86,7 @@ def test_chat_and_stream(gateway_key: str, target: str) -> None:
     assert any(c.get("usage") for c in chunks), "no usage in stream (metering would estimate)"
 
 
-@pytest.mark.parametrize("target", [t for t in TARGETS if t != "openai/gpt-6-astra"])
+@pytest.mark.parametrize("target", TARGETS)
 def test_tool_call(gateway_key: str, target: str) -> None:
     body = {
         "model": target,
@@ -100,18 +100,3 @@ def test_tool_call(gateway_key: str, target: str) -> None:
     calls = resp.json()["choices"][0]["message"].get("tool_calls") or []
     assert calls and calls[0]["function"]["name"] == "get_weather"
     assert "city" in json.loads(calls[0]["function"]["arguments"])
-
-
-def test_astra_with_tools_falls_through(gateway_key: str) -> None:
-    """Astra can't call tools on chat completions: a direct call is a 400, not a 502."""
-    resp = call(
-        gateway_key,
-        {
-            "model": "openai/gpt-6-astra",
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": TOOLS,
-        },
-    )
-    if resp.status_code == 503:
-        pytest.skip("OPENAI_API_KEY not set")
-    assert resp.status_code == 400 and resp.json()["error"]["code"] == "unsupported_parameter"
