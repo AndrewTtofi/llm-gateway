@@ -33,6 +33,9 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     stream: bool = False
     stream_options: StreamOptions | None = None
+    # Read by the gateway for token estimates, so they must be valid numbers.
+    max_tokens: int | None = Field(default=None, ge=1)
+    max_completion_tokens: int | None = Field(default=None, ge=1)
 
     def upstream_body(self, model: str) -> dict[str, Any]:
         """What the client sent, with the alias swapped for the real upstream model."""

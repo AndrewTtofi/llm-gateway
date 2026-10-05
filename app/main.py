@@ -1,36 +1,43 @@
-"""Gateway entrypoint: health, model listing, config reload, chat completions."""
+"""Gateway entrypoint: routes. The pipeline for a chat request is
+
+authenticate → model allowed? → budget left? → rate limits (estimate) →
+route (retries, fallback, breakers) → reconcile tokens + add cost
+"""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import secrets
 import signal
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from redis.asyncio import Redis
+from pydantic import BaseModel, ConfigDict, Field
 
-from app import config, providers
-from app.providers import UnsupportedProvider
-from app.providers.base import (
-    CLIENT_FAULT_STATUS,
-    QUOTA_CODES,
-    ProviderAdapter,
-    ProviderError,
-    UnsupportedRequest,
-)
+from app import config, providers, services
+from app.auth import ApiKey, EffectiveLimits
+from app.errors import error_response, routing_error_response
+from app.metering import Meter
+from app.providers.base import ProviderAdapter
+from app.ratelimit import estimate_prompt_tokens
 from app.routing import router
-from app.routing.breaker import BreakerStore, MemoryBreakerStore, RedisBreakerStore
-from app.routing.router import AllTargetsFailed, CommittedStream, UnknownModel
-from app.schemas import ChatCompletionRequest
+from app.routing.router import AllTargetsFailed, Routed, UnknownModel
+from app.schemas import ChatCompletionRequest, StreamOptions
+
+# Re-exported: tests and tools import these from app.main.
+from app.streaming import (  # noqa: F401
+    ClientDisconnected,
+    SSEResponse,
+    cancel_on_disconnect,
+    relay_sse,
+)
 
 log = logging.getLogger(__name__)
 
@@ -43,19 +50,9 @@ def reload_from_signal() -> None:
         log.exception("config reload on SIGHUP failed; keeping the previous config")
 
 
-def make_breaker_store() -> tuple[BreakerStore, Redis | None]:
-    if config.registry.circuit_breaker.store == "memory":
-        return MemoryBreakerStore(), None
-    timeout = config.registry.circuit_breaker.redis_timeout_ms / 1000
-    redis = Redis.from_url(
-        config.settings.redis_url, socket_timeout=timeout, socket_connect_timeout=timeout
-    )
-    return RedisBreakerStore(redis), redis
-
-
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    router.store, redis = make_breaker_store()
+    await services.start()
     loop = asyncio.get_running_loop()
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.add_signal_handler(signal.SIGHUP, reload_from_signal)  # `kill -HUP <pid>`
@@ -63,33 +60,21 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.remove_signal_handler(signal.SIGHUP)
     await providers.pool.aclose()
-    if redis is not None:
-        await redis.aclose()
+    await services.stop()
 
 
-app = FastAPI(title="LLM Gateway", version="0.3.0", lifespan=lifespan)
-
-
-def error_response(
-    status: int,
-    message: str,
-    type_: str = "invalid_request_error",
-    code: str | int | None = None,
-    param: str | None = None,
-    headers: Mapping[str, str] | None = None,
-) -> JSONResponse:
-    """OpenAI's error shape, so SDK clients raise the right exception class."""
-    return JSONResponse(
-        status_code=status,
-        content={"error": {"message": message, "type": type_, "param": param, "code": code}},
-        headers=headers,
-    )
+app = FastAPI(title="LLM Gateway", version="0.4.0", lifespan=lifespan)
 
 
 @app.exception_handler(HTTPException)
 async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
+    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
     return error_response(
-        exc.status_code, str(exc.detail), code=exc.status_code, headers=exc.headers
+        exc.status_code,
+        str(detail.get("message")),
+        str(detail.get("type", "invalid_request_error")),
+        detail.get("code", exc.status_code),
+        headers=exc.headers,
     )
 
 
@@ -100,26 +85,67 @@ async def validation_error(_: Request, exc: RequestValidationError) -> JSONRespo
     return error_response(400, f"Invalid request: {first.get('msg', 'bad body')}", param=param)
 
 
-def provider_error_response(exc: ProviderError) -> JSONResponse:
-    """Map an upstream failure to what the client should see.
+# --- auth --------------------------------------------------------------------
 
-    Client-caused upstream 4xx (bad params, context too long) pass through. Anything that
-    is the gateway's problem — provider auth, wrong configured model (404), exhausted
-    quota, provider outage — is a 5xx, so clients don't "fix" a request that was fine.
-    """
-    status = exc.status
-    if exc.timeout:
-        return error_response(504, exc.message, "api_error", "upstream_timeout")
-    if exc.code in QUOTA_CODES:
-        # Not retryable: waiting won't help, so no retry-after and not a 429.
-        return error_response(503, exc.message, "api_error", "upstream_quota_exhausted")
-    if status == 429:
-        return error_response(
-            429, exc.message, "rate_limit_error", "upstream_rate_limited", headers=exc.headers
+
+def _bearer(authorization: str) -> str:
+    scheme, _, token = authorization.partition(" ")
+    return token.strip() if scheme.lower() == "bearer" else ""
+
+
+def require_admin(authorization: Annotated[str, Header()] = "") -> None:
+    key = config.settings.gateway_admin_key
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str (header bytes ≥ 0x80).
+    presented = authorization.encode("utf-8", "surrogateescape")
+    if not key or not secrets.compare_digest(presented, f"Bearer {key}".encode()):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+async def require_key(authorization: Annotated[str, Header()] = "") -> ApiKey:
+    try:
+        key = await services.keys.authenticate(_bearer(authorization))
+    except Exception as exc:  # store down and key not cached recently: fail closed
+        # Type only: a DB error's message can include bound parameters (the key hash).
+        log.error("API key lookup failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            detail={
+                "message": "authentication backend unavailable",
+                "type": "api_error",
+                "code": "auth_unavailable",
+            },
+        ) from exc
+    if key is None:
+        raise HTTPException(
+            401,
+            detail={
+                "message": "Incorrect API key provided.",
+                "type": "invalid_request_error",
+                "code": "invalid_api_key",
+            },
         )
-    if status in CLIENT_FAULT_STATUS:
-        return error_response(status, exc.message, "invalid_request_error", "upstream_rejected")
-    return error_response(502, exc.message, "api_error", "upstream_error")
+    return key
+
+
+def key_limits(key: ApiKey) -> EffectiveLimits:
+    try:
+        return key.limits(config.limits)
+    except KeyError as exc:
+        raise HTTPException(
+            403,
+            detail={
+                "message": f"key tier {key.tier!r} is not configured",
+                "type": "permission_error",
+                "code": "tier_unknown",
+            },
+        ) from exc
+
+
+Authenticated = Annotated[ApiKey, Depends(require_key)]
+Admin = Annotated[None, Depends(require_admin)]
+
+
+# --- public ------------------------------------------------------------------
 
 
 @app.get("/healthz")
@@ -128,27 +154,212 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/v1/models")
-async def list_models() -> dict[str, object]:
-    """Aliases first (with their fallback chain), then every provider/model they use."""
-    reg = config.registry
+async def list_models(key: Authenticated) -> dict[str, object]:
+    """Models this key may call: aliases (with their chain), then direct provider/models."""
+    reg, lim = config.registry, key_limits(key)
     data: list[dict[str, object]] = [
         {"id": name, "object": "model", "created": 0, "owned_by": "gateway", "chain": a.chain}
         for name, a in reg.aliases.items()
+        if lim.allows(name)
     ]
     if reg.allow_direct_models:
         direct = dict.fromkeys(m for a in reg.aliases.values() for m in a.chain)
         data += [
             {"id": m, "object": "model", "created": 0, "owned_by": m.split("/", 1)[0]}
             for m in direct
+            if lim.allows(m)
         ]
     return {"object": "list", "data": data}
 
 
+@app.post("/v1/chat/completions", response_model=None)
+async def chat_completions(
+    body: ChatCompletionRequest, request: Request, key: Authenticated
+) -> JSONResponse | StreamingResponse | Response:
+    lim = key_limits(key)
+    if not lim.allows(body.model):
+        return error_response(
+            403,
+            f"This key may not use model '{body.model}'",
+            "permission_error",
+            "model_not_allowed",
+            param="model",
+        )
+
+    # Budget: checked before the call against month-to-date spend (ADR 0007).
+    if await services.spend.spent(key.id) >= lim.monthly_budget_usd:
+        return error_response(
+            429,
+            "Monthly budget for this key is exhausted.",
+            "insufficient_quota",
+            "insufficient_quota",
+        )
+
+    # Rate limits: one request + an estimate of its tokens, from both buckets at once.
+    est = config.limits.estimation
+    prompt_estimate = estimate_prompt_tokens(body.model_dump()["messages"], est.chars_per_token)
+    completion_cap = body.max_completion_tokens or body.max_tokens or est.default_completion_tokens
+    estimate = prompt_estimate + int(completion_cap)
+    verdict = await services.limiter.take(
+        key.id, lim.requests_per_minute, lim.tokens_per_minute, estimate
+    )
+    rl_headers = verdict.headers()
+    if not verdict.allowed:
+        return error_response(
+            429,
+            "Rate limit reached for this key. Retry after the `retry-after` header.",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            headers=rl_headers,
+        )
+
+    client_wants_usage = bool(body.stream_options and body.stream_options.include_usage)
+    meter = Meter(
+        key, lim, services.limiter, services.spend, estimate, prompt_estimate, client_wants_usage
+    )
+    try:
+        chain = config.registry.resolve(body.model)
+    except KeyError:
+        await meter.settle()
+        return _unknown(body)
+    await meter.reserve(chain[0])  # hold the estimated cost against the budget now
+    if body.stream:
+        # Always ask the provider for usage so streams can be metered (ADR 0007); the
+        # meter drops the usage chunk again if the client didn't ask for it. Keep any
+        # other stream options the client sent.
+        body.stream_options = (body.stream_options or StreamOptions()).model_copy(
+            update={"include_usage": True}
+        )
+    return await (_stream if body.stream else _complete)(body, request, meter, rl_headers)
+
+
+async def _settle(meter: Meter) -> None:
+    """Accounting must never turn a delivered (and billed) answer into an error."""
+    try:
+        await meter.settle()
+    except Exception:
+        log.exception("usage accounting failed")
+
+
+def _unknown(body: ChatCompletionRequest) -> JSONResponse:
+    return error_response(
+        404, f"The model '{body.model}' does not exist", code="model_not_found", param="model"
+    )
+
+
+async def _complete(
+    body: ChatCompletionRequest, request: Request, meter: Meter, rl_headers: dict[str, str]
+) -> JSONResponse | Response:
+    routed = Routed()
+    try:
+        try:
+            result, routed = await cancel_on_disconnect(request, router.route_chat(body, routed))
+        except UnknownModel:
+            return _unknown(body)
+        except AllTargetsFailed as exc:
+            resp = routing_error_response(exc)
+            resp.headers.update(rl_headers)
+            return resp
+        except ClientDisconnected:
+            # The provider already has the prompt (and may still be generating): bill
+            # at least the prompt to whoever was working on it, so hanging up isn't free.
+            meter.target = routed.current or None
+            return Response(status_code=499)  # nobody left to answer
+        meter.target = routed.target
+        meter.observe_completion(result)
+        return JSONResponse(result, headers={**routed.headers(), **rl_headers})
+    finally:
+        with anyio.CancelScope(shield=True):
+            await _settle(meter)
+
+
+async def _stream(
+    body: ChatCompletionRequest, request: Request, meter: Meter, rl_headers: dict[str, str]
+) -> JSONResponse | Response:
+    # Retries and fallback cover everything up to the first chunk, which is pulled
+    # *before* the 200 goes out (ADR 0002, 0005). That wait can be long (prompt
+    # processing), so it is watched for disconnects too.
+    routed = Routed()
+    try:
+        (first, chunks), routed = await cancel_on_disconnect(
+            request, router.route_stream(body, routed)
+        )
+    except BaseException as exc:
+        # Nothing was streamed. Settle now (shielded: we may be cancelled) — after this
+        # point the SSEResponse owns settling.
+        if isinstance(exc, ClientDisconnected):
+            meter.target = routed.current or None  # bill the prompt, as for non-streams
+        with anyio.CancelScope(shield=True):
+            await _settle(meter)
+        if isinstance(exc, UnknownModel):
+            return _unknown(body)
+        if isinstance(exc, AllTargetsFailed):
+            resp = routing_error_response(exc)
+            resp.headers.update(rl_headers)
+            return resp
+        if isinstance(exc, ClientDisconnected):
+            return Response(status_code=499)
+        raise
+    meter.target = routed.target
+    return SSEResponse(
+        relay_sse(first, chunks, meter),
+        upstream=chunks,
+        headers={
+            **routed.headers(),
+            **rl_headers,
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+        },
+        on_close=lambda: _settle(meter),  # after the stream ends, however it ends
+    )
+
+
+# --- admin -------------------------------------------------------------------
+
+
+class NewKey(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a typo'd field must not be silently ignored
+
+    name: str = Field(min_length=1, max_length=100)
+    tier: str
+    requests_per_minute: int | None = Field(default=None, gt=0)
+    tokens_per_minute: int | None = Field(default=None, gt=0)
+    monthly_budget_usd: float | None = Field(default=None, ge=0)
+    allowed_aliases: list[str] | None = None
+
+
+@app.post("/admin/keys", status_code=201, response_model=None)
+async def create_key(new: NewKey, _: Admin) -> dict[str, Any] | JSONResponse:
+    if new.tier not in config.limits.tiers:
+        return error_response(
+            400, f"unknown tier {new.tier!r}; one of {list(config.limits.tiers)}", param="tier"
+        )
+    overrides = new.model_dump(exclude={"name", "tier"}, exclude_none=True)
+    key, plaintext = await services.keys.store.create(new.name, new.tier, overrides)
+    # The only time the plaintext exists outside the client: store it now.
+    return {**key.public(), "key": plaintext}
+
+
+@app.get("/admin/keys")
+async def list_keys(_: Admin) -> dict[str, Any]:
+    keys = await services.keys.store.list()
+    return {
+        "data": [
+            {**k.public(), "spent_this_month_usd": await services.spend.spent(k.id)} for k in keys
+        ]
+    }
+
+
+@app.delete("/admin/keys/{key_id}", response_model=None)
+async def revoke_key(key_id: str, _: Admin) -> dict[str, Any] | JSONResponse:
+    if not await services.keys.store.revoke(key_id):
+        return error_response(404, "no active key with that id", code="key_not_found")
+    services.keys.invalidate()  # this instance stops accepting it now; others within 30s
+    return {"revoked": True, "id": key_id}
+
+
 @app.post("/admin/reload", response_model=None)
-async def reload(authorization: str = Header(default="")) -> dict[str, object] | JSONResponse:
-    key = config.settings.gateway_admin_key
-    if not key or not secrets.compare_digest(authorization, f"Bearer {key}"):
-        raise HTTPException(status_code=401, detail="unauthorized")
+async def reload(_: Admin) -> dict[str, object] | JSONResponse:
     try:
         reg = config.reload_registry()
     except Exception as exc:  # bad YAML / validation error: the old config stays live
@@ -158,11 +369,8 @@ async def reload(authorization: str = Header(default="")) -> dict[str, object] |
 
 
 @app.get("/admin/providers", response_model=None)
-async def provider_status(authorization: str = Header(default="")) -> dict[str, object]:
+async def provider_status(_: Admin) -> dict[str, object]:
     """Circuit-breaker state of every target used by an alias."""
-    key = config.settings.gateway_admin_key
-    if not key or not secrets.compare_digest(authorization, f"Bearer {key}"):
-        raise HTTPException(status_code=401, detail="unauthorized")
     targets = dict.fromkeys(t for a in config.registry.aliases.values() for t in a.chain)
     return {"targets": {t: str(await router.store.state(t)) for t in targets}}
 
@@ -181,165 +389,3 @@ def resolve_target(model: str) -> tuple[ProviderAdapter, str, str]:
     if cfg is None:
         raise LookupError(f"The model '{model}' does not exist")
     return providers.pool.get(provider, cfg), upstream_model, target
-
-
-class ClientDisconnected(Exception):
-    pass
-
-
-async def cancel_on_disconnect[T](request: Request, work: Awaitable[T]) -> T:
-    """Run `work`, cancelling it if the client hangs up (→ ClientDisconnected).
-
-    After the body is read, ASGI `receive()` blocks until the client disconnects,
-    so a watcher task waiting on it is a cheap disconnect signal.
-    """
-    task = asyncio.ensure_future(work)
-    receive: Callable[[], Awaitable[Any]] = request.receive
-
-    async def watch() -> None:
-        while (await receive())["type"] != "http.disconnect":
-            pass
-        task.cancel()
-
-    watcher = asyncio.create_task(watch())
-    try:
-        return await task
-    except asyncio.CancelledError:
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
-            raise  # we are being cancelled ourselves (e.g. shutdown) — never swallow that
-        raise ClientDisconnected from None
-    finally:
-        watcher.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await watcher
-
-
-def routing_error_response(exc: AllTargetsFailed) -> JSONResponse:
-    headers = exc.routed.headers()
-    if exc.all_open:
-        return error_response(
-            503,
-            "all providers for this model are temporarily unavailable",
-            "api_error",
-            "all_providers_unavailable",
-            headers=headers,
-        )
-    last = exc.last
-    if isinstance(last, UnsupportedRequest):
-        return error_response(400, str(last), code="unsupported_parameter", headers=headers)
-    if isinstance(last, UnsupportedProvider):
-        return error_response(
-            501, str(last), "api_error", "provider_not_supported", headers=headers
-        )
-    if isinstance(last, ProviderError):
-        resp = provider_error_response(last)
-        resp.headers.update(headers)
-        return resp
-    return error_response(
-        503,
-        "no provider could serve the request",
-        "api_error",
-        "all_providers_unavailable",
-        headers=headers,
-    )
-
-
-@app.post("/v1/chat/completions", response_model=None)
-async def chat_completions(
-    body: ChatCompletionRequest, request: Request
-) -> JSONResponse | StreamingResponse | Response:
-    def unknown() -> JSONResponse:
-        return error_response(
-            404, f"The model '{body.model}' does not exist", code="model_not_found", param="model"
-        )
-
-    if not body.stream:
-        try:
-            result, routed = await cancel_on_disconnect(request, router.route_chat(body))
-        except UnknownModel:
-            return unknown()
-        except AllTargetsFailed as exc:
-            return routing_error_response(exc)
-        except ClientDisconnected:
-            return Response(status_code=499)  # nobody left to answer
-        return JSONResponse(result, headers=routed.headers())
-
-    # Streaming. Retries and fallback cover everything up to the first chunk, which is
-    # pulled *before* the 200 goes out (ADR 0002, 0005). That wait can be long (prompt
-    # processing), so it is watched for disconnects too.
-    try:
-        (first, chunks), routed = await cancel_on_disconnect(request, router.route_stream(body))
-    except UnknownModel:
-        return unknown()
-    except AllTargetsFailed as exc:
-        return routing_error_response(exc)
-    except ClientDisconnected:
-        return Response(status_code=499)
-
-    return SSEResponse(
-        relay_sse(first, chunks),
-        upstream=chunks,
-        headers={**routed.headers(), "cache-control": "no-cache", "x-accel-buffering": "no"},
-    )
-
-
-class SSEResponse(StreamingResponse):
-    """StreamingResponse that always closes the upstream stream when the response ends.
-
-    Starlette cancels a response on disconnect but never closes its body iterator. If
-    the cancel lands while we're suspended at a `yield` (slow client, or before the body
-    started), nothing would close the upstream until garbage collection — and the
-    provider would keep generating, and billing, tokens.
-    """
-
-    def __init__(
-        self,
-        content: AsyncGenerator[str],
-        upstream: CommittedStream | AsyncGenerator[dict[str, Any]],
-        headers: Mapping[str, str],
-    ) -> None:
-        super().__init__(content, media_type="text/event-stream", headers=headers)
-        self._content = content
-        self._upstream = upstream
-
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            # Our task may already be cancelled; shield so the cleanup awaits still run.
-            with anyio.CancelScope(shield=True):
-                with contextlib.suppress(RuntimeError):  # already running/closed
-                    await self._content.aclose()
-                with contextlib.suppress(RuntimeError):
-                    await self._upstream.aclose()
-
-
-def sse_error(message: str) -> str:
-    err = {
-        "error": {"message": message, "type": "api_error", "param": None, "code": "upstream_error"}
-    }
-    return f"data: {json.dumps(err)}\n\n"
-
-
-async def relay_sse(
-    first: dict[str, Any] | None, chunks: AsyncIterator[dict[str, Any]]
-) -> AsyncGenerator[str]:
-    """Re-emit upstream chunks as SSE. Once the 200 is sent, errors can only travel in-band.
-
-    An errored stream ends with an error event and no `[DONE]`, so it can't be mistaken
-    for a complete answer. Upstream cleanup is SSEResponse's job.
-    """
-    try:
-        if first is not None:
-            yield f"data: {json.dumps(first)}\n\n"
-        async for chunk in chunks:
-            yield f"data: {json.dumps(chunk)}\n\n"
-    except ProviderError as exc:
-        yield sse_error(exc.message)
-        return
-    except Exception:
-        log.exception("stream relay failed")
-        yield sse_error("gateway error while streaming")
-        return
-    yield "data: [DONE]\n\n"

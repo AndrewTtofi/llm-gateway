@@ -9,6 +9,27 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-05 (Phase 4 — API keys, token-aware rate limits, budgets)
+
+### Added
+- Gateway API keys (`gw_…`): SHA-256-hashed in Postgres, tiers from `config/limits.yaml` with per-key overrides, 30 s lookup cache; `POST/GET /admin/keys`, `DELETE /admin/keys/{id}`, `make key` (Phase 4, ADR 0006)
+- Every `/v1/*` call needs `Authorization: Bearer gw_…`; `/v1/models` lists only what the key may use; 403 `model_not_allowed`
+- Token-aware rate limits: requests/min and tokens/min token buckets per key in Redis (one atomic Lua script), estimate before the call, reconciled with real usage after; 429 with `retry-after` and OpenAI's `x-ratelimit-*` headers on every response (ADR 0007)
+- Monthly USD budget per key (Redis month-to-date spend, priced by the target that served); 429 `insufficient_quota` when exhausted
+- Streams are metered: the gateway always requests upstream usage and hides the usage chunk unless the client asked for it
+- Alembic migrations (`migrations/`); the dev stack and image migrate on start; `make migrate`
+- `GATEWAY_STORES=memory` to run without Redis/Postgres (tests, quick local runs)
+- CI runs the key-store suite against a real Postgres service
+- Estimated cost is reserved against the budget at admission; disconnected requests are billed for their prompt; refusal-fallback attempts billed per model
+- API-key cache: format check before lookup, separate bounded hit/miss caches, coalesced lookups, stale-if-error during Postgres outages; 2 s Postgres timeouts
+
+### Changed
+- `config/limits.yaml` gains `estimation` and a `chaos` tier; `limits.yaml` and `pricing.yaml` reload with `models.yaml`
+- `app/main.py` split into `errors.py`, `streaming.py`, `metering.py`, `services.py`
+
+### Removed
+- `tiktoken` dependency (estimate + reconciliation instead, ADR 0007)
+
 ## [0.3.0] - 2026-10-05 (Phase 3 — reliability: retries, fallback, circuit breakers)
 
 ### Added

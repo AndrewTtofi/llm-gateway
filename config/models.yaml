@@ -56,6 +56,7 @@ providers:
       slow:   { failure_rate: 0.0, latency_ms: [3000, 5000] }
       blip:   { down_window: { period_s: 60, down_s: 20 }, fail_status: [503] }
       broken-stream: { mid_stream_failure_rate: 1.0 }
+      metered: {}             # always works; priced in pricing.yaml to exercise budgets
 
 # Aliases are what clients send as `model`. Each is an ordered fallback chain.
 aliases:

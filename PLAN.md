@@ -89,11 +89,11 @@ Learn: resilience patterns applied to LLM traffic.
 
 ### Phase 4 — Rate limiting + API keys (days 10–12)
 Goal: per-client limits on requests AND tokens.
-- [ ] Gateway API keys (hashed in Postgres) with per-key limits and allowed aliases
-- [ ] Token bucket in Redis via atomic Lua script: requests/min and tokens/min
-- [ ] Pre-request token estimate (tiktoken / char heuristic), reconcile with real `usage` after
-- [ ] 429 responses with `retry-after` and `x-ratelimit-*` headers
-- [ ] Monthly budget cap per key (USD), enforced
+- [x] Gateway API keys (hashed in Postgres) with per-key limits and allowed aliases
+- [x] Token bucket in Redis via atomic Lua script: requests/min and tokens/min
+- [x] Pre-request token estimate (tiktoken / char heuristic), reconcile with real `usage` after
+- [x] 429 responses with `retry-after` and `x-ratelimit-*` headers
+- [x] Monthly budget cap per key (USD), enforced
 
 DoD: load test shows limits enforced within ±5%; budget cap blocks further calls.
 Learn: why token-based limiting differs from request limiting.

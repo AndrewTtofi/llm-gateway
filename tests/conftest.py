@@ -3,14 +3,54 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config, main, providers
+from app import config, main, providers, services
+from app.auth import ApiKey, CachedKeys, MemoryKeyStore, generate_key, hash_key
 from app.config import Registry
 from app.providers import AdapterPool
+from app.ratelimit import MemoryLimiter, MemorySpend
 from app.routing import router
 from app.routing.breaker import MemoryBreakerStore
 
 UPSTREAM = "http://upstream.test/v1"
 ANTHROPIC_UPSTREAM = "http://anthropic.test"
+
+
+UNLIMITED = {
+    "requests_per_minute": 10**9,
+    "tokens_per_minute": 10**12,
+    "monthly_budget_usd": 10**9,
+    "allowed_aliases": ["*"],
+}
+
+
+def add_key(tier: str = "dev", **overrides: object) -> str:
+    """Create a key straight in the in-memory store; returns the plaintext."""
+    plaintext = generate_key()
+    store = services.keys.store
+    assert isinstance(store, MemoryKeyStore)
+    store._by_hash[hash_key(plaintext)] = ApiKey(
+        id=f"key-{len(store._by_hash)}",
+        name="test",
+        prefix=plaintext[:8],
+        tier=tier,
+        overrides=dict(overrides),
+    )
+    return plaintext
+
+
+@pytest.fixture(autouse=True)
+def api_key(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Every test: in-memory stores (never the real Redis/Postgres) and one unlimited key."""
+    monkeypatch.setattr(config.settings, "gateway_stores", "memory")
+    monkeypatch.setattr(services, "keys", CachedKeys(MemoryKeyStore()))
+    monkeypatch.setattr(services, "limiter", MemoryLimiter())
+    monkeypatch.setattr(services, "spend", MemorySpend())
+    return add_key(**UNLIMITED)
+
+
+@pytest.fixture
+def auth(api_key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {api_key}"}
 
 
 @pytest.fixture
@@ -35,6 +75,7 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> Registry:
                         "unauthorized": {"failure_rate": 1.0, "fail_status": [401]},
                         "broken-stream": {"mid_stream_failure_rate": 1.0},
                         "trickle": {"chunk_delay_ms": 200},
+                        "slow": {"latency_ms": [300, 300]},
                     },
                 },
                 "claude": {
@@ -80,6 +121,6 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> Registry:
 
 
 @pytest.fixture
-def client(registry: Registry) -> Iterator[TestClient]:
-    with TestClient(main.app) as c:
+def client(registry: Registry, auth: dict[str, str]) -> Iterator[TestClient]:
+    with TestClient(main.app, headers=auth) as c:
         yield c

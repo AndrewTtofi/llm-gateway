@@ -17,13 +17,14 @@ N = 100
 @pytest.mark.usefixtures("registry")
 async def test_primary_down_every_request_still_succeeds_and_breaker_recovers(
     monkeypatch: pytest.MonkeyPatch,
+    auth: dict[str, str],
 ) -> None:
     now = [0.0]
     store = MemoryBreakerStore(clock=lambda: now[0])
     monkeypatch.setattr(router, "store", store)
     transport = httpx.ASGITransport(app=main.app)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as gw:
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw", headers=auth) as gw:
 
         async def one(stream: bool) -> httpx.Response:
             body = {
@@ -48,7 +49,7 @@ async def test_primary_down_every_request_still_succeeds_and_breaker_recovers(
     reg.providers["chaos"]["models"]["down"] = {}
     now[0] += reg.circuit_breaker.open_seconds + 1
     assert await store.state("chaos/down") is State.HALF_OPEN
-    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as gw:
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw", headers=auth) as gw:
         r = await gw.post(
             "/v1/chat/completions",
             json={"model": "down-then-ok", "messages": [{"role": "user", "content": "x"}]},

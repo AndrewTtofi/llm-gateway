@@ -89,6 +89,7 @@ class Routed:
 
     target: str = ""
     attempts: list[tuple[str, str]] = field(default_factory=list)
+    current: str = ""  # target being tried right now (who to bill if the client leaves)
 
     @property
     def fallback(self) -> bool:
@@ -116,13 +117,14 @@ class AllTargetsFailed(Exception):
 async def _route[T](
     body: ChatCompletionRequest,
     call: Callable[[ProviderAdapter, str, dict[str, Any]], Awaitable[T]],
+    routed: Routed | None = None,
 ) -> tuple[T, Routed, ProviderAdapter, Registry]:
     reg = config.registry  # one snapshot for the whole request, even across a reload
     try:
         chain = reg.resolve(body.model)
     except KeyError as exc:
         raise UnknownModel(body.model) from exc
-    routed = Routed()
+    routed = routed if routed is not None else Routed()
     # The error to report if nothing works. A provider failing outranks "this provider
     # can't express the request": the former is what actually stopped us.
     provider_error: ProviderError | None = None
@@ -146,6 +148,7 @@ async def _route[T](
             routed.attempts.append((target, "skipped:open"))
             skipped_open = True
             continue
+        routed.current = target
         result = await _try_target(target, adapter, model, body, call, reg, ticket, routed)
         if isinstance(result, _Failed):
             if isinstance(result.error, ProviderError):
@@ -229,11 +232,13 @@ async def _try_target[T](
             await store.release(target, ticket)
 
 
-async def route_chat(body: ChatCompletionRequest) -> tuple[dict[str, Any], Routed]:
+async def route_chat(
+    body: ChatCompletionRequest, routed: Routed | None = None
+) -> tuple[dict[str, Any], Routed]:
     async def call(adapter: ProviderAdapter, model: str, req: dict[str, Any]) -> dict[str, Any]:
         return await adapter.chat(model, req)
 
-    value, routed, _, _ = await _route(body, call)
+    value, routed, _, _ = await _route(body, call, routed)
     return value, routed
 
 
@@ -284,7 +289,9 @@ class CommittedStream:
 Stream = tuple[dict[str, Any] | None, CommittedStream]
 
 
-async def route_stream(body: ChatCompletionRequest) -> tuple[Stream, Routed]:
+async def route_stream(
+    body: ChatCompletionRequest, routed: Routed | None = None
+) -> tuple[Stream, Routed]:
     """Retry/fallback cover everything up to the first chunk; after that the stream is
     committed to its target (ADR 0005)."""
 
@@ -297,7 +304,7 @@ async def route_stream(body: ChatCompletionRequest) -> tuple[Stream, Routed]:
             raise
         return first, chunks
 
-    (first, chunks), routed, adapter, reg = await _route(body, call)
+    (first, chunks), routed, adapter, reg = await _route(body, call, routed)
     try:
         stream_total = float(adapter.cfg.get("timeouts", {}).get("stream_total", 900))
         return (first, CommittedStream(chunks, routed.target, reg, stream_total)), routed

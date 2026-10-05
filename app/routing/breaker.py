@@ -135,6 +135,7 @@ class RedisBreakerStore:
         self.redis = redis
         self._now = clock
         self._down_until = 0.0
+        self._outage = False
         self._decide = redis.register_script(_DECIDE)
         self._fail = redis.register_script(_FAIL)
         self._succeed = redis.register_script(_SUCCEED)
@@ -144,22 +145,23 @@ class RedisBreakerStore:
         return self._now() >= self._down_until
 
     def _broken(self, what: str) -> None:
-        if self._available():  # log once per outage, not once per request
-            log.warning(
-                "circuit-breaker Redis unavailable (%s); failing open for %.0fs",
-                what,
-                self.BACKOFF_SECONDS,
-            )
+        if not self._outage:  # log when the outage starts, not on every retry
+            log.warning("circuit-breaker Redis unavailable (%s); failing open", what)
+        self._outage = True
         self._down_until = self._now() + self.BACKOFF_SECONDS
 
     async def _run(self, script: Any, keys: list[str], args: list[Any], what: str) -> int | None:
         if not self._available():
             return None
         try:
-            return int(await script(keys=keys, args=args))
+            result = int(await script(keys=keys, args=args))
         except RedisError:
             self._broken(what)
             return None
+        if self._outage:
+            log.warning("circuit-breaker Redis back")
+            self._outage = False
+        return result
 
     async def decide(self, target: str, cfg: BreakerConfig) -> Ticket:
         _, open_, tripped, probe = _keys(target)

@@ -5,16 +5,38 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 3 — Reliability (`phase-3-reliability`, PR open → `v0.3.0` on merge)
-- **Branch:** `phase-3-reliability` · `v0.2.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
-- **Status:** Phase 3 DoD met: primary forced down → 100/100 requests succeed via fallback (unit + live stack with Redis); breaker opens and recovers. `make test` 172, `make test-e2e` 3
-- **Next up:** review + merge Phase 3 → `v0.3.0`; then Phase 4 (API keys, token-bucket rate limits, budgets)
+- **Phase:** 4 — Rate limiting + API keys (`phase-4-ratelimit`, PR → `v0.4.0` on merge)
+- **Branch:** `phase-4-ratelimit` · `v0.3.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
+- **Status:** Phase 4 DoD met on the live stack: 30 concurrent clients, 120 rpm key → 140 allowed vs 140 expected (±0%), 5712 rate-limited; $0.05 budget blocks after $0.052 and stays blocked. `make test` 231, `make test-e2e` 5, `make test-live` 4
+- **Next up:** review + merge Phase 4 → `v0.4.0`; then Phase 5 (usage log in Postgres, Prometheus metrics, Grafana dashboard)
 - **Blockers:** none. Owner: rotate the Anthropic key (it was pasted in chat); `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** none
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 7
+**Did**
+- Phase 4: API keys (hashed, Postgres via Alembic, cached lookup, admin API), token-aware rate
+  limits (two Redis token buckets per key, one Lua script, estimate → reconcile), 429s with
+  OpenAI-style headers, monthly USD budgets, metered streams. Split main.py into modules.
+  ADR 0006 (keys), 0007 (limits/budgets)
+
+**Decided**
+- SHA-256 for keys (random, not passwords); 30 s cache → revocation within 30 s
+- No tiktoken: char estimate + reconciliation with real usage
+- Budget/limits fail open when Redis is down; auth fails closed when Postgres is down (cached keys keep working)
+
+- code-reviewer pass: 2 control bypasses (token debt forgiven by a 120 s Redis TTL → ~10× the
+  limit with huge prompts; hanging up before the answer cost $0) + 10 should-fix (budget
+  overshoot by everything in flight, key-flood cache eviction, no Postgres timeouts, refusal
+  iterations unbilled, …). All fixed with tests; the three key fixes mutation-checked
+
+**Learned**
+- `x += await f()` loses updates across coroutines — Python reads `x` before suspending
+- A load test must saturate the limiter, or it measures the client
+
 
 ### 2026-10-05 — Session 6
 **Did**

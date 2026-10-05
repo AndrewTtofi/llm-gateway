@@ -24,11 +24,11 @@ MSGS: list[openai.types.chat.ChatCompletionMessageParam] = [{"role": "user", "co
 
 
 @pytest.fixture
-async def sdk(registry: Registry) -> AsyncIterator[openai.AsyncOpenAI]:
+async def sdk(registry: Registry, api_key: str) -> AsyncIterator[openai.AsyncOpenAI]:
     transport = httpx2.ASGITransport(app=main.app)
     async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as http:
         yield openai.AsyncOpenAI(
-            base_url="http://gw/v1", api_key="gw_test", http_client=http, max_retries=0
+            base_url="http://gw/v1", api_key=api_key, http_client=http, max_retries=0
         )
 
 
