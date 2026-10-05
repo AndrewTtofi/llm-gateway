@@ -56,6 +56,8 @@ class Closable(Protocol):
 
 class ChunkFilter(Protocol):
     def observe(self, chunk: dict[str, Any]) -> dict[str, Any] | None: ...
+    def failed(self, code: str) -> None: ...
+    def finished(self) -> None: ...
 
 
 class SSEResponse(StreamingResponse):
@@ -127,10 +129,16 @@ async def relay_sse(
             if line := emit(chunk):
                 yield line
     except ProviderError as exc:
+        if meter is not None:
+            meter.failed("upstream_timeout" if exc.timeout else "upstream_error")
         yield sse_error(exc.message)
         return
     except Exception:
         log.exception("stream relay failed")
+        if meter is not None:
+            meter.failed("gateway_error")
         yield sse_error("gateway error while streaming")
         return
+    if meter is not None:
+        meter.finished()  # everything delivered; a disconnect from here on isn't a loss
     yield "data: [DONE]\n\n"

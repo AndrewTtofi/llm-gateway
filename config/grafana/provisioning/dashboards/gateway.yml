@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: llm-gateway
+    folder: LLM Gateway
+    type: file
+    allowUiUpdates: false   # the JSON in git is the source of truth
+    options: { path: /var/lib/grafana/dashboards }

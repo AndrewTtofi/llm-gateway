@@ -29,7 +29,7 @@ class StreamOptions(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    model: str = Field(min_length=1)
+    model: str = Field(min_length=1, max_length=256)
     messages: list[ChatMessage] = Field(min_length=1)
     stream: bool = False
     stream_options: StreamOptions | None = None

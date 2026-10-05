@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # quick single-process run without the stack. Keys and limits then die with the process.
     gateway_stores: Literal["external", "memory"] = "external"
     db_timeout_seconds: float = 2.0  # pool wait, connect and query timeout on the request path
+    # Prometheus metrics on their own port (internal only). 0 = serve /metrics on the API port.
+    metrics_port: int = 9100
 
 
 class Alias(BaseModel):
@@ -94,18 +96,31 @@ class Limits(BaseModel):
 class Price(BaseModel):
     input: float | None = None  # USD per 1M tokens; None = unknown
     output: float | None = None
+    cached_input: float | None = None  # cache reads; None = billed as normal input
 
 
 class Pricing(BaseModel):
     currency: str = "USD"
     models: dict[str, Price] = {}
 
-    def cost(self, target: str, prompt_tokens: int, completion_tokens: int) -> float | None:
-        """USD for one call, or None if the target has no (complete) price."""
+    def cost(
+        self, target: str, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0
+    ) -> float | None:
+        """USD for one call, or None if the target has no (complete) price.
+
+        `prompt_tokens` includes `cached_tokens` (OpenAI convention); cached ones are
+        billed at `cached_input` when the model has one.
+        """
         price = self.models.get(target)
         if price is None or price.input is None or price.output is None:
             return None
-        return (prompt_tokens * price.input + completion_tokens * price.output) / 1_000_000
+        cached = min(max(cached_tokens, 0), prompt_tokens)
+        cached_rate = price.cached_input if price.cached_input is not None else price.input
+        return (
+            (prompt_tokens - cached) * price.input
+            + cached * cached_rate
+            + completion_tokens * price.output
+        ) / 1_000_000
 
 
 _ENV = re.compile(r"\$\{(\w+)\}")

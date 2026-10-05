@@ -100,11 +100,11 @@ Learn: why token-based limiting differs from request limiting.
 
 ### Phase 5 — Observability + cost (days 13–15)
 Goal: you can see what every request cost and how every provider behaves.
-- [ ] Usage log table: key, alias, provider, model, tokens in/out, latency, TTFT, cost, fallback_used, status
-- [ ] `config/pricing.yaml` → cost per request
-- [ ] Prometheus metrics: request count, latency histogram, TTFT, tokens, cost, fallback count, breaker state
-- [ ] Grafana dashboard JSON committed (`config/grafana/`)
-- [ ] Structured JSON logs with request ID; OpenTelemetry traces (optional)
+- [x] Usage log table: key, alias, provider, model, tokens in/out, latency, TTFT, cost, fallback_used, status
+- [x] `config/pricing.yaml` → cost per request
+- [x] Prometheus metrics: request count, latency histogram, TTFT, tokens, cost, fallback count, breaker state
+- [x] Grafana dashboard JSON committed (`config/grafana/`)
+- [x] Structured JSON logs with request ID; OpenTelemetry traces (optional)  _(traces deferred; request ids correlate logs + usage rows)_
 
 DoD: dashboard shows spend per key, p95 latency per provider, fallback rate.
 Learn: LLM-specific metrics (TTFT, tokens/sec, cost).

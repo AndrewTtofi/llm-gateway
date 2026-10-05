@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -90,10 +91,12 @@ class Routed:
     target: str = ""
     attempts: list[tuple[str, str]] = field(default_factory=list)
     current: str = ""  # target being tried right now (who to bill if the client leaves)
+    attempt_started: float = 0.0  # perf_counter at the start of the latest attempt
 
     @property
     def fallback(self) -> bool:
-        return bool(self.attempts) and self.attempts[0][0] != self.target
+        """Served by a target other than the first one tried (not: failed everywhere)."""
+        return bool(self.target) and bool(self.attempts) and self.attempts[0][0] != self.target
 
     @property
     def calls(self) -> int:
@@ -197,6 +200,7 @@ async def _try_target[T](
     tries = 1 if ticket.decision is Decision.PROBE else reg.retry.max_attempts_per_provider
     try:
         for attempt in range(tries):
+            routed.attempt_started = time.perf_counter()
             try:
                 value = await call(adapter, model, body.upstream_body(model))
             except UnsupportedRequest as exc:
@@ -206,7 +210,10 @@ async def _try_target[T](
                 return _Failed(exc)
             except ProviderError as exc:
                 kind = classify(exc, reg.retry)
-                routed.attempts.append((target, f"{kind}:{exc.status or exc.code or 'error'}"))
+                # A fixed set of labels: HTTP status, or timeout/network — never a
+                # provider-supplied code (unbounded metric cardinality).
+                detail = exc.status or ("timeout" if exc.timeout else "network")
+                routed.attempts.append((target, f"{kind}:{detail}"))
                 if kind is Kind.CLIENT:
                     # The provider answered — it's healthy, the request is bad.
                     await store.record_success(target, cb, ticket)
