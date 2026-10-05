@@ -86,10 +86,16 @@ Then `make reload`. Full guide: [docs/CHANGING-MODELS.md](docs/CHANGING-MODELS.m
 ## Development
 
 ```bash
+make install     # dev deps from the hashed lockfile (requirements-dev.txt)
 make test        # unit + integration (mocked providers, no cost)
 make test-live   # hits real providers (costs money)
 make lint        # ruff + mypy
+make lock        # re-pin after editing requirements*.in (ARGS=--upgrade to bump)
 ```
+
+Dependencies: edit `requirements.in` / `requirements-dev.in` (direct deps, floors),
+then `make lock` regenerates the pinned, hashed `requirements*.txt`. Dependabot
+opens weekly update PRs for pip, Docker images and GitHub Actions.
 
 This repo is set up for [Claude Code](https://claude.com/claude-code): see
 `CLAUDE.md`, `.claude/agents/` and `.claude/skills/`.

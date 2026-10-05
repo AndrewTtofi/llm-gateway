@@ -13,12 +13,12 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine
     ports: ["6379:6379"]
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, retries: 10 }
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     environment:
       POSTGRES_USER: gateway
       POSTGRES_PASSWORD: gateway
@@ -28,12 +28,12 @@ services:
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U gateway"], interval: 5s, retries: 10 }
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.15.0
     volumes: ["./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
     ports: ["9090:9090"]
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.3
     ports: ["3000:3000"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin

@@ -16,9 +16,14 @@ Version plan: each completed phase bumps the minor version
 - `/healthz` endpoint and config loader skeleton
 - CI workflow (lint + tests)
 - API tests for `/healthz`, `/v1/models`, `/admin/reload`
+- `make install` / `make lock` targets; Dependabot for pip, Docker, Compose and Actions
 - Config test: every model in an alias chain must have a `pricing.yaml` entry
 
 ### Changed
+- Dependencies locked with pip-tools: `requirements*.in` (direct deps) → hashed `requirements*.txt`; Docker and CI install with `--require-hashes`
+- Version floors raised to the versions actually tested
+- Docker images pinned: `python:3.12.15-slim`, `redis:7.4.11-alpine`, `postgres:16.15-alpine`, `prom/prometheus:v3.15.0`, `grafana/grafana:13.2.3`
+- CI: `actions/checkout` and `actions/setup-python` v7, pip cache, check that lockfiles are in sync
 - Errors use OpenAI's `{"error": {...}}` shape
 - CI lint step also runs mypy
 - OpenAI fallbacks set to `gpt-6-luna` / `gpt-6.1-sol` / `gpt-6-astra`; all prices filled in `pricing.yaml`

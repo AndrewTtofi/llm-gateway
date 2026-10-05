@@ -16,6 +16,19 @@ Keep "Current state" short and always true.
 
 ## Session log
 
+### 2026-10-05 — Session 3
+**Did**
+- Dependency audit: installed versions were all latest, but nothing was pinned (only `>=` floors)
+- Added pip-tools locks with hashes, raised floors, pinned Docker images, Dependabot (branch `chore/pin-deps`)
+
+**Decided**
+- Kept Redis 7 / Postgres 16 / Python 3.12 majors; Postgres 18 needs a pgdata migration — separate decision
+- Standard pip-tools layout (`.in` → `.txt`) so Dependabot can regenerate locks
+
+**Next**
+- Merge `chore/pin-deps` once CI is green, then Phase 1
+
+
 ### 2026-10-05 — Session 2
 **Did**
 - Created `.venv`, installed dev deps; `make test` / `make lint` run

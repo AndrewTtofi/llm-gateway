@@ -4,14 +4,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install -r requirements-dev.txt
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install --require-hashes -r requirements-dev.txt
       - run: ruff check app tests && mypy app
       - run: pytest -m "not live" -q
+      - name: lockfiles match requirements
+        run: make lock && git diff --exit-code -- requirements.txt requirements-dev.txt
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -t llm-gateway .

@@ -1,4 +1,4 @@
-.PHONY: up down logs test test-live lint fmt reload shell
+.PHONY: up down logs test test-live lint fmt reload shell install lock
 
 up:
 	docker compose up -d --build
@@ -26,3 +26,12 @@ reload:
 
 shell:
 	docker compose exec gateway bash
+
+install:
+	pip install --require-hashes -r requirements-dev.txt
+
+# Re-resolve pins after editing requirements*.in. Add --upgrade to pull newer versions.
+PIP_COMPILE = pip-compile --quiet --strip-extras --generate-hashes --allow-unsafe --no-emit-index-url
+lock:
+	$(PIP_COMPILE) $(ARGS) -o requirements.txt requirements.in
+	$(PIP_COMPILE) $(ARGS) -o requirements-dev.txt requirements-dev.in

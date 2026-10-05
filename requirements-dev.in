@@ -1,0 +1,12 @@
+# Dev/test deps. Constrained to the runtime lock so dev and prod resolve identically.
+# Exact pins live in requirements-dev.txt — regenerate with `make lock`.
+-r requirements.in
+-c requirements.txt
+pytest>=9.1
+pytest-asyncio>=1.4
+respx>=0.23
+ruff>=0.16
+mypy>=2.4
+types-PyYAML
+openai>=3.24
+pip-tools>=7.6

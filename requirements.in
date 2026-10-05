@@ -1,0 +1,15 @@
+# Direct runtime deps. Floors = oldest version we've tested against.
+# Exact pins live in requirements.txt — regenerate with `make lock`.
+fastapi>=0.142
+uvicorn[standard]>=0.54
+pydantic>=2.13
+pydantic-settings>=2.15
+httpx>=0.28
+pyyaml>=6.0
+redis>=8.1
+sqlalchemy[asyncio]>=2.1
+asyncpg>=0.31
+alembic>=1.20
+prometheus-client>=0.26
+tiktoken>=0.14
+structlog>=26.1
