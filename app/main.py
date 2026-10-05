@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import config, extensions, messages_api, providers, services
+from app import cache, config, extensions, messages_api, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
@@ -686,6 +686,11 @@ async def _chat(
         alias=body.model,
         streamed=body.stream,
     )
+    alias_cfg = config.registry.aliases.get(body.model)
+    if alias_cfg is not None and alias_cfg.cache is not None:
+        hit = await _cache_lookup(body, request, key, meter, alias_cfg.cache, rl_headers)
+        if hit is not None:
+            return _serve_cached(hit, body, meter, rl_headers, fmt, anthropic_client)
     try:
         chain = config.registry.resolve(body.model)
     except KeyError:
@@ -740,6 +745,62 @@ async def _chat(
     if body.stream:
         return await _stream(body, request, meter, rl_headers, fmt, chain)
     return await _complete(body, request, meter, rl_headers, anthropic_client, chain)
+
+
+async def _cache_lookup(
+    body: ChatCompletionRequest,
+    request: Request,
+    key: ApiKey,
+    meter: Meter,
+    cfg: config.CacheConfig,
+    rl_headers: dict[str, str],
+) -> dict[str, Any] | None:
+    """Look the request up in the response cache (ADR 0018). On a miss, the meter is told
+    where to store the answer. `x-gateway-cache: bypass | refresh` skips the read."""
+    mode = request.headers.get("x-gateway-cache", "").strip().lower()
+    mode = mode if mode in ("bypass", "refresh") else ""
+    hit, ctx, label = await cache.lookup(
+        services.response_cache, cfg, key, body.model, body.model_dump(exclude_unset=True), mode
+    )
+    rl_headers["x-gateway-cache"] = label
+    if hit is None:
+        meter.cache = ctx
+        if body.stream and ctx is not None:
+            meter.collector = cache.Collector()
+        return None
+    meter.cache_hit = f"cache/{cfg.mode}"
+    await meter.settle()  # refunds the token estimate; no cost; recorded as a cache hit
+    return hit
+
+
+class _NoUpstream:
+    async def aclose(self) -> None:
+        return None
+
+
+def _serve_cached(
+    hit: dict[str, Any],
+    body: ChatCompletionRequest,
+    meter: Meter,
+    rl_headers: dict[str, str],
+    fmt: StreamFormat | None,
+    anthropic_client: bool,
+) -> JSONResponse | Response:
+    headers = {**rl_headers, "x-gateway-provider": meter.cache_hit or "cache"}
+    if not body.stream:
+        result = hit if anthropic_client else extensions.strip_response(hit)
+        return JSONResponse(result, headers=headers)
+
+    async def chunks() -> AsyncIterator[dict[str, Any]]:
+        for c in cache.replay(hit)[1:]:
+            yield c
+
+    replayed = cache.replay(hit)
+    return SSEResponse(
+        relay_sse(replayed[0], chunks(), meter, fmt),  # the meter only filters the usage chunk
+        upstream=_NoUpstream(),
+        headers={**headers, "cache-control": "no-cache", "x-accel-buffering": "no"},
+    )
 
 
 def _route_hints(body: ChatCompletionRequest, request: Request) -> dict[str, Any] | None:
@@ -815,6 +876,7 @@ async def _complete(
         meter.target = routed.target
         meter.routed(routed)
         meter.observe_completion(result)
+        meter.cache_result = result  # stored in the response cache when settled, if enabled
         if not anthropic_client:
             result = extensions.strip_response(result)  # OpenAI clients: standard fields only
         return JSONResponse(result, headers={**routed.headers(), **rl_headers})

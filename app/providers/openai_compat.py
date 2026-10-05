@@ -170,6 +170,19 @@ class OpenAICompatAdapter(ProviderAdapter):
         body.pop("stream_options", None)  # only valid with stream: true
         return await self._post_json("/chat/completions", body)
 
+    async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
+        """OpenAI-compatible /embeddings (used by the semantic response cache)."""
+        self._require_key()
+        data = await self._post_json("/embeddings", {"model": model, "input": texts})
+        rows = sorted(data.get("data") or [], key=lambda r: r.get("index", 0))
+        vectors = [r.get("embedding") for r in rows]
+        if len(vectors) != len(texts) or not all(
+            isinstance(v, list) and v and all(isinstance(x, int | float) for x in v)
+            for v in vectors
+        ):
+            raise _invalid_response(self.name, "embeddings response has no usable vectors")
+        return [[float(x) for x in v] for v in vectors if isinstance(v, list)]
+
     async def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
             resp = await self._client.post(path, json=body, timeout=self._timeout)

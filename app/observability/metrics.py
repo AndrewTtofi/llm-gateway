@@ -83,3 +83,10 @@ auth_stale = Counter(
     "Requests authenticated from a stale cached key because the key store was down.",
     registry=registry,
 )
+cache = Counter(
+    "gateway_cache_total",
+    "Response cache lookups by mode and result: hit_exact, hit_semantic, miss, store, "
+    "bypass, refresh (ADR 0018).",
+    ["mode", "result"],
+    registry=registry,
+)

@@ -99,6 +99,11 @@ class Meter:
         self.fallback = False
         self.attempt_started: float | None = None  # start of the attempt that served
         self.stream_done = False
+        # Response cache (ADR 0018): where to store the answer, and what was served from it.
+        self.cache: Any = None  # app.cache.Lookup
+        self.cache_hit: str | None = None  # "cache/exact" … when the answer came from cache
+        self.collector: Any = None  # app.cache.Collector, assembling a streamed answer
+        self.cache_result: dict[str, Any] | None = None  # a non-streamed answer to store
 
     async def reserve(self, likely_target: str) -> None:
         """Hold the estimated cost against the budget until the real cost is known."""
@@ -132,6 +137,8 @@ class Meter:
 
     def observe(self, chunk: dict[str, Any]) -> dict[str, Any] | None:
         """Watch a streamed chunk; return what to send the client (None = drop it)."""
+        if self.collector is not None:
+            self.collector.feed(chunk)
 
         if usage := chunk.get("usage"):
             self.usage = usage
@@ -223,9 +230,21 @@ class Meter:
             used = self._actual()
             await self.limiter.adjust(self.key.id, tpm, used.tokens - self.estimate)
             await self._add_spend(used.usd - self.reserved_usd)
+            await self._store_in_cache()
         finally:
             # Recorded even if Redis just failed: that's when you most need the data.
             self._record(used)
+
+    async def _store_in_cache(self) -> None:
+        """A clean, complete answer goes into the response cache (if the alias has one)."""
+        if self.cache is None or self.status != 200 or self.error_code:
+            return
+        if self.streamed:
+            if self.collector is None or not self.stream_done:
+                return
+            await self.cache.save(self.collector.result())
+        elif self.cache_result is not None:
+            await self.cache.save(self.cache_result)
 
     def _record(self, used: Used) -> None:
         """Metrics, usage row, access line. Never raises; never logs content."""
@@ -254,7 +273,7 @@ class Meter:
             if self.streamed and self.first_chunk_at is not None
             else None
         )
-        target = self.target or ""
+        target = self.target or self.cache_hit or ""
         status_label = (
             str(self.status) if not self.error_code else f"{self.status}:{self.error_code}"
         )
@@ -293,7 +312,7 @@ class Meter:
             key_prefix=self.key.prefix,
             team=self.key.team,
             alias=self.alias,
-            target=self.target,
+            target=self.target or self.cache_hit,
             status=self.status,
             error_code=self.error_code,
             streamed=self.streamed,
@@ -314,7 +333,7 @@ class Meter:
             "request",
             key=self.key.prefix,
             alias=self.alias,
-            target=self.target,
+            target=self.target or self.cache_hit,
             status=self.status,
             error=self.error_code,
             stream=self.streamed,

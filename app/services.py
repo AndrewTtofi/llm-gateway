@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app import config
 from app.auth import CachedKeys, MemoryKeyStore, PostgresKeyStore
+from app.cache import CacheStore, MemoryCacheStore, RedisCacheStore
 from app.db import make_engine, make_sessions
 from app.observability.usage import MemoryUsageSink, PostgresUsageWriter, UsageSink
 from app.ratelimit import (
@@ -33,6 +34,7 @@ keys: CachedKeys = CachedKeys(MemoryKeyStore())
 limiter: Limiter = MemoryLimiter()
 spend: SpendTracker = MemorySpend()
 usage: UsageSink = MemoryUsageSink()
+response_cache: CacheStore = MemoryCacheStore()  # ADR 0018
 _writer: PostgresUsageWriter | None = None
 
 _redis: Redis | None = None
@@ -40,7 +42,7 @@ _engine: AsyncEngine | None = None
 
 
 async def start() -> None:
-    global keys, limiter, spend, usage, _redis, _engine, _writer, started
+    global keys, limiter, spend, usage, response_cache, _redis, _engine, _writer, started
     if config.settings.gateway_stores == "memory":
         router.store = MemoryBreakerStore()
         started = True
@@ -56,6 +58,7 @@ async def start() -> None:
     _writer.start()
     usage = _writer
     limiter = RedisLimiter(_redis)
+    response_cache = RedisCacheStore(_redis)
     spend = RedisSpend(_redis)
     router.store = (
         MemoryBreakerStore()

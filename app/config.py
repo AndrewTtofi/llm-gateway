@@ -47,9 +47,22 @@ class Policy(BaseModel):
     client_hints: bool = True  # clients may tighten it (route field / x-gateway-route)
 
 
+class CacheConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["exact", "semantic"] = "exact"
+    ttl_seconds: int = Field(default=3600, ge=1, le=30 * 86400)
+    scope: Literal["key", "team", "global"] = "key"
+    threshold: float = Field(default=0.95, gt=0, le=1)  # semantic only
+    embedding: str | None = None  # provider/model (OpenAI-compatible /embeddings), semantic only
+    max_entries: int = Field(default=10_000, ge=1)  # per scope and alias (semantic index)
+    max_entry_bytes: int = Field(default=256 * 1024, ge=1024)
+
+
 class Alias(BaseModel):
     chain: list[str] = []  # ["provider/model", ...] in fallback order
     policy: Policy | None = None  # instead of a chain: chosen per request
+    cache: CacheConfig | None = None  # response cache, opt-in (ADR 0018)
 
     @model_validator(mode="after")
     def _one_of(self) -> Alias:
