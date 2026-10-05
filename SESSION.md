@@ -5,16 +5,45 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 5 — Observability + cost (`phase-5-observability`, PR → `v0.5.0` on merge)
-- **Branch:** `phase-5-observability` · `v0.4.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
-- **Status:** Phase 5 DoD met: Grafana dashboard provisioned; all 17 panels return data on the live stack — spend per key (team-a $0.22 / team-b $0.11 from the usage log), p95 latency per provider (anthropic, fake, ollama), fallback rate 41%. `make test` 259
-- **Next up:** review + merge Phase 5 → `v0.5.0`; then Phase 6 (k6/Locust load tests, chaos scenarios, gateway overhead, docs/RESULTS.md)
+- **Phase:** 6 — Prove it (`phase-6-results`, PR → `v0.6.0` on merge)
+- **Branch:** `phase-6-results` · `v0.5.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
+- **Status:** Phase 6 DoD met: numbers in README + docs/RESULTS.md, reproducible with the bench rig (`run_bench.py` + `report.py`). `make test` 268
+- **Next up:** review + merge Phase 6 → `v0.6.0`; then Phase 7 (ship: README polish, v1.0.0, write-up, optional deploy — owner to pick a cloud)
 - **Blockers:** none. Owner: rotate the Anthropic key (it was pasted in chat); `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** none
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 9
+**Did**
+- Phase 6: bench rig (mock LLM replaying measured Claude timing, 2nd replica, Toxiproxy),
+  own load generator (per-chunk timing, open/closed loop), 9 scenarios, SLO burn-rate alerts,
+  docs/RESULTS.md + README numbers. ADR 0009
+
+**Results (laptop, after the review's methodology fixes)**
+- Overhead +2.6 ms p50 / +3.8 ms p95 (paired), +4.2 ms to realistic TTFT (0.8%)
+- One replica within 10% of direct up to 200 streams, core saturates at 400; 1→2 replicas 445→614 req/s
+- Rate limits -0.06% across 2 replicas; budget overshoot +3.4%; breaker: 5 requests paid, 0 client errors
+- 100% served through provider/Redis/Postgres failures; 90/90 streams survived SIGTERM; fast-burn alert fired
+
+- code-reviewer found the *method* flawed in places: budget overshoot and token-estimate
+  numbers were mock artifacts (mock ignored max_tokens), the +8 ms TTFT was within noise,
+  capacity clients ran in lockstep, breaker recovery was set by the scenario's timing,
+  stale-if-error was never exercised, the TTFT SLO measured the serving attempt only,
+  bench keys could spend real money. All fixed; whole suite re-run; report derives every
+  claim from the data
+
+**Learned**
+- Pair comparisons (same seed → same mock delays) to remove the mock's own noise
+- Prometheus keeps data in an anonymous volume: `--force-recreate` needs `-V` for a clean slate
+- Measure the rig before the system: direct-to-mock baselines showed the load generator, not
+  the gateway, saturating first; alternating runs exposed a cold-start "2.7× scaling"
+- Report latency over *all* responses, and align fault injection by wall clock
+- A stalled provider costs attempts × first_token before fallback (retries on timeouts)
+- Silent no-op string edits: always assert a replacement matched
+
 
 ### 2026-10-05 — Session 8
 **Did**

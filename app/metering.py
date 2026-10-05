@@ -81,7 +81,8 @@ class Meter:
         # For the record (ADR 0008):
         self.sink, self.alias, self.streamed = sink, alias, streamed
         self.request_id = obs_log.request_id.get()
-        self.started = time.perf_counter()
+        # From the request arriving (middleware), so admission counts too.
+        self.started = obs_log.request_started.get() or time.perf_counter()
         self.first_chunk_at: float | None = None
         self.status = 200
         self.error_code: str | None = None
@@ -116,12 +117,15 @@ class Meter:
 
     def observe(self, chunk: dict[str, Any]) -> dict[str, Any] | None:
         """Watch a streamed chunk; return what to send the client (None = drop it)."""
-        if self.first_chunk_at is None:
-            self.first_chunk_at = time.perf_counter()
+
         if usage := chunk.get("usage"):
             self.usage = usage
         for choice in chunk.get("choices") or []:
             delta = choice.get("delta") or {}
+            if self.first_chunk_at is None and (delta.get("content") or delta.get("tool_calls")):
+                # TTFT = first chunk carrying output (not the empty role chunk) — the same
+                # definition the load generator uses.
+                self.first_chunk_at = time.perf_counter()
             self._count(delta.get("content"), delta.get("tool_calls"))
         if "usage" in chunk and not self.client_wants_usage:
             if not chunk.get("choices"):
@@ -234,6 +238,8 @@ class Meter:
                 metrics.duration.labels(target, str(self.streamed).lower()).observe(target_latency)
                 if target_ttft is not None:
                     metrics.ttft.labels(target).observe(target_ttft)
+                if ttft is not None:
+                    metrics.ttft_e2e.observe(ttft)
                 metrics.tokens.labels(target, "prompt").inc(used.prompt)
                 metrics.tokens.labels(target, "completion").inc(used.completion)
                 metrics.tokens.labels(target, "cached").inc(used.cached)
@@ -262,6 +268,7 @@ class Meter:
             cost_usd=used.cost_for_record,
             latency_ms=round(latency * 1000),
             ttft_ms=round(ttft * 1000) if ttft else None,
+            estimated_tokens=self.estimate,
         )
         if self.sink is not None:
             self.sink.submit(record)

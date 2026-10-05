@@ -38,6 +38,7 @@ class UsageRecord:
     cost_usd: float | None
     latency_ms: int
     ttft_ms: int | None
+    estimated_tokens: int | None = None  # what the limiter reserved before the call
 
     def row(self) -> dict[str, Any]:
         out = asdict(self)

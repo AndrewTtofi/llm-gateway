@@ -72,7 +72,9 @@ panel("timeseries", "p95 latency per provider", 12, 8, 0, 4, [prom(
     "histogram_quantile(0.95, sum by (le, provider) ("
     + BY_PROVIDER.format(inner=f"rate(gateway_request_duration_seconds_bucket{RATE})") + "))",
     "{{provider}}")], unit="s", desc="Whole request; for streams, until the last token.")
-panel("timeseries", "p95 time to first token per target", 12, 8, 12, 4, [prom(
+panel("timeseries", "p95 time to first token (client-side, and per serving target)", 12, 8, 12, 4, [prom(
+    f"histogram_quantile(0.95, sum by (le) (rate(gateway_ttft_e2e_seconds_bucket{RATE})))",
+    "client (end to end)"), prom(
     f"histogram_quantile(0.95, sum by (le, target) (rate(gateway_ttft_seconds_bucket{RATE})))",
     "{{target}}")], unit="s", desc="Streams: how long users stare at an empty response.")
 

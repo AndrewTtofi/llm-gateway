@@ -1,0 +1,69 @@
+# Benchmark rig (Phase 6, ADR 0009) — layered on the dev stack:
+#   docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d --build
+# Adds a mock LLM, a second gateway replica, Toxiproxy in front of Redis + Postgres (for
+# dependency chaos), and a loadgen container inside the same network (so measurements
+# don't include the host's port forwarding). Everything published binds to 127.0.0.1:
+# the mock's /control and Toxiproxy's API are unauthenticated by design.
+x-gateway: &gateway
+  build: .
+  env_file: .env
+  environment:
+    GATEWAY_ENABLE_FAKE: "1"   # loads the bench + fake providers (dev/test only)
+    REDIS_URL: redis://toxiproxy:16379/0
+    DATABASE_URL: postgresql+asyncpg://gateway:gateway@toxiproxy:15432/gateway
+  volumes:
+    - ./config:/app/config:ro
+    - ./app:/app/app:ro
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  # Production-like: no --reload, migrations run once beforehand (service `migrate`),
+  # and SIGTERM waits up to 30 s for in-flight streams.
+  command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30
+  stop_grace_period: 40s
+  depends_on:
+    migrate: { condition: service_completed_successfully }
+    toxiproxy: { condition: service_started }
+    mockllm: { condition: service_started }
+    redis: { condition: service_healthy }
+
+services:
+  migrate:   # one-shot: replicas never race to run DDL
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
+    command: alembic upgrade head
+    depends_on: { postgres: { condition: service_healthy } }
+    healthcheck: { disable: true }
+    restart: "no"
+
+  gateway: *gateway
+  gateway2:
+    <<: *gateway
+    ports: ["127.0.0.1:8001:8000"]
+
+  mockllm:
+    build: .
+    volumes: ["./tests/load:/app/load:ro"]
+    command: uvicorn load.mockllm:app --host 0.0.0.0 --port 8080 --log-level warning
+    ports: ["127.0.0.1:8080:8080"]
+    healthcheck: { disable: true }
+
+  toxiproxy:
+    build: { context: ./tests/load, dockerfile: toxiproxy.Dockerfile }
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes: ["./tests/load/toxiproxy.json:/config/toxiproxy.json:ro"]
+    ports: ["127.0.0.1:8474:8474"]   # API: add latency, cut connections
+
+  prometheus:   # scrape both replicas
+    volumes:
+      - ./config/prometheus.bench.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
+
+  loadgen:
+    build: .
+    volumes: ["./tests/load:/app/load"]
+    working_dir: /app/load
+    environment: { LOADGEN_KEY: "${LOADGEN_KEY:-}" }   # passed by run_bench.py, not argv
+    entrypoint: ["python", "loadgen.py"]
+    healthcheck: { disable: true }
+    profiles: ["tools"]    # only via `docker compose run loadgen …`

@@ -1,0 +1,75 @@
+# SLOs and alerts for the gateway (Phase 6). Validate: promtool check rules <this file>
+#
+# SLOs (per 30 days):
+#   availability  99.9% of admitted requests succeed (gateway/upstream failures count;
+#                 client errors — 4xx, hang-ups — don't)
+#   TTFT          p95 time to first token ≤ 1.5 s for streams
+# Burn-rate alerts follow the multi-window method from the Google SRE workbook: page when
+# the error budget would be gone in ~2 days, ticket when in ~5 days.
+groups:
+  - name: gateway-slo-recording
+    interval: 30s
+    rules:
+      - record: gateway:requests:rate5m
+        expr: sum(rate(gateway_requests_total[5m]))
+      # Errors = gateway/upstream failures: 5xx, and 200 streams that failed in-band
+      # ("200:<code>"). Client errors (4xx, 499 hang-ups) don't burn the budget.
+      - record: gateway:errors:rate5m
+        expr: sum(rate(gateway_requests_total{status=~"5.*|200:.*"}[5m])) or vector(0)
+      - record: gateway:error_ratio:rate5m
+        expr: gateway:errors:rate5m / gateway:requests:rate5m
+      - record: gateway:error_ratio:rate30m
+        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*"}[30m])) or vector(0)) / sum(rate(gateway_requests_total[30m]))
+      - record: gateway:error_ratio:rate1h
+        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*"}[1h])) or vector(0)) / sum(rate(gateway_requests_total[1h]))
+      - record: gateway:error_ratio:rate6h
+        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*"}[6h])) or vector(0)) / sum(rate(gateway_requests_total[6h]))
+      - record: gateway:ttft_seconds:p95_10m
+        # What clients see (incl. failed attempts and fallback), not the serving attempt.
+        expr: histogram_quantile(0.95, sum by (le) (rate(gateway_ttft_e2e_seconds_bucket[10m])))
+
+  - name: gateway-slo-alerts
+    rules:
+      - alert: GatewayErrorBudgetFastBurn
+        # 14.4× the allowed error rate: 2% of a 30-day budget per hour
+        expr: gateway:error_ratio:rate1h > (14.4 * 0.001) and gateway:error_ratio:rate5m > (14.4 * 0.001)
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "Gateway is burning its error budget fast ({{ $value | humanizePercentage }} errors)"
+          dashboard: "/d/llm-gateway"
+      - alert: GatewayErrorBudgetSlowBurn
+        expr: gateway:error_ratio:rate6h > (6 * 0.001) and gateway:error_ratio:rate30m > (6 * 0.001)
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Gateway error rate will exhaust the monthly budget in ~5 days"
+      - alert: GatewayTTFTSLOBreach
+        expr: gateway:ttft_seconds:p95_10m > 1.5
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "p95 time to first token is {{ $value | humanizeDuration }} (SLO 1.5 s)"
+
+  - name: gateway-health
+    rules:
+      - alert: GatewayDown
+        expr: up{job="gateway"} == 0
+        for: 1m
+        labels: { severity: page }
+        annotations: { summary: "Prometheus can't scrape the gateway" }
+      - alert: GatewayCircuitOpen
+        expr: max by (target) (gateway_circuit_state) == 2
+        for: 5m
+        labels: { severity: ticket }
+        annotations: { summary: "Circuit for {{ $labels.target }} has been open for 5 minutes" }
+      - alert: GatewayUsageLogDropping
+        expr: increase(gateway_usage_log_dropped_total[10m]) > 0
+        for: 2m   # a single dropped row isn't worth a ticket
+        labels: { severity: ticket }
+        annotations: { summary: "Usage-log rows are being dropped (Postgres slow or down)" }
+      - alert: GatewayEventLoopLag
+        expr: histogram_quantile(0.99, sum by (le) (rate(gateway_event_loop_lag_seconds_bucket[5m]))) > 0.1
+        for: 5m
+        labels: { severity: ticket }
+        annotations: { summary: "Event loop blocked or saturated (p99 lag {{ $value | humanizeDuration }})" }

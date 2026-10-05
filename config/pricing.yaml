@@ -17,3 +17,9 @@ models:
   fake/down:                           { input: 0,     output: 0 }
   fake/blip:                           { input: 0,     output: 0 }
   fake/metered:                        { input: 1000,  output: 1000 }  # $0.001/token: budgets test
+  bench/fast:                          { input: 0,     output: 0 }
+  bench/realistic:                     { input: 1.00,  output: 5.00 }  # priced like Haiku: cost maths under load
+  bench/long:                          { input: 0,     output: 0 }
+  bench/slow:                          { input: 0,     output: 0 }
+  bench/primary:                       { input: 0,     output: 0 }
+  bench/backup:                        { input: 0,     output: 0 }

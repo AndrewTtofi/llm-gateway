@@ -293,3 +293,21 @@ async def test_one_unpriced_attempt_doesnt_make_the_request_free(
     }
     await m.settle()
     assert await spend.spent("k") == pytest.approx(5.0)  # the priced attempt is billed
+
+
+# --- Phase 6 additions -------------------------------------------------------------
+
+
+def test_server_timing_reports_admission(client: TestClient) -> None:
+    timing = chat(client).headers["server-timing"]
+    assert timing.startswith("admit;dur=") and float(timing.split("=")[1]) >= 0
+
+
+def test_usage_row_keeps_the_token_estimate(client: TestClient) -> None:
+    chat(client, max_tokens=500)
+    rec = records()[-1]
+    assert rec.estimated_tokens is not None and rec.estimated_tokens >= 500
+
+
+def test_event_loop_lag_metric_is_registered(client: TestClient) -> None:
+    assert "gateway_event_loop_lag_seconds" in client.get("/metrics").text
