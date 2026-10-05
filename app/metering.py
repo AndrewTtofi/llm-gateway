@@ -27,8 +27,15 @@ log = logging.getLogger(__name__)
 _unpriced_warned: set[str] = set()
 
 
-def _cost(target: str, prompt: int, completion: int, cached: int = 0) -> float | None:
-    cost = config.pricing.cost(target, prompt, completion, cached)
+def _cost(
+    target: str,
+    prompt: int,
+    completion: int,
+    cached: int = 0,
+    written: int = 0,
+    written_1h: int = 0,
+) -> float | None:
+    cost = config.pricing.cost(target, prompt, completion, cached, written, written_1h)
     if cost is None and target not in _unpriced_warned:
         _unpriced_warned.add(target)
         log.warning("no price for %s in pricing.yaml; counting it as $0", target)
@@ -152,13 +159,20 @@ class Meter:
             used = Used()
             for it in iterations:
                 cached = int(it.get("cache_read_input_tokens") or 0)
-                prompt = cached + sum(
-                    int(it.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens")
+                written = int(it.get("cache_creation_input_tokens") or 0)
+                written_1h = int(
+                    (it.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0
                 )
+                prompt = cached + written + int(it.get("input_tokens") or 0)
                 completion = int(it.get("output_tokens") or 0)
                 model = it.get("model")
                 usd = _cost(
-                    f"{provider}/{model}" if model else self.target, prompt, completion, cached
+                    f"{provider}/{model}" if model else self.target,
+                    prompt,
+                    completion,
+                    cached,
+                    written,
+                    written_1h,
                 )
                 used.prompt += prompt
                 used.completion += completion
@@ -172,8 +186,11 @@ class Meter:
             prompt = int(usage.get("prompt_tokens") or 0)
             completion = int(usage.get("completion_tokens") or 0)
             details = usage.get("prompt_tokens_details")
-            cached = int(details.get("cached_tokens") or 0) if isinstance(details, dict) else 0
-            usd = _cost(self.target, prompt, completion, cached)
+            details = details if isinstance(details, dict) else {}
+            cached = int(details.get("cached_tokens") or 0)
+            written = int(details.get("cache_creation_tokens") or 0)  # Anthropic (ADR 0013)
+            written_1h = int(details.get("cache_creation_1h_tokens") or 0)
+            usd = _cost(self.target, prompt, completion, cached, written, written_1h)
             return Used(prompt, completion, cached, usd or 0.0, unpriced=usd is None)
         # No usage reported (disconnect, provider without it): estimate.
         prompt = self.prompt_estimate

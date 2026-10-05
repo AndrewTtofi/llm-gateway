@@ -320,6 +320,8 @@ def usage_to_openai(usage: dict[str, Any]) -> dict[str, Any]:
         # cache_creation_tokens: an extension, billed at the cache-write price (ADR 0013)
         "prompt_tokens_details": {"cached_tokens": cached, "cache_creation_tokens": written},
     }
+    if written_1h := int((usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0):
+        out["prompt_tokens_details"]["cache_creation_1h_tokens"] = written_1h  # dearer writes
     if iterations := usage.get("iterations"):
         # With a refusal fallback, top-level usage covers only the attempt that produced
         # the answer; each attempt (billed at its own model's rates) is in `iterations`.

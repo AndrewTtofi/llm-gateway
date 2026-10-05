@@ -17,6 +17,7 @@ thinking. They travel as extension fields that only the Anthropic adapter reads:
     stream delta["thinking"]                   {index, start: {...}} | {index, thinking}
                                                | {index, signature}
     usage.prompt_tokens_details.cache_creation_tokens   prompt tokens written to cache
+    usage.prompt_tokens_details.cache_creation_1h_tokens  … of which to the 1-hour cache
 
 Everyone else must never see them: `strip_request` runs before any non-Anthropic
 provider, and `strip_response` / `strip_chunk` before any OpenAI-format client.

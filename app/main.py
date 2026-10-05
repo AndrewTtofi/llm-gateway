@@ -365,6 +365,11 @@ async def model_catalog(
                 "input": price.input,
                 "output": price.output,
                 "cached_input": price.cached_input,
+                "cache_write": price.cache_write,
+                "cache_write_1h": price.cache_write_1h,
+                # Long prompts reprice the whole request; off-peak hours are cheaper.
+                "tiers": [t.model_dump() for t in price.tiers],
+                "off_peak": price.off_peak.model_dump() if price.off_peak else None,
                 "blended": round(blended, 6),
                 "unit": f"{pricing.currency} per 1M tokens",
             }
