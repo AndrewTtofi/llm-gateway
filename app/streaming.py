@@ -13,6 +13,7 @@ import anyio
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
+from app.extensions import strip_chunk
 from app.providers.base import ProviderError
 
 log = logging.getLogger(__name__)
@@ -115,10 +116,11 @@ class StreamFormat(Protocol):
 
 
 class OpenAIStream:
-    """Chunks as-is, ending with `[DONE]`."""
+    """Chunks as-is (minus gateway extension fields, ADR 0013), ending with `[DONE]`."""
 
     def encode(self, chunk: dict[str, Any]) -> list[str]:
-        return [f"data: {json.dumps(chunk)}\n\n"]
+        out = strip_chunk(chunk)
+        return [f"data: {json.dumps(out)}\n\n"] if out is not None else []
 
     def end(self) -> list[str]:
         return ["data: [DONE]\n\n"]

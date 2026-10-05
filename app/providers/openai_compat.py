@@ -27,6 +27,7 @@ from typing import Any
 
 import httpx
 
+from app.extensions import strip_request
 from app.providers.base import (
     ProviderAdapter,
     ProviderError,
@@ -80,7 +81,7 @@ def shape_request(
     Order: rename → drop → allow → values. So `drop`, `allow` and `values` name fields
     as they're *sent* (after renaming)."""
     rules = rules_for(cfg, model)
-    body = dict(request)
+    body = dict(strip_request(request))  # Anthropic-only extension fields (ADR 0013)
     if not rules["tools"]:
         if body.get("tools") or body.get("functions"):
             raise UnsupportedRequest(f"{name}/{model} can't call tools through this API")

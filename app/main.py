@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import config, messages_api, providers, services
+from app import config, extensions, messages_api, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
@@ -451,7 +451,7 @@ def _catalog_sort_key(row: dict[str, Any], sort: str) -> tuple[Any, ...]:
 async def chat_completions(
     body: ChatCompletionRequest, request: Request, key: Authenticated
 ) -> JSONResponse | StreamingResponse | Response:
-    return await _chat(body, request, key)
+    return await _chat(body, request, key, anthropic_client=False)
 
 
 @app.post("/v1/messages", response_model=None)
@@ -468,7 +468,7 @@ async def messages(
         cpt = config.limits.estimation.chars_per_token
         prompt = estimate_prompt_tokens(body.model_dump()["messages"], cpt)
         fmt = messages_api.MessagesStream(input_tokens=prompt, chars_per_token=cpt)
-    resp = await _chat(body, request, key, fmt=fmt)
+    resp = await _chat(body, request, key, fmt=fmt, anthropic_client=True)
     # Streams are already written as Anthropic events; JSON answers and errors convert here.
     return messages_api.convert_response(resp) if isinstance(resp, JSONResponse) else resp
 
@@ -527,9 +527,15 @@ async def _messages_body(request: Request) -> ChatCompletionRequest | JSONRespon
 
 
 async def _chat(
-    body: ChatCompletionRequest, request: Request, key: ApiKey, fmt: StreamFormat | None = None
+    body: ChatCompletionRequest,
+    request: Request,
+    key: ApiKey,
+    fmt: StreamFormat | None = None,
+    anthropic_client: bool = False,
 ) -> JSONResponse | StreamingResponse | Response:
-    """The chat pipeline. `fmt` writes a stream in another wire format (None = OpenAI)."""
+    """The chat pipeline. `fmt` writes a stream in another wire format (None = OpenAI).
+    `anthropic_client`: the caller speaks the Messages API and gets the Anthropic-only
+    extension fields (thinking blocks); OpenAI clients never do (ADR 0013)."""
     lim = key_limits(key)
     if not lim.allows(body.model):
         metrics.rejected.labels("model_not_allowed").inc()
@@ -608,7 +614,7 @@ async def _chat(
         rl_headers["server-timing"] = f"admit;dur={(time.perf_counter() - started) * 1000:.2f}"
     if body.stream:
         return await _stream(body, request, meter, rl_headers, fmt)
-    return await _complete(body, request, meter, rl_headers)
+    return await _complete(body, request, meter, rl_headers, anthropic_client)
 
 
 async def _settle(meter: Meter) -> None:
@@ -639,7 +645,11 @@ def _unknown(body: ChatCompletionRequest) -> JSONResponse:
 
 
 async def _complete(
-    body: ChatCompletionRequest, request: Request, meter: Meter, rl_headers: dict[str, str]
+    body: ChatCompletionRequest,
+    request: Request,
+    meter: Meter,
+    rl_headers: dict[str, str],
+    anthropic_client: bool = False,
 ) -> JSONResponse | Response:
     routed = Routed()
     try:
@@ -668,6 +678,8 @@ async def _complete(
         meter.target = routed.target
         meter.routed(routed)
         meter.observe_completion(result)
+        if not anthropic_client:
+            result = extensions.strip_response(result)  # OpenAI clients: standard fields only
         return JSONResponse(result, headers={**routed.headers(), **rl_headers})
     except BaseException:
         meter.status, meter.error_code = 500, "gateway_error"  # bug or shutdown

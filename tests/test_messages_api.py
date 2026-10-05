@@ -115,7 +115,13 @@ def test_request_translates_to_the_internal_format() -> None:
         }
     )
     assert out["messages"] == [
-        {"role": "system", "content": "Be brief."},
+        # the cache breakpoint survives (ADR 0013)
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}
+            ],
+        },
         {"role": "user", "content": "weather?"},
         {
             "role": "assistant",
@@ -127,6 +133,7 @@ def test_request_translates_to_the_internal_format() -> None:
                     "function": {"name": "get", "arguments": '{"q": 1}'},
                 }
             ],
+            "thinking_blocks": [{"type": "thinking", "thinking": "…", "signature": "s"}],
         },
         # tool results first (they must follow the tool calls), then the rest of the turn
         {"role": "tool", "tool_call_id": "toolu_1", "content": "sunny"},
@@ -611,4 +618,8 @@ def test_refusals_and_empty_assistant_turns() -> None:
             ],
         }
     )
-    assert out["messages"][1] == {"role": "assistant", "content": ""}
+    assert out["messages"][1] == {
+        "role": "assistant",
+        "content": "",
+        "thinking_blocks": [{"type": "thinking", "thinking": "…", "signature": "s"}],
+    }
