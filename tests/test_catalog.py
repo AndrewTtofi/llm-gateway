@@ -406,3 +406,14 @@ def test_openrouter_id_guess() -> None:
         == "anthropic/claude-haiku-4.5"
     )
     assert sync_prices.openrouter_id("openai/gpt-6.1-sol") == "openai/gpt-6.1-sol"
+
+
+def test_catalog_marks_providers_without_a_key(
+    client: TestClient, priced: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = {r["id"]: r for r in client.get("/v1/catalog").json()["data"]}
+    assert rows["mock/tiny"]["configured"] is True
+    assert rows["chaos/ok"]["configured"] is True  # no key needed
+    monkeypatch.delenv("MOCK_API_KEY")
+    rows = {r["id"]: r for r in client.get("/v1/catalog").json()["data"]}
+    assert rows["mock/tiny"]["configured"] is False

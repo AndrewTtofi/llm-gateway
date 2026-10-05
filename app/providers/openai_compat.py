@@ -40,8 +40,13 @@ class OpenAICompatAdapter(ProviderAdapter):
         self._first_token = float(t.get("first_token", 30))
         headers = {}
         key_env = cfg.get("api_key_env")
-        if key_env and (key := os.environ.get(key_env)):
-            headers["Authorization"] = f"Bearer {key}"
+        self._key_env = key_env
+        self._configured = True
+        if key_env:
+            if key := os.environ.get(key_env):
+                headers["Authorization"] = f"Bearer {key}"
+            else:
+                self._configured = False  # fail fast below instead of a certain 401
         lim = cfg.get("limits", {})
         limits = httpx.Limits(
             max_connections=int(lim.get("max_connections", 100)),
@@ -51,7 +56,16 @@ class OpenAICompatAdapter(ProviderAdapter):
             base_url=str(cfg.get("base_url", "")), headers=headers, limits=limits
         )
 
+    def _require_key(self) -> None:
+        """A provider whose key isn't set can't serve: fall back without a network call
+        (a gateway fault, like the Anthropic adapter's)."""
+        if not self._configured:
+            raise ProviderError(
+                f"{self.name} is not configured ({self._key_env} is not set)", status=None
+            )
+
     async def chat(self, model: str, request: dict[str, Any]) -> dict[str, Any]:
+        self._require_key()
         body = {**request, "model": model, "stream": False}
         try:
             resp = await self._client.post("/chat/completions", json=body, timeout=self._timeout)
@@ -68,6 +82,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         return data
 
     async def stream(self, model: str, request: dict[str, Any]) -> AsyncGenerator[dict[str, Any]]:
+        self._require_key()
         body = {**request, "model": model, "stream": True}
         if self.cfg.get("stream_usage") is False:  # provider rejects stream_options
             body.pop("stream_options", None)

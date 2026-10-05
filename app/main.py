@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import secrets
 import signal
 import time
@@ -372,6 +373,8 @@ async def model_catalog(
                 "id": t,
                 "provider": t.partition("/")[0],
                 "callable_directly": reg.allow_direct_models and lim.allows(t),
+                # False: the provider's API key isn't set, so calls fall through to the next target
+                "configured": _configured(reg.providers.get(t.partition("/")[0])),
                 "in_aliases": [n for n, chain in aliases.items() if t in chain],
                 "pricing": row_price,
                 **facts.model_dump(),
@@ -390,6 +393,13 @@ async def model_catalog(
         "aliases": [{"id": n, "chain": chain} for n, chain in aliases.items()],
         "data": rows,
     }
+
+
+def _configured(provider: dict[str, Any] | None) -> bool:
+    if provider is None:
+        return False
+    key_env = provider.get("api_key_env")
+    return not key_env or bool(os.environ.get(key_env))
 
 
 async def _circuits(targets: list[str]) -> list[str]:
