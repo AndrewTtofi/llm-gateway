@@ -5,16 +5,38 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 1 — Pass-through proxy (built on `phase-1-proxy`, in review)
-- **Branch:** `phase-1-proxy` · remote `github.com/AndrewTtofi/llm-gateway` (private)
-- **Status:** Phase 1 DoD met; `make test` 47 passed, `make test-e2e` 2 passed, `make lint` clean. Python 3.14 / Redis 8 / Postgres 18
-- **Next up:** merge Phase 1 PR → tag `v0.1.0`; then Phase 2 (Anthropic adapter, hot-reload polish). Owner still to add provider API keys
-- **Blockers:** none (API keys only needed for live tests)
+- **Phase:** 2 — Multi-provider + model registry ✅ (v0.2.0) → next: 3 — Reliability
+- **Branch:** `phase-2-providers` · `v0.1.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
+- **Status:** Phase 2 DoD met live: same OpenAI client code streams from `fast`/`smart`/`local`, real tool call OK, Sonnet 5.5 capability translation verified. `make test` 115, `make test-live` 4 passed
+- **Next up:** Phase 3 on `phase-3-reliability`: retries + backoff, fallback through alias chains, circuit breaker in Redis, chaos provider, mid-stream failure ADR. Also from reviews: pool limits, overall stream deadline, retire old adapters
+- **Blockers:** none. Owner: rotate the Anthropic key (it was pasted in chat); `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** none
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 5
+**Did**
+- Phase 2 on `phase-2-providers`: Anthropic adapter via official SDK, translation module with unit tests,
+  capability flags per model in config, refusal fallback (beta), `/v1/models` + SIGHUP + safe reload
+- code-reviewer pass found 3 blockers + 9 should-fix, all fixed with tests (mutation-checked):
+  unmapped stream transport errors, assistant-first/system-only requests, malformed input → 500,
+  temperature+top_p, `""` args for no-arg tools, declined model's tool calls leaking past a
+  refusal fallback, usage iterations, schema transform, user hashing, truncated streams,
+  first_token vs stream_idle, image media types
+- 115 tests; live tests ready but skipped (no key)
+
+**Decided**
+- Official `anthropic` SDK over raw httpx (ADR 0003); mocks via `httpx2.MockTransport`
+- Repo goes public. History rewritten so commits use the GitHub noreply email; recreated as a fresh
+  public repo (PR numbers restarted — `#N` references in older notes point at the archive)
+- Never commit with the personal email; provider keys only in `.env`, never in chat or the repo
+
+**Learned**
+- Model differences (sampling params, forced tool choice, effort) belong in config, not `if model ==`
+- SDK raises a mid-stream `error` event as `APIStatusError` with status 200
+
 
 ### 2026-10-05 — Session 4
 **Did**

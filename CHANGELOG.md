@@ -9,12 +9,30 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
-### Security
-- CI token is read-only, actions pinned to commit SHAs, no persisted git credentials
-- `SECURITY.md` with private vulnerability reporting, `CODEOWNERS`
+## [0.2.0] - 2026-10-05 (Phase 2 — multi-provider + model registry)
 
 ### Added
 - `CONTRIBUTING.md`
+- Anthropic adapter (official `anthropic` SDK): OpenAI chat-completions ⇄ Messages API — system prompt, roles, `max_tokens` default, stop reasons, usage (incl. cached tokens), tool calls and parallel tool results, images, `response_format`, `reasoning_effort`, streaming events → OpenAI chunks (Phase 2, ADR 0003)
+- Per-model capability flags in `config/models.yaml` (`sampling`, `forced_tool_choice`, `effort`, `refusal_fallback`) so model differences stay out of code
+- Server-side refusal fallback (beta `fallbacks: "default"`) enabled for Opus 5.5 and Sonnet 5.5
+- `GET /v1/models` lists the models behind the aliases as well as the aliases
+- Config reload on `SIGHUP`
+- Live tests (`make test-live`) for every alias against real Claude, skipped without `ANTHROPIC_API_KEY`
+- `stream_idle` timeout per provider: `first_token` now bounds only the wait for the first event
+
+### Changed
+- `/admin/reload` returns 400 `invalid_config` and keeps the previous config when the YAML is broken
+- `make test-e2e` never runs paid (`live`) tests
+- Unconfigured provider keys produce a clear 502 ("ANTHROPIC_API_KEY is not set")
+
+### Fixed
+- Streams that end without a final event (`message_stop` / `[DONE]`) are reported as truncated instead of passing as complete
+- Transport errors while reading a stream map to 504/502 or an in-band error instead of a plain-text 500
+
+### Security
+- CI token is read-only, actions pinned to commit SHAs, no persisted git credentials
+- `SECURITY.md` with private vulnerability reporting, `CODEOWNERS`
 
 ## [0.1.0] - 2026-10-05 (Phase 0 foundations + Phase 1 pass-through proxy)
 

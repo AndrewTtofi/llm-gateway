@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import secrets
+import signal
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -18,19 +19,38 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app import config
 from app.providers import UnsupportedProvider, pool
-from app.providers.base import CLIENT_FAULT_STATUS, ProviderAdapter, ProviderError
+from app.providers.base import (
+    CLIENT_FAULT_STATUS,
+    QUOTA_CODES,
+    ProviderAdapter,
+    ProviderError,
+    UnsupportedRequest,
+)
 from app.schemas import ChatCompletionRequest
 
 log = logging.getLogger(__name__)
 
 
+def reload_from_signal() -> None:
+    try:
+        reg = config.reload_registry()
+        log.warning("config reloaded on SIGHUP: %d aliases", len(reg.aliases))
+    except Exception:
+        log.exception("config reload on SIGHUP failed; keeping the previous config")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    loop = asyncio.get_running_loop()
+    with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+        loop.add_signal_handler(signal.SIGHUP, reload_from_signal)  # `kill -HUP <pid>`
     yield
+    with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+        loop.remove_signal_handler(signal.SIGHUP)
     await pool.aclose()
 
 
-app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="LLM Gateway", version="0.2.0", lifespan=lifespan)
 
 
 def error_response(
@@ -73,7 +93,7 @@ def provider_error_response(exc: ProviderError) -> JSONResponse:
     status = exc.status
     if exc.timeout:
         return error_response(504, exc.message, "api_error", "upstream_timeout")
-    if status == 429 and exc.code == "insufficient_quota":
+    if exc.code in QUOTA_CODES:
         # Not retryable: waiting won't help, so no retry-after and not a 429.
         return error_response(503, exc.message, "api_error", "upstream_quota_exhausted")
     if status == 429:
@@ -92,17 +112,31 @@ async def healthz() -> dict[str, str]:
 
 @app.get("/v1/models")
 async def list_models() -> dict[str, object]:
+    """Aliases first (with their fallback chain), then every provider/model they use."""
     reg = config.registry
-    data = [{"id": name, "object": "model", "chain": a.chain} for name, a in reg.aliases.items()]
+    data: list[dict[str, object]] = [
+        {"id": name, "object": "model", "created": 0, "owned_by": "gateway", "chain": a.chain}
+        for name, a in reg.aliases.items()
+    ]
+    if reg.allow_direct_models:
+        direct = dict.fromkeys(m for a in reg.aliases.values() for m in a.chain)
+        data += [
+            {"id": m, "object": "model", "created": 0, "owned_by": m.split("/", 1)[0]}
+            for m in direct
+        ]
     return {"object": "list", "data": data}
 
 
-@app.post("/admin/reload")
-async def reload(authorization: str = Header(default="")) -> dict[str, object]:
+@app.post("/admin/reload", response_model=None)
+async def reload(authorization: str = Header(default="")) -> dict[str, object] | JSONResponse:
     key = config.settings.gateway_admin_key
     if not key or not secrets.compare_digest(authorization, f"Bearer {key}"):
         raise HTTPException(status_code=401, detail="unauthorized")
-    reg = config.reload_registry()
+    try:
+        reg = config.reload_registry()
+    except Exception as exc:  # bad YAML / validation error: the old config stays live
+        msg = f"reload failed, previous config kept: {type(exc).__name__}: {str(exc)[:300]}"
+        return error_response(400, msg, code="invalid_config")
     return {"reloaded": True, "aliases": list(reg.aliases)}
 
 
@@ -174,6 +208,8 @@ async def chat_completions(
             result = await cancel_on_disconnect(
                 request, adapter.chat(upstream_model, upstream_body)
             )
+        except UnsupportedRequest as exc:
+            return error_response(400, str(exc), code="unsupported_parameter")
         except ProviderError as exc:
             return provider_error_response(exc)
         except ClientDisconnected:
@@ -187,6 +223,8 @@ async def chat_completions(
     chunks = adapter.stream(upstream_model, upstream_body)
     try:
         first = await cancel_on_disconnect(request, anext(chunks, None))
+    except UnsupportedRequest as exc:
+        return error_response(400, str(exc), code="unsupported_parameter")
     except ProviderError as exc:
         return provider_error_response(exc)
     except ClientDisconnected:

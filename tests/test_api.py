@@ -13,11 +13,14 @@ def test_healthz() -> None:
     assert resp.json() == {"status": "ok"}
 
 
-def test_models_lists_aliases() -> None:
+def test_models_lists_aliases_then_direct_models() -> None:
     resp = client.get("/v1/models")
     assert resp.status_code == 200
-    ids = {m["id"] for m in resp.json()["data"]}
-    assert set(config.registry.aliases) == ids
+    data = resp.json()["data"]
+    aliases = [m["id"] for m in data if m["owned_by"] == "gateway"]
+    assert aliases == list(config.registry.aliases)
+    direct = {m["id"] for m in data if m["owned_by"] != "gateway"}
+    assert direct == {e for a in config.registry.aliases.values() for e in a.chain}
 
 
 def test_reload_rejected_without_configured_key(monkeypatch: pytest.MonkeyPatch) -> None:

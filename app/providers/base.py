@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from typing import Any
 
 # Upstream statuses worth retrying or falling back on (used from Phase 3).
@@ -39,6 +40,71 @@ class ProviderError(Exception):
         self.headers = headers or {}
         self.code = code  # provider's machine-readable code, e.g. "insufficient_quota"
         self.detail = detail
+
+
+class UnsupportedRequest(ValueError):
+    """The request uses something this provider can't express → 400 for the client."""
+
+
+# Provider codes meaning "out of credit": retrying won't help, so it's not a 429 for clients.
+QUOTA_CODES = frozenset({"insufficient_quota", "billing_error"})
+
+
+def upstream_status_error(
+    provider: str,
+    status: int,
+    detail: str,
+    code: str | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> ProviderError:
+    """Build a ProviderError whose `message` is safe to show clients (see ADR 0002)."""
+    if status == 402:
+        code = code or "billing_error"
+    if status in CLIENT_FAULT_STATUS:
+        message = f"{provider} rejected the request: {detail}"
+    elif status in (401, 403):
+        message = f"{provider} rejected the gateway's credentials (gateway configuration)"
+    elif status == 404:
+        message = (
+            f"{provider} does not know the configured model or endpoint (gateway configuration)"
+        )
+    elif code in QUOTA_CODES:
+        message = f"{provider} quota exhausted"
+    elif status == 429:
+        message = f"{provider} rate limited the gateway"
+    else:
+        message = f"{provider} returned HTTP {status}"
+    keep = {k: v for k, v in (headers or {}).items() if k.lower() == "retry-after"}
+    return ProviderError(
+        message,
+        status=status,
+        retryable=status in RETRYABLE_STATUS and code not in QUOTA_CODES,
+        headers=keep,
+        code=code,
+        detail=detail[:500],
+    )
+
+
+async def first_then_rest[T](
+    events: AsyncIterator[T], first_timeout: float, provider: str
+) -> AsyncGenerator[T]:
+    """Yield `events`, allowing `first_timeout` for the first one only.
+
+    The wait for the first event (prompt processing, a declined refusal attempt) has its
+    own budget; gaps after that are bounded by the HTTP read timeout (`stream_idle`).
+    """
+    try:
+        async with asyncio.timeout(first_timeout):
+            first = await anext(events)
+    except StopAsyncIteration:
+        return
+    except TimeoutError as exc:
+        raise ProviderError(
+            f"{provider} timed out waiting for the first token", retryable=True, timeout=True
+        ) from exc
+    yield first
+    async for event in events:
+        yield event
 
 
 class ProviderAdapter(ABC):

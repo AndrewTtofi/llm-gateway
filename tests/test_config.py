@@ -36,3 +36,20 @@ def test_every_chain_model_has_a_price_entry() -> None:
     for alias in reg.aliases.values():
         for entry in alias.chain:
             assert entry in prices, f"{entry} missing from pricing.yaml"
+
+
+def test_every_provider_type_has_an_adapter_or_is_planned() -> None:
+    from app.providers import ADAPTER_TYPES
+
+    reg = load_registry(Path("config"))
+    planned = {"fake"}  # chaos provider: Phase 3
+    for name, cfg in reg.providers.items():
+        assert cfg["type"] in ADAPTER_TYPES or cfg["type"] in planned, name
+
+
+def test_capability_entries_name_models_used_in_chains() -> None:
+    reg = load_registry(Path("config"))
+    used = {e for a in reg.aliases.values() for e in a.chain}
+    for name, cfg in reg.providers.items():
+        for model in cfg.get("models", {}):
+            assert f"{name}/{model}" in used, f"{name}/{model} has caps but no alias uses it"

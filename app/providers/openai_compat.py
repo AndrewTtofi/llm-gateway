@@ -14,10 +14,10 @@ from typing import Any
 import httpx
 
 from app.providers.base import (
-    CLIENT_FAULT_STATUS,
-    RETRYABLE_STATUS,
     ProviderAdapter,
     ProviderError,
+    first_then_rest,
+    upstream_status_error,
 )
 
 
@@ -29,9 +29,10 @@ class OpenAICompatAdapter(ProviderAdapter):
         # Non-streaming: the provider sends nothing until the whole answer is generated,
         # so the read timeout has to cover the full generation → `total`.
         self._timeout = httpx.Timeout(float(t.get("total", 300)), connect=connect)
-        # Streaming: read timeout is the max silence between chunks. The longest silence
-        # is before the first token (prompt processing) → `first_token`.
-        self._stream_timeout = httpx.Timeout(float(t.get("first_token", 30)), connect=connect)
+        # Streaming: the read timeout bounds silence between chunks (`stream_idle`); the
+        # wait for the first chunk (prompt processing) has its own `first_token` budget.
+        self._stream_timeout = httpx.Timeout(float(t.get("stream_idle", 120)), connect=connect)
+        self._first_token = float(t.get("first_token", 30))
         headers = {}
         key_env = cfg.get("api_key_env")
         if key_env and (key := os.environ.get(key_env)):
@@ -63,7 +64,8 @@ class OpenAICompatAdapter(ProviderAdapter):
                 if resp.status_code >= 400:
                     await resp.aread()
                     raise _status_error(self.name, resp.status_code, resp.text, resp.headers)
-                async for chunk in _parse_sse(self.name, resp):
+                chunks = _parse_sse(self.name, resp)
+                async for chunk in first_then_rest(chunks, self._first_token, self.name):
                     yield chunk
         except httpx.HTTPError as exc:
             raise _network_error(self.name, exc) from exc
@@ -95,6 +97,8 @@ async def _parse_sse(provider: str, resp: httpx.Response) -> AsyncGenerator[dict
                 f"{provider} failed mid-stream", retryable=True, detail=json.dumps(chunk["error"])
             )
         yield chunk
+    # No [DONE]: the connection closed mid-answer. Don't let it pass as complete.
+    raise ProviderError(f"{provider} stream ended early", retryable=True)
 
 
 def _status_error(provider: str, status: int, text: str, headers: httpx.Headers) -> ProviderError:
@@ -104,33 +108,9 @@ def _status_error(provider: str, status: int, text: str, headers: httpx.Headers)
         err = {}
     if not isinstance(err, dict):
         err = {"message": str(err)}
-    detail = str(err.get("message") or text)[:500]
+    detail = str(err.get("message") or text)
     code = str(err["code"]) if err.get("code") else None
-
-    if status in CLIENT_FAULT_STATUS:
-        message = f"{provider} rejected the request: {detail}"
-    elif status in (401, 403):
-        message = f"{provider} rejected the gateway's credentials (gateway configuration)"
-    elif status == 404:
-        message = (
-            f"{provider} does not know the configured model or endpoint (gateway configuration)"
-        )
-    elif status == 429 and code == "insufficient_quota":
-        message = f"{provider} quota exhausted"
-    elif status == 429:
-        message = f"{provider} rate limited the gateway"
-    else:
-        message = f"{provider} returned HTTP {status}"
-
-    keep = {k: v for k, v in headers.items() if k.lower() == "retry-after"}
-    return ProviderError(
-        message,
-        status=status,
-        retryable=status in RETRYABLE_STATUS and code != "insufficient_quota",
-        headers=keep,
-        code=code,
-        detail=detail,
-    )
+    return upstream_status_error(provider, status, detail, code, headers)
 
 
 def _invalid_response(provider: str, text: str) -> ProviderError:
