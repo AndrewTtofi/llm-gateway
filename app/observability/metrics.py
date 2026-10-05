@@ -102,3 +102,19 @@ alerts = Counter(
     ["result"],
     registry=registry,
 )
+variant_requests = Counter(
+    "gateway_variant_requests_total",
+    "Requests per A/B arm and outcome (ADR 0020); variant names come from config.",
+    ["alias", "variant", "status"],
+    registry=registry,
+)
+variant_duration = Histogram(
+    "gateway_variant_duration_seconds",
+    "End-to-end request time per A/B arm.",
+    ["alias", "variant"],
+    buckets=LATENCY_BUCKETS,
+    registry=registry,
+)
+variant_cost = Counter(
+    "gateway_variant_cost_usd_total", "Spend per A/B arm.", ["alias", "variant"], registry=registry
+)

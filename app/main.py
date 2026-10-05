@@ -35,7 +35,7 @@ from app.observability import live, metrics
 from app.observability import logging as obs_log
 from app.providers.base import ProviderAdapter
 from app.ratelimit import estimate_prompt_tokens
-from app.routing import policy, router, selfheal
+from app.routing import ab, policy, router, selfheal
 from app.routing.router import AllTargetsFailed, Routed, UnknownModel
 from app.schemas import ChatCompletionRequest, StreamOptions
 
@@ -66,7 +66,7 @@ async def poll_breakers(interval: float = 15.0, alerts: selfheal.Alerts | None =
     known: set[str] = set()
     while True:
         try:
-            targets = {t for a in config.registry.aliases.values() for t in a.chain}
+            targets = {t for a in config.registry.aliases.values() for t in a.targets}
             for gone in known - targets:
                 with contextlib.suppress(KeyError):
                     metrics.breaker.remove(gone)
@@ -367,6 +367,19 @@ async def readyz() -> dict[str, Any] | JSONResponse:
     return {"status": "degraded" if degraded else "ready", "dependencies": deps}
 
 
+def _alias_listing(a: config.Alias) -> dict[str, Any]:
+    if a.policy is not None:
+        return {"policy": a.policy.model_dump()}
+    if a.variants:
+        return {
+            "variants": [
+                {"name": v.name, "weight": v.weight, "chain": v.chain} for v in a.variants
+            ],
+            "sticky": a.sticky,
+        }
+    return {"chain": a.chain}
+
+
 @app.get("/v1/models")
 async def list_models(key: Authenticated) -> dict[str, object]:
     """Models this key may call: aliases (with their chain), then direct provider/models."""
@@ -377,7 +390,7 @@ async def list_models(key: Authenticated) -> dict[str, object]:
             "object": "model",
             "created": 0,
             "owned_by": "gateway",
-            **({"chain": a.chain} if a.policy is None else {"policy": a.policy.model_dump()}),
+            **_alias_listing(a),
         }
         for name, a in reg.aliases.items()
         if lim.allows(name)
@@ -422,7 +435,7 @@ async def model_catalog(
     reg, pricing, catalog = config.registry, config.pricing, config.catalog
     prices, cat = pricing.models, catalog.models
     aliases = {
-        n: a.chain if a.policy is None else policy.candidates(n, a.policy)
+        n: policy.candidates(n, a.policy) if a.policy is not None else a.targets
         for n, a in reg.aliases.items()
         if lim.allows(n)
     }
@@ -692,8 +705,21 @@ async def _chat(
         streamed=body.stream,
     )
     alias_cfg = config.registry.aliases.get(body.model)
+    variant = None
+    if alias_cfg is not None and alias_cfg.variants:
+        # A/B test (ADR 0020): pick the arm before the cache, whose key depends on it.
+        pinned = request.headers.get("x-gateway-variant")
+        user = (body.model_extra or {}).get("user")
+        variant = ab.assign(body.model, alias_cfg, key, str(user) if user else None, pinned)
+        if variant.system_prefix:
+            body = ab.with_prefix(body, variant.system_prefix)
+        meter.variant = variant.name
+        rl_headers["x-gateway-variant"] = variant.name
     if alias_cfg is not None and alias_cfg.cache is not None:
-        hit = await _cache_lookup(body, request, key, meter, alias_cfg.cache, rl_headers)
+        cache_alias = f"{body.model}#{variant.name}" if variant else body.model
+        hit = await _cache_lookup(
+            body, request, key, meter, alias_cfg.cache, rl_headers, cache_alias
+        )
         if hit is not None:
             return _serve_cached(hit, body, meter, rl_headers, fmt, anthropic_client)
     try:
@@ -732,6 +758,8 @@ async def _chat(
             )
         chain = plan.chain
         rl_headers["x-gateway-route"] = plan.header()
+    elif variant is not None:
+        chain = list(variant.chain)
     else:
         chain = []  # the router resolves the alias itself
     await meter.reserve(chain[0] if chain else config.registry.resolve(body.model)[0])
@@ -759,13 +787,14 @@ async def _cache_lookup(
     meter: Meter,
     cfg: config.CacheConfig,
     rl_headers: dict[str, str],
+    cache_alias: str,
 ) -> dict[str, Any] | None:
     """Look the request up in the response cache (ADR 0018). On a miss, the meter is told
     where to store the answer. `x-gateway-cache: bypass | refresh` skips the read."""
     mode = request.headers.get("x-gateway-cache", "").strip().lower()
     mode = mode if mode in ("bypass", "refresh") else ""
     hit, ctx, label = await cache.lookup(
-        services.response_cache, cfg, key, body.model, body.model_dump(exclude_unset=True), mode
+        services.response_cache, cfg, key, cache_alias, body.model_dump(exclude_unset=True), mode
     )
     rl_headers["x-gateway-cache"] = label
     if hit is None:
@@ -1063,7 +1092,7 @@ async def reload(_: Admin) -> dict[str, object] | JSONResponse:
 @app.get("/admin/providers", response_model=None)
 async def provider_status(_: Admin) -> dict[str, object]:
     """Circuit-breaker state of every target used by an alias."""
-    targets = dict.fromkeys(t for a in config.registry.aliases.values() for t in a.chain)
+    targets = dict.fromkeys(t for a in config.registry.aliases.values() for t in a.targets)
     return {"targets": {t: str(await router.store.state(t)) for t in targets}}
 
 

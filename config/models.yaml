@@ -145,6 +145,14 @@ aliases:
   # (e.g. optimize: quality) or the x-gateway-route header.
   auto:
     policy: { optimize: cost, min_quality: 3, max_chain: 4 }
+  # A/B test (ADR 0020), e.g. a cheaper model or a prompt change for 10% of callers:
+  # support:
+  #   sticky: user                     # key | user | request
+  #   variants:
+  #     - { name: control, weight: 90, chain: [anthropic/claude-sonnet-5-5, openai/gpt-6.1-sol] }
+  #     - { name: haiku,   weight: 10, chain: [anthropic/claude-haiku-4-5-20251001],
+  #         system_prefix: "Answer in at most three sentences." }
+  #   cache: { mode: exact, ttl_seconds: 3600 }   # response cache (ADR 0018), optional
   # The strongest model from each company, best first. Providers without a key are skipped.
   frontier:
     chain:

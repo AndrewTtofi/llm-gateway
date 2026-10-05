@@ -37,7 +37,7 @@ PROBE_MESSAGES = [{"role": "user", "content": "ping"}]
 
 def chain_targets() -> list[str]:
     reg = config.registry
-    return sorted({t for a in reg.aliases.values() for t in a.chain})
+    return sorted({t for a in reg.aliases.values() for t in a.targets})
 
 
 async def probe_once(target: str) -> str:

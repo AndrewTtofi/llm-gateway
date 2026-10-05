@@ -688,6 +688,141 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "A/B: requests / s by variant",
+      "description": "Variant names come from config (bounded labels).",
+      "gridPos": {
+        "w": 8,
+        "h": 8,
+        "x": 0,
+        "y": 52
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (alias, variant) (rate(gateway_variant_requests_total[$__rate_interval]))",
+          "legendFormat": "{{alias}} \u00b7 {{variant}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "A/B: error rate by variant",
+      "description": "",
+      "gridPos": {
+        "w": 8,
+        "h": 8,
+        "x": 8,
+        "y": 52
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (alias, variant) (rate(gateway_variant_requests_total{status=~\"5.*|200:.*\"}[$__rate_interval])) / sum by (alias, variant) (rate(gateway_variant_requests_total[$__rate_interval]))",
+          "legendFormat": "{{alias}} \u00b7 {{variant}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "A/B: p95 latency by variant",
+      "description": "",
+      "gridPos": {
+        "w": 8,
+        "h": 8,
+        "x": 16,
+        "y": 52
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, alias, variant) (rate(gateway_variant_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{alias}} \u00b7 {{variant}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 23,
+      "type": "table",
+      "title": "A/B: cost per request by variant \u2014 this month",
+      "description": "From the usage log: exact cost per arm.",
+      "gridPos": {
+        "w": 24,
+        "h": 6,
+        "x": 0,
+        "y": 60
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "gw-postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT alias, variant, count(*) AS requests, round(avg(coalesce(cost_usd, 0))::numeric, 6) AS usd_per_request, round(avg(latency_ms)) AS avg_ms, round(100.0 * avg(CASE WHEN status >= 500 OR error_code IS NOT NULL THEN 1 ELSE 0 END), 2) AS error_pct FROM usage_log WHERE variant IS NOT NULL AND created_at >= date_trunc('month', now()) GROUP BY 1, 2 ORDER BY 1, 2",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "gw-postgres"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     }
   ]
 }

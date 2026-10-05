@@ -40,6 +40,7 @@ class UsageRecord:
     ttft_ms: int | None
     estimated_tokens: int | None = None  # what the limiter reserved before the call
     team: str | None = None
+    variant: str | None = None  # A/B arm (ADR 0020)
 
     def row(self) -> dict[str, Any]:
         out = asdict(self)
@@ -51,6 +52,7 @@ class UsageRecord:
             ("target", 200),
             ("error_code", 100),
             ("team", 100),
+            ("variant", 32),
         ):
             if isinstance(out[col], str):
                 out[col] = out[col][:limit]

@@ -59,16 +59,38 @@ class CacheConfig(BaseModel):
     max_entry_bytes: int = Field(default=256 * 1024, ge=1024)
 
 
+class Variant(BaseModel):
+    """One arm of an A/B test (ADR 0020)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")  # a metric label: kept bounded
+    weight: float = Field(gt=0)
+    chain: list[str] = Field(min_length=1)
+    # Prepended to the system prompt for this arm (prompt A/B tests).
+    system_prefix: str | None = Field(default=None, max_length=4000)
+
+
 class Alias(BaseModel):
     chain: list[str] = []  # ["provider/model", ...] in fallback order
     policy: Policy | None = None  # instead of a chain: chosen per request
+    variants: list[Variant] = []  # instead of a chain: an A/B test (ADR 0020)
+    sticky: Literal["key", "user", "request"] = "key"  # what keeps a caller on one variant
     cache: CacheConfig | None = None  # response cache, opt-in (ADR 0018)
 
     @model_validator(mode="after")
     def _one_of(self) -> Alias:
-        if bool(self.chain) == (self.policy is not None):
-            raise ValueError("an alias needs exactly one of `chain` or `policy`")
+        if sum((bool(self.chain), self.policy is not None, bool(self.variants))) != 1:
+            raise ValueError("an alias needs exactly one of `chain`, `policy` or `variants`")
+        names = [v.name for v in self.variants]
+        if len(names) != len(set(names)):
+            raise ValueError("variant names must be unique")
         return self
+
+    @property
+    def targets(self) -> list[str]:
+        """Every target this alias can route to (for listings, pricing checks, probes)."""
+        return list(dict.fromkeys([*self.chain, *(t for v in self.variants for t in v.chain)]))
 
 
 class RetryConfig(BaseModel):
@@ -112,7 +134,7 @@ class Registry(BaseModel):
 
     def known_targets(self) -> set[str]:
         """provider/model names the gateway knows: alias chains + models listed per provider."""
-        known = {t for a in self.aliases.values() for t in a.chain}
+        known = {t for a in self.aliases.values() for t in a.targets}
         for name, cfg in self.providers.items():
             known |= {f"{name}/{m}" for m in cfg.get("models", {})}
         return known
@@ -329,6 +351,13 @@ def _drop_fake(raw: dict[str, Any]) -> None:
                 ]
                 if not policy["candidates"]:
                     del raw["aliases"][alias]
+            continue
+        if spec.get("variants"):  # A/B aliases: drop test providers from each arm
+            for v in spec["variants"]:
+                v["chain"] = [t for t in v.get("chain") or [] if t.split("/", 1)[0] not in fake]
+            spec["variants"] = [v for v in spec["variants"] if v["chain"]]
+            if not spec["variants"]:
+                del raw["aliases"][alias]
             continue
         chain = [t for t in spec.get("chain") or [] if t.split("/", 1)[0] not in fake]
         if chain:

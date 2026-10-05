@@ -104,6 +104,7 @@ class Meter:
         self.cache_hit: str | None = None  # "cache/exact" … when the answer came from cache
         self.collector: Any = None  # app.cache.Collector, assembling a streamed answer
         self.cache_result: dict[str, Any] | None = None  # a non-streamed answer to store
+        self.variant: str | None = None  # A/B arm (ADR 0020)
 
     async def reserve(self, likely_target: str) -> None:
         """Hold the estimated cost against the budget until the real cost is known."""
@@ -296,6 +297,14 @@ class Meter:
                     metrics.fallbacks.labels(self.alias_label, target).inc()
         except Exception:
             log.exception("recording metrics failed")
+        if self.variant:
+            try:
+                metrics.variant_requests.labels(self.alias_label, self.variant, status_label).inc()
+                metrics.variant_duration.labels(self.alias_label, self.variant).observe(latency)
+                if used.usd:
+                    metrics.variant_cost.labels(self.alias_label, self.variant).inc(used.usd)
+            except Exception:
+                log.exception("recording variant metrics failed")
         try:  # separately, so a bug here can't cost the metrics above
             for t, outcome in self.attempts:
                 if not outcome.startswith(("skipped:", "unsupported")):
@@ -311,6 +320,7 @@ class Meter:
             key_id=self.key.id,
             key_prefix=self.key.prefix,
             team=self.key.team,
+            variant=self.variant,
             alias=self.alias,
             target=self.target or self.cache_hit,
             status=self.status,

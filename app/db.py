@@ -59,6 +59,7 @@ class UsageRow(Base):
     key_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     key_prefix: Mapped[str] = mapped_column(String(16))
     team: Mapped[str | None] = mapped_column(String(100))  # the key's team at request time
+    variant: Mapped[str | None] = mapped_column(String(32))  # A/B arm (ADR 0020)
     alias: Mapped[str] = mapped_column(String(200))  # what the client asked for
     target: Mapped[str | None] = mapped_column(String(200))  # provider/model that served
     provider: Mapped[str | None] = mapped_column(String(100))

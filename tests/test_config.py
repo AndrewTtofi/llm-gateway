@@ -26,7 +26,7 @@ def test_unknown_alias_raises() -> None:
 def test_every_chain_model_has_a_known_provider() -> None:
     reg = load_registry(Path("config"))
     for alias in reg.aliases.values():
-        for entry in alias.chain:
+        for entry in alias.targets:
             assert entry.split("/", 1)[0] in reg.providers, entry
 
 
@@ -34,7 +34,7 @@ def test_every_chain_model_has_a_price_entry() -> None:
     reg = load_registry(Path("config"))
     prices = yaml.safe_load(Path("config/pricing.yaml").read_text())["models"]
     for alias in reg.aliases.values():
-        for entry in alias.chain:
+        for entry in alias.targets:
             assert entry in prices, f"{entry} missing from pricing.yaml"
 
 

@@ -196,6 +196,8 @@ def targets(models_yaml: dict[str, Any], pricing: dict[str, Any]) -> list[str]:
     found = set(pricing.get("models", {}))
     for alias in models_yaml.get("aliases", {}).values():
         found.update(alias.get("chain", []))
+        for variant in alias.get("variants") or []:
+            found.update(variant.get("chain", []))
     keep = []
     for t in sorted(found):
         cfg = providers.get(t.partition("/")[0], {})
