@@ -5,10 +5,10 @@ A self-hosted gateway that sits between your applications and LLM providers. App
 fails, enforces per-key rate limits and budgets, and records what every request cost.
 
 **"OpenAI-compatible" describes the API the gateway exposes, not the providers behind it.**
-Clients use the OpenAI chat-completions format. Internally every request is that one format,
-which is what lets a request that started on Claude fall back to another provider. More
-inbound formats can be added; the Anthropic Messages API (`/v1/messages`) is next on the roadmap.
-Behind the gateway, requests can go to:
+Clients use the OpenAI chat-completions format (`/v1/chat/completions`) or the **Anthropic
+Messages API** (`/v1/messages`, for the Anthropic SDKs and Claude Code). Internally every
+request is converted to one format, which is what lets a request that started on Claude fall
+back to another provider. Behind the gateway, requests can go to:
 
 | Provider | How |
 |----------|-----|
@@ -66,7 +66,8 @@ The gateway moves all of that into one place that the platform team owns:
 | **Overnight batch jobs** (summarising tickets, tagging documents, evaluations) compete with interactive traffic for the same provider rate limits. | Give the batch key a low tokens/min and its own budget so it can't starve the chatbot. Route it to a cheaper alias such as `fast`. |
 | **Moving to a new model**, or comparing a cheaper one. | Change the alias chain in `config/models.yaml` and run `make reload`. Every app moves at once, with no deploys. Per-target latency, error and cost panels show whether the new model is better. |
 | **Sensitive or offline workloads, or a dev laptop with no API budget.** | The `local` alias routes to Ollama on your own hardware, so prompts never leave the machine. Ollama also serves as the last fallback in the `fast` and `balanced` chains. |
-| **Internal tools built on LangChain, LlamaIndex or the OpenAI SDK.** | Point `base_url` at the gateway and use a gateway key. Provider API keys stay in one place and never reach app config or laptops. |
+| **Internal tools built on LangChain, LlamaIndex, the OpenAI SDK or the Anthropic SDK.** | Point `base_url` at the gateway and use a gateway key. Provider API keys stay in one place and never reach app config or laptops. |
+| **Developers using Claude Code** on company API keys. |  Point `ANTHROPIC_BASE_URL` at the gateway. Each developer or team gets a key with its own budget, and usage shows up on the same dashboard as everything else. |
 | **Security and compliance want an audit trail.** | Every request has a usage row (key, model, tokens, cost, latency, status) and a request id that correlates with logs. Prompt content is never stored. |
 
 ## Architecture
@@ -171,6 +172,47 @@ Clients send an alias as `model`. Each alias maps to a chain of models (from `co
 
 Clients can also call an exact `provider/model` if their tier allows it. `GET /v1/models`
 lists what the key may use.
+
+### Anthropic clients (SDK, Claude Code)
+
+`POST /v1/messages` accepts the Anthropic Messages API. Responses, streaming events and
+errors come back in Anthropic's format. Authenticate with `x-api-key` or
+`Authorization: Bearer`, using a gateway key.
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(base_url="http://localhost:8000", api_key="gw_...")
+msg = client.messages.create(
+    model="smart", max_tokens=512, messages=[{"role": "user", "content": "Hello"}]
+)
+```
+
+To route Claude Code through the gateway:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8000
+export ANTHROPIC_AUTH_TOKEN=gw_...                 # a gateway key (see the note on tokens/min below)
+export ANTHROPIC_MODEL=smart                        # gateway aliases, not Anthropic model IDs
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=fast
+claude
+```
+
+The request is translated into the internal format, so the alias's whole fallback chain
+applies, including non-Claude models. Some features don't survive the translation yet:
+
+- **Prompt caching:** `cache_control` is dropped.
+- **Extended thinking:** dropped.
+- **Rejected with a 400:** server tools (web search, code execution) and document blocks.
+
+Claude Code asks for a large `max_tokens` (often 32 000) on every request. The rate limiter
+reserves the prompt plus `max_tokens` up front and returns the unused part when the request
+finishes, so a Claude Code key needs a tier with a tokens/min well above that, or a per-key
+`tokens_per_minute` override.
+
+`/v1/messages/count_tokens` returns the gateway's estimate, not an exact count. Each call counts
+as one request against the key's limit.
+[ADR 0010](docs/decisions/0010-anthropic-messages-inbound.md) has the details.
 
 ### What gets translated for Claude
 
@@ -313,13 +355,14 @@ token. The gateway can, however, give *your* users subscription-like plans: tier
 `config/limits.yaml` (rate limits, monthly budget, allowed models) work as plans, and each key
 is a subscriber.
 
-**Can Claude Code or the Anthropic SDK point at it?** Not yet, because they speak the Anthropic
-Messages API, not OpenAI's. An inbound `/v1/messages` endpoint is planned next. Claude Code
-would then set `ANTHROPIC_BASE_URL` to the gateway and use a gateway key, backed by an API key
-rather than a subscription.
+**Can Claude Code or the Anthropic SDK point at it?** Yes, through `/v1/messages` (see
+[Anthropic clients](#anthropic-clients-sdk-claude-code)). The gateway key replaces the
+Anthropic API key, and requests are billed to the provider API keys configured in the
+gateway, not to a subscription.
 
-**Is it only for chat?** For now, yes: `/v1/chat/completions` (including tools, images and
-streaming) and `/v1/models`. Embeddings and the newer Responses API are not implemented.
+**Is it only for chat?** For now, yes: `/v1/chat/completions` and `/v1/messages` (both with
+tools, images and streaming), plus `/v1/models`. Embeddings and OpenAI's newer Responses API
+are not implemented.
 
 ## Design decisions
 
@@ -336,6 +379,7 @@ Each non-obvious choice has an ADR in [docs/decisions/](docs/decisions/):
 | [0007](docs/decisions/0007-rate-limits-and-budgets.md) | Token-aware rate limits and budgets: estimate, then reconcile |
 | [0008](docs/decisions/0008-observability.md) | Usage log, metrics with bounded labels, logs without prompts |
 | [0009](docs/decisions/0009-benchmarking.md) | How the gateway is benchmarked |
+| [0010](docs/decisions/0010-anthropic-messages-inbound.md) | Inbound Anthropic Messages API, translated at the edge |
 
 ## Development
 

@@ -5,16 +5,28 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 7 — Ship it (`phase-7-ship`, PR → `v1.0.0` on merge)
-- **Branch:** `phase-7-ship` · `v0.6.0` on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
-- **Status:** README rewritten, `/readyz`, dashboard screenshot, write-up + LinkedIn draft (`docs/WRITEUP.md`, not posted), version 1.0.0
-- **Next up:** merge → tag `v1.0.0`; optional deploy (owner to pick: Cloud Run / ECS / VM); then Phase 8 extensions
+- **Phase:** 8 — extensions. First: inbound Anthropic Messages API (`phase-8-messages-api`)
+- **Branch:** `phase-8-messages-api` · `v1.0.0` tagged + released on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
+- **Status:** `/v1/messages` + `count_tokens` done, tested with the real Anthropic SDK; Claude Code verified against the fake provider. `make test` 310
+- **Next up:** review + merge; then lossless prompt caching / thinking for Anthropic targets via `/v1/messages` (ADR 0010 consequences), or another Phase 8 extension
 - **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
-- **Open questions:** deploy target
+- **Open questions:** deploy target (Cloud Run / ECS / VM), still optional
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 11
+**Did**
+- v1.0.0 merged, tagged, GitHub release. Commits from now on authored only by the owner (no co-author trailer)
+- `/v1/messages` (Anthropic Messages API inbound, translated at the edge; ADR 0010), `count_tokens`, `x-api-key` auth,
+  pluggable stream wire format. 21 tests incl. the real Anthropic SDK (streaming tool calls, typed errors, fallback Claude → OpenAI-compatible)
+- Ran real Claude Code against the dev stack (`fake/ok`): found it sends `role: "system"` inside `messages` → now supported
+
+**Learned**
+- Anthropic streams numbered content blocks with open/delta/stop events; OpenAI streams flat deltas → open a new block when the output kind changes
+- Usage comes last in OpenAI streams, so Anthropic's message_delta must wait for the end
+- Dropping `cache_control` in translation means no prompt caching: matters a lot for agent workloads
 
 ### 2026-10-05 — Session 10
 **Did**

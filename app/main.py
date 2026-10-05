@@ -2,6 +2,9 @@
 
 authenticate → model allowed? → budget left? → rate limits (estimate) →
 route (retries, fallback, breakers) → reconcile tokens + add cost
+
+Two client formats share it: OpenAI chat completions (`/v1/chat/completions`, also the
+internal format) and Anthropic Messages (`/v1/messages`, translated at the edge, ADR 0010).
 """
 
 from __future__ import annotations
@@ -22,9 +25,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import config, providers, services
+from app import config, messages_api, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
@@ -40,6 +43,7 @@ from app.schemas import ChatCompletionRequest, StreamOptions
 from app.streaming import (  # noqa: F401
     ClientDisconnected,
     SSEResponse,
+    StreamFormat,
     cancel_on_disconnect,
     relay_sse,
 )
@@ -113,7 +117,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await services.stop()
 
 
-app = FastAPI(title="LLM Gateway", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="LLM Gateway", version="1.1.0", lifespan=lifespan)
 
 
 class RequestContext:
@@ -172,9 +176,18 @@ async def metrics_endpoint() -> Response:
     return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
 
+def _anthropic_client(request: Request) -> bool:
+    path = request.url.path
+    return path == "/v1/messages" or path.startswith("/v1/messages/")
+
+
 @app.exception_handler(HTTPException)
-async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
+async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
     detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+    if _anthropic_client(request):  # e.g. a bad key: the Anthropic SDK's error shape
+        return messages_api.error_response(
+            exc.status_code, str(detail.get("message")), headers=exc.headers
+        )
     return error_response(
         exc.status_code,
         str(detail.get("message")),
@@ -185,10 +198,13 @@ async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     first = exc.errors()[0] if exc.errors() else {}
     param = ".".join(str(p) for p in first.get("loc", ()) if p != "body") or None
-    return error_response(400, f"Invalid request: {first.get('msg', 'bad body')}", param=param)
+    message = f"Invalid request: {first.get('msg', 'bad body')}"
+    if _anthropic_client(request):
+        return messages_api.error_response(400, f"{param}: {message}" if param else message)
+    return error_response(400, message, param=param)
 
 
 # --- auth --------------------------------------------------------------------
@@ -207,9 +223,12 @@ def require_admin(authorization: Annotated[str, Header()] = "") -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
-async def require_key(authorization: Annotated[str, Header()] = "") -> ApiKey:
+async def require_key(
+    authorization: Annotated[str, Header()] = "", x_api_key: Annotated[str, Header()] = ""
+) -> ApiKey:
+    # OpenAI clients send `Authorization: Bearer`; Anthropic SDKs send `x-api-key`.
     try:
-        key = await services.keys.authenticate(_bearer(authorization))
+        key = await services.keys.authenticate(_bearer(authorization) or x_api_key.strip())
     except Exception as exc:  # store down and key not cached recently: fail closed
         # Type only: a DB error's message can include bound parameters (the key hash).
         log.error("API key lookup failed: %s", type(exc).__name__)
@@ -298,6 +317,85 @@ async def list_models(key: Authenticated) -> dict[str, object]:
 async def chat_completions(
     body: ChatCompletionRequest, request: Request, key: Authenticated
 ) -> JSONResponse | StreamingResponse | Response:
+    return await _chat(body, request, key)
+
+
+@app.post("/v1/messages", response_model=None)
+async def messages(
+    request: Request, key: Authenticated
+) -> JSONResponse | StreamingResponse | Response:
+    """Anthropic Messages API: translated to the internal format, routed like any chat
+    request (so it can fall back to a non-Anthropic model), translated back (ADR 0010)."""
+    body = await _messages_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    fmt = None
+    if body.stream:
+        cpt = config.limits.estimation.chars_per_token
+        prompt = estimate_prompt_tokens(body.model_dump()["messages"], cpt)
+        fmt = messages_api.MessagesStream(input_tokens=prompt, chars_per_token=cpt)
+    resp = await _chat(body, request, key, fmt=fmt)
+    # Streams are already written as Anthropic events; JSON answers and errors convert here.
+    return messages_api.convert_response(resp) if isinstance(resp, JSONResponse) else resp
+
+
+@app.post("/v1/messages/count_tokens", response_model=None)
+async def count_tokens(request: Request, key: Authenticated) -> dict[str, int] | JSONResponse:
+    """An *estimate* (the same one rate limits use), not the provider's exact count: the
+    gateway doesn't know which provider will serve. Clients use it for context budgeting."""
+    raw = await _json_body(request)
+    if isinstance(raw, JSONResponse):
+        return raw
+    try:
+        oai = messages_api.to_openai({"max_tokens": 1, **raw})
+    except messages_api.InboundError as exc:
+        return messages_api.error_response(400, str(exc))
+    lim = key_limits(key)
+    if not lim.allows(str(oai["model"])):
+        metrics.rejected.labels("model_not_allowed").inc()
+        return messages_api.error_response(403, f"This key may not use model '{oai['model']}'")
+    # Free upstream, but not free here: it counts as a request (no tokens) like any other.
+    verdict = await services.limiter.take(key.id, lim.requests_per_minute, lim.tokens_per_minute, 0)
+    if not verdict.allowed:
+        metrics.rejected.labels("rate_limit").inc()
+        return messages_api.error_response(
+            429, "Rate limit reached for this key.", headers=verdict.headers()
+        )
+    cpt = config.limits.estimation.chars_per_token
+    tools = len(json.dumps(oai.get("tools") or [])) / cpt
+    return {"input_tokens": estimate_prompt_tokens(oai["messages"], cpt) + int(tools)}
+
+
+async def _json_body(request: Request) -> dict[str, Any] | JSONResponse:
+    try:
+        raw = await request.json()
+    except ValueError:
+        return messages_api.error_response(400, "request body is not valid JSON")
+    if not isinstance(raw, dict):
+        return messages_api.error_response(400, "request body must be a JSON object")
+    return raw
+
+
+async def _messages_body(request: Request) -> ChatCompletionRequest | JSONResponse:
+    raw = await _json_body(request)
+    if isinstance(raw, JSONResponse):
+        return raw
+    try:
+        return ChatCompletionRequest.model_validate(messages_api.to_openai(raw))
+    except messages_api.InboundError as exc:
+        # A fixed field name only: the message itself may quote client input.
+        log.warning("messages request rejected: unsupported %s", exc.field)
+        return messages_api.error_response(400, str(exc))
+    except ValidationError as exc:
+        err = exc.errors()[0]  # a ValidationError always has at least one
+        where = ".".join(str(p) for p in err["loc"])
+        return messages_api.error_response(400, f"Invalid request: {where}: {err['msg']}")
+
+
+async def _chat(
+    body: ChatCompletionRequest, request: Request, key: ApiKey, fmt: StreamFormat | None = None
+) -> JSONResponse | StreamingResponse | Response:
+    """The chat pipeline. `fmt` writes a stream in another wire format (None = OpenAI)."""
     lim = key_limits(key)
     if not lim.allows(body.model):
         metrics.rejected.labels("model_not_allowed").inc()
@@ -338,7 +436,10 @@ async def chat_completions(
             headers=rl_headers,
         )
 
-    client_wants_usage = bool(body.stream_options and body.stream_options.include_usage)
+    # Anthropic streams always end with usage (message_delta), so that format needs it.
+    client_wants_usage = fmt is not None or bool(
+        body.stream_options and body.stream_options.include_usage
+    )
     meter = Meter(
         key,
         lim,
@@ -371,7 +472,9 @@ async def chat_completions(
     started = obs_log.request_started.get()
     if started:
         rl_headers["server-timing"] = f"admit;dur={(time.perf_counter() - started) * 1000:.2f}"
-    return await (_stream if body.stream else _complete)(body, request, meter, rl_headers)
+    if body.stream:
+        return await _stream(body, request, meter, rl_headers, fmt)
+    return await _complete(body, request, meter, rl_headers)
 
 
 async def _settle(meter: Meter) -> None:
@@ -441,7 +544,11 @@ async def _complete(
 
 
 async def _stream(
-    body: ChatCompletionRequest, request: Request, meter: Meter, rl_headers: dict[str, str]
+    body: ChatCompletionRequest,
+    request: Request,
+    meter: Meter,
+    rl_headers: dict[str, str],
+    fmt: StreamFormat | None = None,
 ) -> JSONResponse | Response:
     # Retries and fallback cover everything up to the first chunk, which is pulled
     # *before* the 200 goes out (ADR 0002, 0005). That wait can be long (prompt
@@ -478,7 +585,7 @@ async def _stream(
     meter.target = routed.target
     meter.routed(routed)
     return SSEResponse(
-        relay_sse(first, chunks, meter),
+        relay_sse(first, chunks, meter, fmt),
         upstream=chunks,
         headers={
             **routed.headers(),
