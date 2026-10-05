@@ -131,13 +131,23 @@ async def watch_key_changes() -> None:
     if config.settings.gateway_stores == "memory":
         return
     while True:
-        client = Redis.from_url(config.settings.redis_url, socket_connect_timeout=2)
+        # Keepalive and periodic PINGs: a half-open connection (NAT timeout, failover
+        # without a reset) is noticed instead of waiting forever.
+        client = Redis.from_url(
+            config.settings.redis_url,
+            socket_connect_timeout=2,
+            socket_timeout=10,
+            socket_keepalive=True,
+            health_check_interval=30,
+        )
         try:
             async with client.pubsub() as ps:
                 await ps.subscribe(KEYS_CHANNEL)
-                keys.invalidate()  # changes missed while not subscribed
-                async for message in ps.listen():
-                    if message.get("type") == "message":
+                while True:
+                    message = await ps.get_message(timeout=1.0)
+                    # "subscribe" arrives on every (re)subscription, including redis-py's
+                    # own reconnects: changes may have been missed, so drop the cache too.
+                    if message and message.get("type") in ("message", "subscribe"):
                         keys.invalidate()
         except asyncio.CancelledError:
             raise

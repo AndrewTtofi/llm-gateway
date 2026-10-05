@@ -5,19 +5,39 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 8 — extensions. First: inbound Anthropic Messages API (`phase-8-messages-api`)
-- **Branch:** `phase-8-cost-catalog` (on top of `docs-wiki`) · `v1.0.0` tagged + released on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
+- **Phase:** 10 done, plus the security audit fixes (ADR 0023) on `phase-10-extensions`
+- **Branch:** `phase-10-extensions`. Stacked PRs: #11 (catalog) → #12 (frontier) → #13 (phase 9) → #14 (phase 10). #10 (wiki) merged to `main` (squash). Remote `github.com/AndrewTtofi/llm-gateway` (public)
 - **Status:**
-  - Phases 9 and 10 done and reviewed: `phase-9-gaps` → `phase-10-extensions`, stacked on #12 → #11 → #10.
-  - `make test` 539; lint clean.
-  - Merging waits on GitHub Actions (degraded).
-- **Next up:** full security audit, then merge #10 → #11 → #12 → phase 9 → phase 10 once CI runs, then tag releases.
-- **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
+  - Security audit done: no Critical findings. The High, Medium and almost all Low findings are fixed, with `tests/test_hardening.py`.
+  - `make test` 588; lint clean; production stack verified locally (docs off, HSTS, env isolation, cache Redis, revocation broadcast).
+  - Dev DB migrated to 0007.
+- **Next up:**
+  - Merge #11 → #14. After #10's squash merge, #11 conflicts with `main`; it needs `main` merged into `phase-8-cost-catalog` (keep the branch side) or a rebase. Each later PR needs the same after its base merges.
+  - Then tag releases.
+- **Blockers:** the owner must approve the branch-update strategy for the stacked PRs. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` is still empty.
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional
 
 ---
 
 ## Session log
+
+### 2026-10-06 — Session 14
+**Did**
+- Full security audit (background agent, PoCs). Nothing Critical. The confirmed findings:
+  - High: unbilled reasoning, hang-ups and timeouts; one tenant opening shared breakers through pool exhaustion or long requests.
+  - Medium: estimate gaps; usage rows dropped through int4 overflow; billing parameters passed through; CPU on unauthenticated large bodies; tail-only guardrail scan; shared-cache poisoning; spend lost during Redis outages.
+  - Ten Lows.
+- All fixed in one commit (ADR 0023), with migration 0007 and 40 regression tests (after a code review round). The audit PoCs re-run:
+  - the breaker stays closed;
+  - a bad key with a 32 MB body costs 0.01 s (was 0.25 s);
+  - a 950k-message body is rejected in 0.38 s (was 4.55 s).
+- Docs: Security (audit summary), Keys/limits, Routing, Cache, Quality and safety, Production, Configuration, Providers, Observability, API reference, FAQ, Glossary, README.
+- Merged #10. #12's CI had been cancelled by the Actions outage; re-run requested.
+
+**Learned**
+- A shared, fleet-wide circuit breaker must only count failures the provider caused. Pool waits and request-length timeouts are caused by clients.
+- A request with no usage must be billed on time as well as on bytes relayed: providers bill reasoning they never stream.
+- Squash-merging the bottom of a stacked PR chain makes the next PR conflict; plan for a merge-from-main or rebase per level.
 
 ### 2026-10-06 — Session 13 (continued)
 **Did**

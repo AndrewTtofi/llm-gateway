@@ -208,6 +208,7 @@ class RedisSpend:
         # Spend not yet in Redis, by Redis key (so it lands in the month it was spent).
         self._pending: dict[str, float] = {}
         self._known: dict[str, float] = {}  # last spend read per Redis key
+        self._dropping = False  # logged that the queue is full
 
     @staticmethod
     def _key(key_id: str) -> str:
@@ -226,7 +227,8 @@ class RedisSpend:
     def _defer(self, key: str, usd: float) -> None:
         if key in self._pending or len(self._pending) < self.MAX_TRACKED:
             self._pending[key] = self._pending.get(key, 0.0) + usd
-        else:
+        elif not self._dropping:
+            self._dropping = True
             log.error("budget tracker: too much spend queued while Redis is down; dropping")
 
     async def _flush(self) -> None:
@@ -239,9 +241,13 @@ class RedisSpend:
                     pipe.incrbyfloat(key, usd)
                     pipe.expire(key, self.TTL)
                 await pipe.execute()
-        except RedisError as exc:
+        except BaseException as exc:
+            # Not written (or not known to be): keep it. If EXEC did apply and only the
+            # reply was lost, it's counted twice; over-counting is the safe side.
             for key, usd in pending.items():
                 self._defer(key, usd)
+            if not isinstance(exc, RedisError):
+                raise  # e.g. cancelled: the queue survives for the next flush
             self._guard.broken(exc)
 
     async def spent(self, key_id: str) -> float:
@@ -275,6 +281,8 @@ class RedisSpend:
             self._guard.broken(exc)
             self._defer(key, usd)
             return
+        if key in self._known:
+            self._known[key] += usd  # so an outage starts from an up-to-date figure
         await self._flush()
 
 
@@ -368,15 +376,24 @@ class MemorySpend:
 # --- estimation ------------------------------------------------------------
 
 
-def _chars(value: Any, depth: int = 0) -> int:
+# Base64 file and audio payloads count a tenth of their characters: a PDF's base64 is
+# ~10x more characters than the tokens a provider bills for it. Still generous, and it
+# keeps the estimate (billed as-is when a request is cut off) near the real size.
+BASE64_SHARE = 0.1
+_PAYLOAD_KEYS = frozenset({"file_data", "data"})
+
+
+def _chars(value: Any, depth: int = 0, payload: bool = False) -> int:
     """Characters in every string inside `value` (keys included): tool schemas, file and
     audio payloads, tool-call arguments. Depth-bounded; parsed JSON is shallow anyway."""
     if isinstance(value, str):
+        if payload or value.startswith("data:"):
+            return math.ceil(len(value) * BASE64_SHARE)
         return len(value)
     if depth > 32:
         return 0
     if isinstance(value, dict):
-        return sum(len(str(k)) + _chars(v, depth + 1) for k, v in value.items())
+        return sum(len(str(k)) + _chars(v, depth + 1, k in _PAYLOAD_KEYS) for k, v in value.items())
     if isinstance(value, list):
         return sum(_chars(v, depth + 1) for v in value)
     return 0
@@ -384,9 +401,8 @@ def _chars(value: Any, depth: int = 0) -> int:
 
 def estimate_prompt_tokens(messages: list[Any], chars_per_token: float, tools: Any = None) -> int:
     """Rough prompt size from characters (ADR 0007). Counts everything the provider reads:
-    text, tool definitions, tool calls, thinking blocks and file/audio payloads (as
-    characters: a base64 PDF estimates high, which only reserves more). Images count a
-    flat 1000 each."""
+    text, tool definitions, tool calls, thinking blocks and file/audio payloads (base64
+    at a tenth of its characters). Images count a flat 1000 each."""
     chars, images = _chars(tools) if tools else 0, 0
     for m in messages:
         if not isinstance(m, dict):

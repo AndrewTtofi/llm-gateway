@@ -345,6 +345,6 @@ def _network_error(provider: str, exc: httpx.HTTPError, deadline: bool = False) 
         return ProviderError(f"{provider} is busy (no free connection)", retryable=True, local=True)
     timeout = isinstance(exc, httpx.TimeoutException) and not isinstance(exc, httpx.ConnectTimeout)
     kind = "timed out" if timeout else f"connection failed ({type(exc).__name__})"
-    return ProviderError(
-        f"{provider} {kind}", retryable=True, timeout=timeout, deadline=timeout and deadline
-    )
+    # Only a read timeout means "the answer took too long"; a stalled upload is the network.
+    deadline = deadline and isinstance(exc, httpx.ReadTimeout)
+    return ProviderError(f"{provider} {kind}", retryable=True, timeout=timeout, deadline=deadline)

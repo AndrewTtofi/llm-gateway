@@ -141,7 +141,8 @@ Tokens aren't known until the provider answers, so:
 1. **Before the call**, charge an estimate: `prompt characters ÷ chars_per_token +
    max_tokens`.
    - **Characters counted:** everything the provider reads, which is message text, tool
-     definitions, tool-call arguments, thinking blocks, and file or audio payloads.
+     definitions, tool-call arguments, thinking blocks, and file or audio payloads. Base64
+     payloads count a tenth of their length, closer to what providers bill.
    - **Images** count a flat 1 000.
    - **No `max_tokens`:** the first target's `default_max_tokens` is used (Anthropic
      requires one: 4096 unless configured), else `default_completion_tokens`.

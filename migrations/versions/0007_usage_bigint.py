@@ -3,6 +3,10 @@
 A 32-bit column overflowed on one oversized value, and the failed insert took other rows
 with it. The gateway's request id is now always its own; a caller's id is stored beside it.
 
+The type change rewrites the table under an exclusive lock, so it's one statement (one
+rewrite, not four). On a large usage_log, run it in a quiet period: usage writes wait
+for it, and rows queued past the writer's limits are dropped.
+
 Revision ID: 0007
 Revises: 0006
 """
@@ -16,13 +20,16 @@ down_revision = "0006"
 TOKEN_COLUMNS = ("prompt_tokens", "completion_tokens", "cached_tokens", "estimated_tokens")
 
 
+def _retype(sql_type: str) -> None:
+    changes = ", ".join(f"ALTER COLUMN {c} TYPE {sql_type}" for c in TOKEN_COLUMNS)
+    op.execute(f"ALTER TABLE usage_log {changes}")
+
+
 def upgrade() -> None:
-    for col in TOKEN_COLUMNS:
-        op.alter_column("usage_log", col, type_=sa.BigInteger(), existing_type=sa.Integer())
+    _retype("bigint")
     op.add_column("usage_log", sa.Column("client_request_id", sa.String(64)))
 
 
 def downgrade() -> None:
     op.drop_column("usage_log", "client_request_id")
-    for col in TOKEN_COLUMNS:
-        op.alter_column("usage_log", col, type_=sa.Integer(), existing_type=sa.BigInteger())
+    _retype("integer")

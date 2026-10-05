@@ -21,9 +21,9 @@ Its findings, all fixed with regression tests in `tests/test_hardening.py`:
   - New per-tier `concurrent_requests` limit (`429 concurrency_limit_exceeded`; dev 10, standard 50).
   - A streaming client that stops reading for `CLIENT_WRITE_TIMEOUT_SECONDS` (30) is disconnected.
 - **Token estimate:** it now counts tool definitions, file and audio parts, tool-call arguments and thinking blocks, and uses the target's real default `max_tokens`.
-- **Bounds:** `max_tokens` is at most 1 000 000. When both `max_tokens` and `max_completion_tokens` are sent, `max_tokens` is dropped. Requests may have at most 10 000 messages and 1 000 parts per message. `n` must be 1–128. Over-deep JSON gets a 400 on `/v1/messages`.
+- **Bounds:** `max_tokens` is at most 1 000 000. When both `max_tokens` and `max_completion_tokens` are sent, `max_tokens` is dropped. Requests may have at most 10 000 messages and 1 000 parts per message. `n` must be 1–128. Over-deep JSON gets a 400 on both APIs.
 - **Usage log:**
-  - 64-bit token columns, and `client_request_id` (migration 0007).
+  - 64-bit token columns, and `client_request_id` (migration 0007). **Upgrade note:** 0007 rewrites `usage_log` in one statement under an exclusive lock; on a large table, run it in a quiet period.
   - A row Postgres rejects no longer takes other rows with it.
 - **Provider parameters:**
   - `service_tier`, `store`, `background`, `metadata`, search options, `prediction`, `audio` and `modalities` aren't forwarded to OpenAI-compatible providers unless a provider lists them in `params.pass`.
@@ -31,7 +31,7 @@ Its findings, all fixed with regression tests in `tests/test_hardening.py`:
 - **Parsing:** chat requests check the key before parsing the body. A bad key with a 32 MB body costs 0.01 s instead of 0.25 s.
 - **Guardrails:**
   - Long messages are scanned at both ends, and tool definitions are scanned.
-  - Text over the scan budget is reported (`rule="unscanned"`); `unscanned: allow | suspicious | block` decides what that means.
+  - Text over the scan budget is reported (`rule="unscanned"`); `unscanned: allow | suspicious | block` decides what that means. The default, `suspicious`, counts it and flags it on `flag` tiers.
 - **Response cache:**
   - In team/global scope, `x-gateway-cache: refresh` acts as `bypass`.
   - Semantic matching in a shared scope needs `shared_semantic: true`.

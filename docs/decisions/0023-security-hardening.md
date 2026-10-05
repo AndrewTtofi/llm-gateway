@@ -57,7 +57,9 @@ Billing option 3 and breaker option 2, plus a fix for each other finding.
     its own target.
 - **Estimate:**
   - It counts tool definitions, every content-part payload (files, audio), tool-call
-    arguments and thinking blocks.
+    arguments and thinking blocks. Base64 payloads count a tenth of their characters: base64
+    is about ten times longer than the tokens a provider bills for the file. Without that,
+    a cut-off request carrying a PDF would be billed about 30 times too much.
   - When the client sends no `max_tokens`, it uses the first target's `default_max_tokens`
     (Anthropic: 4096 unless configured).
 - **Bounds:**
@@ -70,13 +72,20 @@ Billing option 3 and breaker option 2, plus a fix for each other finding.
   - Spend added while Redis is unreachable is queued per replica and written when Redis is
     back.
   - Budget checks meanwhile use the last known spend plus the queue. Before, they used 0.
+  - Delivery is at least once. A flush whose reply was lost, after Redis had applied it, is
+    queued again and counted twice. That's the safe side for a budget. A cancelled flush
+    keeps its queue.
 
 **Availability (`app/routing`, `app/providers`, `app/streaming.py`, `app/main.py`):**
 - **Errors that don't count against the breaker:**
   - `ProviderError.local`: the pool was full. The attempt is `skipped:busy`; if nothing
     else can serve, the client gets a retryable `503 gateway_busy`.
-  - `ProviderError.deadline`: the request ran past its total time. It isn't retried on
-    the same target, though fallback still applies.
+  - `ProviderError.deadline`: the request ran past its total time. Only a read timeout
+    counts as this; a stalled upload is a network failure. It isn't retried on the same
+    target, though fallback still applies.
+  - **Billing a hang-up:** an attempt is "in flight", and billed if the client hangs up,
+    only while its call is running. A hang-up during backoff, or after the attempt failed,
+    doesn't bill it again.
   - A connect timeout is a network failure: nothing was sent, so nothing is billed.
 - **Concurrency limit:**
   - Each tier sets `concurrent_requests`, the number of requests a key may have in flight
@@ -107,7 +116,9 @@ Billing option 3 and breaker option 2, plus a fix for each other finding.
 - **Unscanned text** is counted (`rule="unscanned"`). `unscanned` in guardrails.yaml
   decides what it means:
   - `allow`: nothing;
-  - `suspicious` (default): asks the classifier;
+  - `suspicious` (default): counted, and `flag` tiers get `x-gateway-guardrail: unscanned`.
+    It doesn't ask the classifier: that only sees the end of the conversation, which the
+    rules already scanned;
   - `block`: tiers set to `injection: block` refuse such requests.
 
 **Cache (`app/cache.py`):**
@@ -148,6 +159,9 @@ Billing option 3 and breaker option 2, plus a fix for each other finding.
 - **Bills go up for interrupted requests.** A stream cut off after 10 s is billed at
   least 1 000 output tokens if its limit allows. Operators who meter differently can
   lower `output_tokens_per_second` (0 restores billing what was relayed).
+- **First-token timeouts:** they are billed at the time rate too, though often nothing was
+  generated (only reasoning models plausibly did). This is conservative, and bounded by
+  `first_token` × 100 tokens.
 - **Breaker sensitivity:** a provider that hangs only on non-streamed requests is no
   longer taken out by the breaker on that signal. Connect failures, first-token timeouts
   and 5xx still open it.

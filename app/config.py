@@ -442,8 +442,8 @@ class Guardrails(BaseModel):
     max_chars_per_message: int = Field(default=20_000, ge=100)
     max_chars_total: int = Field(default=200_000, ge=1000)
     # Text over those limits isn't scanned (ADR 0023). allow: ignore it. suspicious: count
-    # it, and ask the classifier if there is one. block: tiers with `injection: block`
-    # also refuse requests with unscanned text.
+    # it, and tell `flag` tiers (x-gateway-guardrail: unscanned). block: tiers with
+    # `injection: block` also refuse requests with unscanned text.
     unscanned: Literal["allow", "suspicious", "block"] = "suspicious"
     rules: list[GuardRule] = []
     classifier: Classifier | None = None

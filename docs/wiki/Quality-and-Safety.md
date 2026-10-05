@@ -33,7 +33,7 @@ every prompt, so it checks them.
   | Value | Effect |
   |-------|--------|
   | `allow` | Nothing |
-  | `suspicious` | Default. The classifier is asked, if configured. Tiers set to `flag` get `x-gateway-guardrail: unscanned` |
+  | `suspicious` | Default. Counted; tiers set to `flag` get `x-gateway-guardrail: unscanned`. The classifier isn't asked: it only sees the end of the conversation |
   | `block` | Tiers set to `injection: block` also refuse requests with unscanned text. Strict: very long conversations are refused |
 - **Detection:** a request scoring `threshold` (default 1.0) or more is a detection. One
   strong signal is enough; weak ones add up.

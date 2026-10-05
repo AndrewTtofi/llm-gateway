@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from sqlalchemy import insert
-from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db import UsageRow
@@ -21,10 +21,17 @@ BIGINT_MAX = 2**63 - 1
 
 
 def _outage(exc: BaseException) -> bool:
-    """The database is unreachable (as opposed to rejecting this one row)."""
-    if isinstance(exc, OperationalError | InterfaceError | OSError | TimeoutError):
-        return True
-    return isinstance(exc, DBAPIError) and bool(exc.connection_invalidated)
+    """The database can't take writes, as opposed to rejecting this one row. Only data
+    errors (SQLSTATE class 22) and constraint violations (23) are the row's fault;
+    anything else (pool timeout, connection loss, server shutdown) is an outage."""
+    if isinstance(exc, DataError | IntegrityError):
+        return False
+    orig = getattr(exc, "orig", None)
+    for err in (orig, getattr(orig, "__cause__", None)):
+        state = str(getattr(err, "sqlstate", None) or getattr(err, "pgcode", None) or "")
+        if state[:2] in ("22", "23"):
+            return False
+    return True
 
 
 @dataclass

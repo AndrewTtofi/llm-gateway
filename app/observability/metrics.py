@@ -128,7 +128,7 @@ variant_cost = Counter(
 guardrail = Counter(
     "gateway_guardrail_detections_total",
     "Prompt-injection detections by rule (from config) and action (ADR 0021); rule "
-    "\"unscanned\" counts requests with text over the scan budget (ADR 0023).",
+    '"unscanned" counts requests with text over the scan budget (ADR 0023).',
     ["rule", "action"],
     registry=registry,
 )

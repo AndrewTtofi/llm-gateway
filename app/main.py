@@ -736,6 +736,33 @@ async def _chat(
             headers={"retry-after": "1"},
         )
 
+    try:  # nothing between taking the slot and the meter owning it may leak it
+        admitted = await _admit(body, key, lim, fmt)
+    except BaseException:
+        release()
+        raise
+    if isinstance(admitted, JSONResponse):
+        release()
+        return admitted
+    meter, messages, tools, rl_headers = admitted
+    meter.release = release
+    try:
+        return await _serve(
+            body, request, key, meter, messages, tools, rl_headers, fmt, anthropic_client
+        )
+    except BaseException:
+        # A bug or a cancellation before the request reached a provider: still settle,
+        # so the reservations are undone and the concurrency slot is freed.
+        if not meter.error_code:
+            meter.status, meter.error_code = 500, "gateway_error"
+        await _settle_shielded(meter)
+        raise
+
+
+async def _admit(
+    body: ChatCompletionRequest, key: ApiKey, lim: EffectiveLimits, fmt: StreamFormat | None
+) -> tuple[Meter, list[Any], Any, dict[str, str]] | JSONResponse:
+    """Token estimate, rate limits, and the request's meter (or the 429)."""
     # Rate limits: one request + an estimate of its tokens, from both buckets at once.
     est = config.limits.estimation
     messages = body.model_dump()["messages"]  # once: the estimate and the guardrails read it
@@ -746,16 +773,11 @@ async def _chat(
         body.max_completion_tokens or body.max_tokens or _default_completion(body.model)
     )
     estimate = prompt_estimate + int(completion_cap)
-    try:
-        verdict = await services.limiter.take(
-            key.id, lim.requests_per_minute, lim.tokens_per_minute, estimate
-        )
-    except BaseException:
-        release()
-        raise
+    verdict = await services.limiter.take(
+        key.id, lim.requests_per_minute, lim.tokens_per_minute, estimate
+    )
     rl_headers = verdict.headers()
     if not verdict.allowed:
-        release()
         metrics.rejected.labels("rate_limit").inc()
         return error_response(
             429,
@@ -786,18 +808,7 @@ async def _chat(
         if body.model in reg.aliases or body.model in reg.known_targets()
         else "_unknown",
     )
-    meter.release = release
-    try:
-        return await _serve(
-            body, request, key, meter, messages, tools, rl_headers, fmt, anthropic_client
-        )
-    except BaseException:
-        # A bug or a cancellation before the request reached a provider: still settle,
-        # so the reservations are undone and the concurrency slot is freed.
-        if not meter.error_code:
-            meter.status, meter.error_code = 500, "gateway_error"
-        await _settle_shielded(meter)
-        raise
+    return meter, messages, tools, rl_headers
 
 
 def _default_completion(model: str) -> int:

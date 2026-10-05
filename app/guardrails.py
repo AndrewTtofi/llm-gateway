@@ -187,9 +187,9 @@ async def check(messages: list[Any], action: str, tools: Any = None) -> Verdict 
         metrics.guardrail.labels("unscanned", action).inc()
     clf = rules.classifier
     if clf is not None:
-        borderline = 0 < verdict.score < rules.threshold or (
-            verdict.unscanned > 0 and rules.unscanned != "allow"
-        )
+        # Unscanned text alone doesn't ask the classifier: it only sees the end of the
+        # conversation, which the rules already scanned.
+        borderline = 0 < verdict.score < rules.threshold
         if clf.when == "always" or borderline:
             verdict.classifier = await classify(messages, rules)
     if verdict.detected(rules.threshold):

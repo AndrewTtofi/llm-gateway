@@ -281,7 +281,7 @@ def test_tools_and_files_count_against_the_token_limit(
         for _ in range(3)
     ]
     assert statuses[0] == 200 and 429 in statuses  # ~20k tokens per request vs 2000/min
-    assert records()[0].prompt_tokens > 15_000  # billed for the tools and the file
+    assert records()[0].prompt_tokens > 10_000  # billed for the tools (and the file, scaled)
 
 
 @respx.mock
@@ -662,3 +662,143 @@ async def test_key_changes_reach_other_replicas_through_redis(
         with __import__("contextlib").suppress(asyncio.CancelledError):
             await watcher
         await redis.aclose()
+
+
+# --- review follow-ups -------------------------------------------------------------------
+
+
+@respx.mock
+def test_every_path_frees_its_concurrency_slot(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    tiers = dict(config.limits.tiers)
+    tiers["dev"] = tiers["dev"].model_copy(update={"injection": "block"})
+    monkeypatch.setattr(config, "limits", config.limits.model_copy(update={"tiers": tiers}))
+    monkeypatch.setattr(config, "guardrails", RULES)
+    monkeypatch.setattr(services, "response_cache", cache.MemoryCacheStore())
+    monkeypatch.setattr(registry.aliases["local"], "cache", CacheConfig())
+    key = add_key("dev", **UNLIMITED)  # dev: a limit of 10, so slots are counted
+    key_id = next(k.id for k in services.keys.store._by_hash.values() if k.tier == "dev")  # type: ignore[attr-defined]
+    bodies = [
+        {"model": "local", "messages": MSGS},  # stored
+        {"model": "local", "messages": MSGS},  # cache hit
+        {"model": "local", "messages": MSGS, "stream": True},  # streamed cache hit
+        {"model": "chaos/ok", "messages": MSGS, "stream": True},  # a real stream
+        {"model": "nope", "messages": MSGS},  # 404
+        {"model": "local", "messages": [{"role": "user", "content": ATTACK}]},  # blocked
+    ]
+    with TestClient(main.app, headers={"Authorization": f"Bearer {key}"}) as c:
+        for body in bodies:
+            c.post("/v1/chat/completions", json=body)
+            assert services.concurrency.active(key_id) == 0, body
+
+    async def boom(*a: Any, **k: Any) -> None:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(guardrails, "check", boom)
+    with TestClient(
+        main.app, headers={"Authorization": f"Bearer {key}"}, raise_server_exceptions=False
+    ) as c:
+        assert c.post("/v1/chat/completions", json=bodies[0]).status_code == 500
+    assert services.concurrency.active(key_id) == 0
+
+
+@respx.mock
+async def test_a_hang_up_during_backoff_doesnt_bill_the_failed_attempt_again(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.routing.router import Routed, route_chat
+    from app.schemas import ChatCompletionRequest
+
+    monkeypatch.setattr(registry.retry, "backoff_base_ms", 5000)
+    monkeypatch.setattr(registry.retry, "backoff_max_ms", 5000)
+    respx.post(URL).mock(return_value=httpx.Response(503, json={"error": {"message": "x"}}))
+    routed = Routed()
+    body = ChatCompletionRequest.model_validate({"model": "local", "messages": MSGS})
+    task = asyncio.create_task(route_chat(body, routed))
+    for _ in range(100):
+        if routed.attempts:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()  # the client leaves while the router waits to retry
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert routed.current == ""  # nothing in flight: nothing more to bill
+
+
+def test_a_stalled_upload_is_not_a_deadline() -> None:
+    busy = openai_compat._network_error("p", httpx.PoolTimeout("x"))
+    stalled_upload = openai_compat._network_error("p", httpx.WriteTimeout("x"), deadline=True)
+    assert busy.local
+    assert stalled_upload.timeout and not stalled_upload.deadline
+
+
+def test_base64_payloads_count_a_tenth() -> None:
+    from app.ratelimit import estimate_prompt_tokens
+
+    pdf = {"type": "file", "file": {"file_data": "data:application/pdf;base64," + "A" * 400_000}}
+    audio = {"type": "input_audio", "input_audio": {"data": "B" * 400_000, "format": "wav"}}
+    for part in (pdf, audio):
+        tokens = estimate_prompt_tokens([{"role": "user", "content": [part]}], 4)
+        assert 9_000 < tokens < 11_000  # 400k chars / 10 / 4
+
+
+async def test_a_cancelled_flush_keeps_the_queue() -> None:
+    redis = FlakyRedis()
+    spend = RedisSpend(redis)  # type: ignore[arg-type]
+    spend._pending = {"spend:{k}:2026-10": 2.0}
+    redis.up = True
+
+    async def cancelled() -> None:
+        raise asyncio.CancelledError
+
+    original = redis.pipeline
+
+    def pipeline(transaction: bool = True) -> Any:
+        pipe = original(transaction)
+        pipe.execute = cancelled
+        return pipe
+
+    redis.pipeline = pipeline  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        await spend._flush()
+    assert spend._pending == {"spend:{k}:2026-10": 2.0}
+
+
+def test_only_row_errors_count_as_rejected_rows() -> None:
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+    from app.observability.usage import _outage
+
+    class PgError(Exception):
+        def __init__(self, sqlstate: str) -> None:
+            self.sqlstate = sqlstate
+
+    assert not _outage(DataError("INSERT", {}, ValueError("range")))
+    assert not _outage(IntegrityError("INSERT", {}, ValueError("null")))
+    assert _outage(PoolTimeout("pool exhausted"))
+    assert _outage(OperationalError("INSERT", {}, OSError("refused")))
+    from sqlalchemy.exc import DBAPIError
+
+    assert _outage(DBAPIError("INSERT", {}, PgError("57P01")))  # admin shutdown
+    assert not _outage(DBAPIError("INSERT", {}, PgError("22003")))  # out of range
+
+
+def test_unscanned_text_alone_doesnt_ask_the_classifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import Classifier
+
+    asked = []
+
+    async def classify(*a: Any) -> str:
+        asked.append(True)
+        return "safe"
+
+    monkeypatch.setattr(guardrails, "classify", classify)
+    monkeypatch.setattr(
+        config, "guardrails", RULES.model_copy(update={"classifier": Classifier(alias="local")})
+    )
+    long = [{"role": "user", "content": "x" * RULES.max_chars_per_message}] * 12
+    verdict = asyncio.run(guardrails.check(long, "log"))
+    assert verdict is not None and verdict.unscanned > 0 and not asked

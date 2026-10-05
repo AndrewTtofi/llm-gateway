@@ -144,6 +144,8 @@ def _transport_error(
     if isinstance(exc, httpx2.PoolTimeout):
         return ProviderError(f"{provider} is busy (no free connection)", retryable=True, local=True)
     if isinstance(exc, httpx2.TimeoutException) and not isinstance(exc, httpx2.ConnectTimeout):
+        # Only a read timeout means "the answer took too long"; a stalled upload is the network.
+        deadline = deadline and isinstance(exc, httpx2.ReadTimeout)
         return ProviderError(
             f"{provider} timed out", retryable=True, timeout=True, deadline=deadline
         )

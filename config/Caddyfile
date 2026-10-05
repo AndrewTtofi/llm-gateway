@@ -3,7 +3,8 @@
 {
 	servers {
 		# Slow clients can't hold connections open by trickling headers or a body. No write
-		# timeout: answers stream for minutes (the gateway bounds stalled readers itself).
+		# timeout: answers stream for minutes. (The gateway's own client write timeout
+		# rarely fires behind a proxy: buffers on both hops absorb most stalls.)
 		timeouts {
 			read_header 10s
 			read_body 2m

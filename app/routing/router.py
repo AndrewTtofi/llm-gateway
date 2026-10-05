@@ -172,11 +172,13 @@ async def _route[T](
             routed.attempts.append((target, "skipped:open"))
             skipped_open = True
             continue
-        routed.current = target
         result = await _try_target(target, adapter, model, body, call, reg, ticket, routed)
         if isinstance(result, _Failed):
-            if isinstance(result.error, ProviderError):
-                provider_error = result.error
+            err = result.error
+            if isinstance(err, ProviderError):
+                # Report a real provider failure over "this replica's pool was full".
+                if provider_error is None or not err.local or provider_error.local:
+                    provider_error = err
             else:
                 other_error = result.error
             continue
@@ -235,14 +237,19 @@ async def _try_target[T](
     try:
         for attempt in range(tries):
             routed.attempt_started = time.perf_counter()
+            routed.current = target  # in flight: billed if the client leaves now
             try:
                 value = await call(adapter, model, body.upstream_body(model))
             except UnsupportedRequest as exc:
+                routed.current = ""
                 # Can't be expressed for this provider (e.g. n>1 on Anthropic); another
                 # provider may handle it. Says nothing about the target's health.
                 routed.attempts.append((target, "unsupported_request"))
                 return _Failed(exc)
             except ProviderError as exc:
+                # The attempt is over: a hang-up from here (backoff, next target) mustn't
+                # bill it again. A timed-out attempt is billed through `timed_out`.
+                routed.current = ""
                 if exc.local:
                     # No free connection: never sent, so not the target's fault (ADR 0023).
                     routed.attempts.append((target, "skipped:busy"))
