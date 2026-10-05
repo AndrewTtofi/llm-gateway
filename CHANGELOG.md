@@ -9,6 +9,17 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Added (Phase 9 — close the gaps)
+- Prompt caching and extended thinking through `/v1/messages`. `cache_control` and signed thinking blocks (in requests, history, responses and streams) reach Anthropic targets and come back, and never leak to other providers or OpenAI clients (ADR 0013)
+- OpenAI Responses API adapter (`api: responses` per model). GPT-6 Astra and Sol can call tools again. Configurable reasoning `mode`; `store: false` always (ADR 0014)
+- Long-context price tiers, cache-write prices (5-minute and 1-hour) and off-peak pricing; `make prices` proposes tiers and cache-write prices too (ADR 0015)
+- `PATCH /admin/keys/{id}`; teams with monthly budgets (`limits.yaml`), `GET /admin/teams`, spend-per-team panels; `usage_log.team` (migration 0004); request body limit (`MAX_BODY_BYTES`, 413) (ADR 0016)
+- Release workflow: multi-arch image to GHCR with SBOM, provenance and attestation. `docker-compose.prod.yml` (Caddy TLS, 2 hardened replicas, migration job, retention job, optional monitoring with a read-only DB role). `python -m app.maintenance prune | grant-readonly` (ADR 0016)
+
+### Fixed (Phase 9)
+- Anthropic cache writes were billed at the plain input price (1.25×–2× cheaper than the real price)
+- The price sync could take another provider's LiteLLM listing for a bare model ID
+
 ### Added
 - `GET /v1/catalog`: for the calling key's models, returns:
   - price and a blended price;
