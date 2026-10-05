@@ -9,6 +9,14 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Added
+- Wiki (`docs/wiki/`, published to the GitHub Wiki tab with `scripts/publish_wiki.sh`):
+  - getting started, core concepts, architecture;
+  - providers and translation, routing and reliability, keys/limits/budgets;
+  - observability, configuration and API references;
+  - operations, testing and benchmarks, security;
+  - a multi-app use case, subscriptions and provider terms, FAQ, glossary.
+
 ## [1.1.0] - 2026-10-05 (Phase 8 — Anthropic Messages API)
 
 ### Added
