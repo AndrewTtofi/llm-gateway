@@ -16,9 +16,10 @@ import anyio
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from redis.asyncio import Redis
 
-from app import config
-from app.providers import UnsupportedProvider, pool
+from app import config, providers
+from app.providers import UnsupportedProvider
 from app.providers.base import (
     CLIENT_FAULT_STATUS,
     QUOTA_CODES,
@@ -26,6 +27,9 @@ from app.providers.base import (
     ProviderError,
     UnsupportedRequest,
 )
+from app.routing import router
+from app.routing.breaker import BreakerStore, MemoryBreakerStore, RedisBreakerStore
+from app.routing.router import AllTargetsFailed, CommittedStream, UnknownModel
 from app.schemas import ChatCompletionRequest
 
 log = logging.getLogger(__name__)
@@ -39,18 +43,31 @@ def reload_from_signal() -> None:
         log.exception("config reload on SIGHUP failed; keeping the previous config")
 
 
+def make_breaker_store() -> tuple[BreakerStore, Redis | None]:
+    if config.registry.circuit_breaker.store == "memory":
+        return MemoryBreakerStore(), None
+    timeout = config.registry.circuit_breaker.redis_timeout_ms / 1000
+    redis = Redis.from_url(
+        config.settings.redis_url, socket_timeout=timeout, socket_connect_timeout=timeout
+    )
+    return RedisBreakerStore(redis), redis
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    router.store, redis = make_breaker_store()
     loop = asyncio.get_running_loop()
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.add_signal_handler(signal.SIGHUP, reload_from_signal)  # `kill -HUP <pid>`
     yield
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.remove_signal_handler(signal.SIGHUP)
-    await pool.aclose()
+    await providers.pool.aclose()
+    if redis is not None:
+        await redis.aclose()
 
 
-app = FastAPI(title="LLM Gateway", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="LLM Gateway", version="0.3.0", lifespan=lifespan)
 
 
 def error_response(
@@ -140,11 +157,20 @@ async def reload(authorization: str = Header(default="")) -> dict[str, object] |
     return {"reloaded": True, "aliases": list(reg.aliases)}
 
 
-def resolve_target(model: str) -> tuple[ProviderAdapter, str, str]:
-    """alias or provider/model → (adapter, upstream model id, "provider/model").
+@app.get("/admin/providers", response_model=None)
+async def provider_status(authorization: str = Header(default="")) -> dict[str, object]:
+    """Circuit-breaker state of every target used by an alias."""
+    key = config.settings.gateway_admin_key
+    if not key or not secrets.compare_digest(authorization, f"Bearer {key}"):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    targets = dict.fromkeys(t for a in config.registry.aliases.values() for t in a.chain)
+    return {"targets": {t: str(await router.store.state(t)) for t in targets}}
 
-    Phase 1: first entry of the chain only. Fallback through the chain is Phase 3.
-    """
+
+def resolve_target(model: str) -> tuple[ProviderAdapter, str, str]:
+    """alias or provider/model → (adapter, upstream model id, "provider/model") of the
+    chain's first entry. Routing uses the whole chain (app.routing.router); this is for
+    tools and tests that need one specific adapter."""
     reg = config.registry
     try:
         target = reg.resolve(model)[0]
@@ -154,7 +180,7 @@ def resolve_target(model: str) -> tuple[ProviderAdapter, str, str]:
     cfg = reg.providers.get(provider)
     if cfg is None:
         raise LookupError(f"The model '{model}' does not exist")
-    return pool.get(provider, cfg), upstream_model, target
+    return providers.pool.get(provider, cfg), upstream_model, target
 
 
 class ClientDisconnected(Exception):
@@ -189,52 +215,72 @@ async def cancel_on_disconnect[T](request: Request, work: Awaitable[T]) -> T:
             await watcher
 
 
+def routing_error_response(exc: AllTargetsFailed) -> JSONResponse:
+    headers = exc.routed.headers()
+    if exc.all_open:
+        return error_response(
+            503,
+            "all providers for this model are temporarily unavailable",
+            "api_error",
+            "all_providers_unavailable",
+            headers=headers,
+        )
+    last = exc.last
+    if isinstance(last, UnsupportedRequest):
+        return error_response(400, str(last), code="unsupported_parameter", headers=headers)
+    if isinstance(last, UnsupportedProvider):
+        return error_response(
+            501, str(last), "api_error", "provider_not_supported", headers=headers
+        )
+    if isinstance(last, ProviderError):
+        resp = provider_error_response(last)
+        resp.headers.update(headers)
+        return resp
+    return error_response(
+        503,
+        "no provider could serve the request",
+        "api_error",
+        "all_providers_unavailable",
+        headers=headers,
+    )
+
+
 @app.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
     body: ChatCompletionRequest, request: Request
 ) -> JSONResponse | StreamingResponse | Response:
-    try:
-        adapter, upstream_model, target = resolve_target(body.model)
-    except LookupError as exc:
-        return error_response(404, str(exc), code="model_not_found", param="model")
-    except UnsupportedProvider as exc:
-        return error_response(501, str(exc), "api_error", "provider_not_supported")
-
-    headers = {"x-gateway-provider": target}
-    upstream_body = body.upstream_body(upstream_model)
+    def unknown() -> JSONResponse:
+        return error_response(
+            404, f"The model '{body.model}' does not exist", code="model_not_found", param="model"
+        )
 
     if not body.stream:
         try:
-            result = await cancel_on_disconnect(
-                request, adapter.chat(upstream_model, upstream_body)
-            )
-        except UnsupportedRequest as exc:
-            return error_response(400, str(exc), code="unsupported_parameter")
-        except ProviderError as exc:
-            return provider_error_response(exc)
+            result, routed = await cancel_on_disconnect(request, router.route_chat(body))
+        except UnknownModel:
+            return unknown()
+        except AllTargetsFailed as exc:
+            return routing_error_response(exc)
         except ClientDisconnected:
             return Response(status_code=499)  # nobody left to answer
-        return JSONResponse(result, headers=headers)
+        return JSONResponse(result, headers=routed.headers())
 
-    # Streaming. Pull the first chunk *before* sending the 200, so a provider that fails
-    # up front (bad key, 429, model down) still gets a proper HTTP error status.
-    # The wait for the first token can be long (prompt processing), so it is watched for
-    # disconnects too.
-    chunks = adapter.stream(upstream_model, upstream_body)
+    # Streaming. Retries and fallback cover everything up to the first chunk, which is
+    # pulled *before* the 200 goes out (ADR 0002, 0005). That wait can be long (prompt
+    # processing), so it is watched for disconnects too.
     try:
-        first = await cancel_on_disconnect(request, anext(chunks, None))
-    except UnsupportedRequest as exc:
-        return error_response(400, str(exc), code="unsupported_parameter")
-    except ProviderError as exc:
-        return provider_error_response(exc)
+        (first, chunks), routed = await cancel_on_disconnect(request, router.route_stream(body))
+    except UnknownModel:
+        return unknown()
+    except AllTargetsFailed as exc:
+        return routing_error_response(exc)
     except ClientDisconnected:
-        await chunks.aclose()
         return Response(status_code=499)
 
     return SSEResponse(
         relay_sse(first, chunks),
         upstream=chunks,
-        headers={**headers, "cache-control": "no-cache", "x-accel-buffering": "no"},
+        headers={**routed.headers(), "cache-control": "no-cache", "x-accel-buffering": "no"},
     )
 
 
@@ -250,7 +296,7 @@ class SSEResponse(StreamingResponse):
     def __init__(
         self,
         content: AsyncGenerator[str],
-        upstream: AsyncGenerator[dict[str, Any]],
+        upstream: CommittedStream | AsyncGenerator[dict[str, Any]],
         headers: Mapping[str, str],
     ) -> None:
         super().__init__(content, media_type="text/event-stream", headers=headers)
@@ -263,9 +309,10 @@ class SSEResponse(StreamingResponse):
         finally:
             # Our task may already be cancelled; shield so the cleanup awaits still run.
             with anyio.CancelScope(shield=True):
-                for gen in (self._content, self._upstream):
-                    with contextlib.suppress(RuntimeError):  # already running/closed
-                        await gen.aclose()
+                with contextlib.suppress(RuntimeError):  # already running/closed
+                    await self._content.aclose()
+                with contextlib.suppress(RuntimeError):
+                    await self._upstream.aclose()
 
 
 def sse_error(message: str) -> str:
@@ -276,7 +323,7 @@ def sse_error(message: str) -> str:
 
 
 async def relay_sse(
-    first: dict[str, Any] | None, chunks: AsyncGenerator[dict[str, Any]]
+    first: dict[str, Any] | None, chunks: AsyncIterator[dict[str, Any]]
 ) -> AsyncGenerator[str]:
     """Re-emit upstream chunks as SSE. Once the 200 is sent, errors can only travel in-band.
 

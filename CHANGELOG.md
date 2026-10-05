@@ -9,6 +9,24 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-05 (Phase 3 — reliability: retries, fallback, circuit breakers)
+
+### Added
+- Fallback through each alias's chain, with retries (exponential backoff, full jitter, `retry-after` honoured) — failures classified as client fault / gateway fault / transient (Phase 3, ADR 0004)
+- Circuit breaker per `provider/model` target (closed → open → half-open, one probe), state in Redis via atomic Lua scripts; in-memory store for single-process use; fails open if Redis is down
+- Response headers `x-gateway-attempts`, `x-gateway-fallback` (alongside `x-gateway-provider`)
+- `GET /admin/providers`: circuit-breaker state per target
+- Chaos provider (`type: fake`) with failure profiles (`ok`, `flaky`, `down`, `slow`, `blip`, `broken-stream`) and aliases `chaos`, `chaos-down`, `chaos-blip`
+- Mid-stream failure policy (ADR 0005); `timeouts.stream_total` caps a whole stream
+- Per-provider connection-pool `limits` with a short `pool` wait timeout
+- CI runs the breaker suite against a real Redis service
+
+### Changed
+- Adapters replaced by a config reload are closed after a grace period instead of at shutdown
+- Direct `provider/model` requests must name a known target (alias chains or per-provider model lists)
+- The chaos provider and chaos aliases load only with `GATEWAY_ENABLE_FAKE=1` (set by the dev compose stack)
+- `retry` and `circuit_breaker` config are validated on load/reload
+
 ## [0.2.0] - 2026-10-05 (Phase 2 — multi-provider + model registry)
 
 ### Added

@@ -11,4 +11,7 @@ models:
   openai/gpt-6.1-sol:                  { input: 2.00,  output: 10.00 }  # >272K input billed higher
   openai/gpt-6-luna:                   { input: 0.10,  output: 0.50 }
   ollama/llama3.2:3b:                  { input: 0,     output: 0 }
+  fake/ok:                             { input: 0,     output: 0 }
   fake/flaky:                          { input: 0,     output: 0 }
+  fake/down:                           { input: 0,     output: 0 }
+  fake/blip:                           { input: 0,     output: 0 }

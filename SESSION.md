@@ -5,16 +5,41 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 2 — Multi-provider + model registry ✅ (v0.2.0) → next: 3 — Reliability
-- **Branch:** `phase-2-providers` · `v0.1.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
-- **Status:** Phase 2 DoD met live: same OpenAI client code streams from `fast`/`smart`/`local`, real tool call OK, Sonnet 5.5 capability translation verified. `make test` 115, `make test-live` 4 passed
-- **Next up:** Phase 3 on `phase-3-reliability`: retries + backoff, fallback through alias chains, circuit breaker in Redis, chaos provider, mid-stream failure ADR. Also from reviews: pool limits, overall stream deadline, retire old adapters
+- **Phase:** 3 — Reliability (`phase-3-reliability`, PR open → `v0.3.0` on merge)
+- **Branch:** `phase-3-reliability` · `v0.2.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
+- **Status:** Phase 3 DoD met: primary forced down → 100/100 requests succeed via fallback (unit + live stack with Redis); breaker opens and recovers. `make test` 172, `make test-e2e` 3
+- **Next up:** review + merge Phase 3 → `v0.3.0`; then Phase 4 (API keys, token-bucket rate limits, budgets)
 - **Blockers:** none. Owner: rotate the Anthropic key (it was pasted in chat); `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** none
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 6
+**Did**
+- Phase 3: router with retries/backoff/jitter + fallback chains, circuit breaker per target in
+  Redis (Lua) with memory store, chaos provider + aliases, stream_total deadline, pool limits,
+  retiring old adapters after a grace period. ADR 0004 (retries/fallback/breaker), 0005 (mid-stream)
+
+**Decided**
+- Breakers per `provider/model`, not per provider (Anthropic overload is per model)
+- Fail classification: client fault returns, gateway fault falls back without retry, transient retries then falls back
+- No mid-stream fallback: error in-band, breaker learns (ADR 0005)
+
+- code-reviewer pass: 1 blocker (committed-stream wrapper never closed the upstream if the client
+  left during the first chunk — a Phase 1 regression), probe slot leaks, stragglers closing open
+  breakers, Redis latency on every request, error ranking, unbounded breaker state via direct
+  model names, fake provider reachable in prod, CROSSSLOT keys, grace period too short. All fixed
+  with tests; blocker + probe release mutation-checked
+- Live demo on chaos-blip: open → half-open probe → closed, 137/137 requests succeeded
+
+**Learned**
+- Unit tests silently used the real local Redis through the app lifespan — test config must pin `store: memory`
+- `aclose()` on an async generator that never started doesn't run its `finally`; a wrapper that
+  must clean up has to be a class, not a generator
+- A breaker must only let the probe close it, or in-flight stragglers make it flap
+
 
 ### 2026-10-05 — Session 5
 **Did**

@@ -26,10 +26,10 @@ for chunk in resp:
 
 | Feature | Status |
 |---------|--------|
-| OpenAI-compatible `/v1/chat/completions` with streaming | Phase 1 |
-| Providers: OpenAI, Anthropic, Ollama (local) | Phase 2 |
-| Model aliases + hot-reloadable config | Phase 2 |
-| Retries, fallback chains, circuit breakers | Phase 3 |
+| OpenAI-compatible `/v1/chat/completions` with streaming | ✅ |
+| Providers: OpenAI, Anthropic, Ollama (local) | ✅ |
+| Model aliases + hot-reloadable config | ✅ |
+| Retries, fallback chains, circuit breakers | ✅ |
 | Per-key request + token rate limits, USD budgets | Phase 4 |
 | Cost tracking, Prometheus metrics, Grafana dashboard | Phase 5 |
 | Load + chaos test results | Phase 6 |
@@ -60,6 +60,20 @@ curl localhost:8000/healthz
 | Gateway | http://localhost:8000 (docs at `/docs`) |
 | Grafana | http://localhost:3000 (admin / admin) |
 | Prometheus | http://localhost:9090 |
+
+## Watching it fail over
+
+```bash
+# primary is down 100% of the time; every request still succeeds via the fallback
+curl -si localhost:8000/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"chaos-down","messages":[{"role":"user","content":"hi"}]}' | grep x-gateway
+# x-gateway-provider: fake/ok · x-gateway-fallback: true · x-gateway-attempts: 1 (breaker open)
+
+# breaker states (admin key from .env)
+curl -s localhost:8000/admin/providers -H "Authorization: Bearer $GATEWAY_ADMIN_KEY"
+```
+`chaos-blip` has a primary that is down 20 s of every minute — keep sending requests and
+watch its breaker open, go half-open and close again.
 
 ## Changing models
 
