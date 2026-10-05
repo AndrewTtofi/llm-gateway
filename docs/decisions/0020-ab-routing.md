@@ -23,7 +23,8 @@ optional `system_prefix`) and `sticky`:
     alias and that value mapped onto the weights. A caller stays on one arm, and aliases
     split independently.
   - `request` picks at random every time.
-  - `x-gateway-variant: <name>` pins an arm (QA).
+  - `x-gateway-variant: <name>` pins an arm only on aliases with `allow_pin: true` (QA),
+    so callers can't choose a pricier arm or skew the split.
 - **The arm** supplies the fallback chain. Its `system_prefix` goes in front of the system
   prompt: that's how prompt variants are tested.
 - **Recorded:** the `x-gateway-variant` header, `usage_log.variant` (migration 0005),

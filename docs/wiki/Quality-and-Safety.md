@@ -10,9 +10,17 @@ every prompt, so it checks them.
 ### How it works
 
 - **Rules** in `config/guardrails.yaml` (hot-reloaded) are weighted regular expressions.
-  They're matched against **normalised** text: Unicode folded (full-width letters become
-  plain), zero-width characters removed, lower-cased, whitespace collapsed. Trivial
-  obfuscation doesn't slip past.
+  They're matched against **normalised** text:
+  - Unicode folded: full-width letters become plain, accents and combining marks are dropped;
+  - common Cyrillic and Greek look-alikes mapped to Latin;
+  - zero-width characters removed;
+  - lower-cased, with whitespace collapsed.
+
+  Trivial obfuscation doesn't slip past. Punctuation inside words (`i.g.n.o.r.e`) is not
+  undone.
+- **Bounded work:** the scan covers the last `max_chars_per_message` (20 000) characters of
+  each message, up to `max_chars_total` (200 000) per request, so huge prompts can't stall
+  the gateway.
 - **Roles:** by default the rules apply to **user messages and tool results**. Tool results
   are where *indirect* injection hides. System messages are the operator's and aren't
   scanned.
@@ -43,7 +51,7 @@ In `limits.yaml`, each tier sets `injection`:
 | `off` | No scanning |
 | `log` | Detections are logged and counted (default) |
 | `flag` | Also `x-gateway-guardrail: flagged; rules=…` on the response; the request proceeds |
-| `block` | 400 `prompt_injection_detected` (in the client's format); nothing reaches a provider |
+| `block` | 400 `prompt_injection_detected` (in the client's format) with `x-gateway-guardrail: blocked`, which doesn't say which rule fired. Nothing reaches a provider |
 
 Start with `log`, watch `gateway_guardrail_detections_total{rule}`, adjust the weights, then
 move tiers to `flag` or `block`. Logs and metrics carry **rule names and scores, never

@@ -19,14 +19,22 @@ answering similar questions, at the price of sometimes answering a slightly diff
 Option 3 (`app/cache.py`). An alias may set
 `cache: {mode, ttl_seconds, scope, threshold, embedding, max_entries, max_entry_bytes}`.
 
-- **Exact:** SHA-256 of the alias (plus the A/B variant) and the answer-relevant fields:
-  messages, tools, sampling, `max_tokens`, stop, seed, effort, thinking. Not `stream`,
-  `user` or routing hints.
+- **Exact:** SHA-256 of the alias (plus the A/B variant) and every request field except a
+  denylist: `model`, `stream`, `stream_options`, `user`, `metadata`.
+  - A denylist, because the request model allows extra fields, and any unknown one may
+    change the answer.
+  - Routing hints are part of the key.
+- **Not cached:** requests with `n > 1`.
 - **Semantic:**
   - The conversation text is embedded by the configured OpenAI-compatible embedding model.
   - The index is a Redis 8 vector set per scope and alias; a hit is a nearest neighbour
     with similarity ≥ `threshold`.
-  - The index stops growing at `max_entries`, and answers still expire.
+  - Matches are only searched among conversations whose other settings match. The index
+    name includes a hash of every non-message field plus the embedding model.
+  - Multimodal requests are exact-only.
+  - The threshold is a cosine similarity; Redis's VSIM score is converted.
+  - At `max_entries`, a random entry is evicted. An idle index expires with its TTL.
+  - Embeddings time out after 2 s.
   - If embedding fails, lookups fall back to exact.
 - **Scope:** `key` (default), `team` or `global`. Sharing is a data-isolation decision. A
   semantic hit gives one caller an answer written for someone else's similar prompt.

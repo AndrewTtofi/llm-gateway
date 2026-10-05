@@ -30,7 +30,8 @@ aliases:
 | `min_quality` | Your 1–5 score from `catalog.yaml`. Unscored models don't qualify |
 | `max_blended_price` | USD per 1M tokens, blended 3:1 input to output. Unpriced models don't qualify |
 | `max_chain` | How many of the ranked models become the fallback chain (default 4) |
-| `client_hints` | Whether clients may tighten the policy (default true) |
+| `client_hints` | Whether clients may send hints at all (default true) |
+| `allowed_hints` | Which hints they may send (default all four). `optimize` can move a request to a pricier model (cost → quality); remove it to keep that choice yours |
 
 ### What happens per request
 
@@ -90,7 +91,9 @@ aliases:
   Sticky assignment keeps a caller on one arm, and the weights hold across callers.
 - **Each arm** has its own fallback chain. Its optional `system_prefix` goes in front of the
   system prompt, which is how you test prompt changes.
-- **Pinning:** `x-gateway-variant: haiku` forces an arm, for QA.
+- **Pinning:** with `allow_pin: true` on the alias, `x-gateway-variant: haiku` forces an
+  arm, for QA. It's off by default, so callers can't pick a (pricier) arm or skew the
+  experiment.
 - **Measured:** the `x-gateway-variant` response header, `usage_log.variant`, the
   `gateway_variant_*` metrics, and the Grafana "A/B" row. That row shows requests, error
   rate and p95 latency per arm, plus a cost-per-request table. Add

@@ -11,7 +11,7 @@ aliases:
       mode: semantic            # exact | semantic
       ttl_seconds: 3600
       scope: key                # key (default) | team | global
-      threshold: 0.95           # semantic: similarity needed for a hit (0–1)
+      threshold: 0.95           # semantic: cosine similarity needed for a hit (-1 … 1)
       embedding: openai/text-embedding-3-small   # semantic: an OpenAI-compatible embedding model
       max_entries: 10000        # semantic index size per scope and alias
       max_entry_bytes: 262144   # larger answers aren't stored
@@ -19,20 +19,21 @@ aliases:
 
 ## Exact and semantic
 
-- **Exact.** A SHA-256 of the alias (and A/B arm) plus every field that changes the answer:
-  - messages and tools;
-  - `tool_choice` and `response_format`;
-  - temperature, `top_p` and `max_tokens`;
-  - `stop`, `seed`, reasoning effort and thinking.
-
-  `stream`, `user` and routing hints don't change the key, so a streamed and a non-streamed
-  request share entries.
+- **Exact.** A SHA-256 of the alias (and A/B arm) plus **every request field** except
+  `model`, `stream`, `stream_options`, `user` and `metadata`. That includes routing hints, so
+  `optimize: quality` never gets a cheaper model's cached answer. A streamed and a
+  non-streamed request share entries.
 - **Semantic.** The conversation text is embedded and looked up in a Redis 8 vector set. A
   neighbour with similarity at or above `threshold` is a hit. An exact match is tried first.
   - **Embedding failure:** if embedding fails (provider down, no key), lookups fall back to
     exact.
-  - **Index size:** the index stops growing at `max_entries`, and answers still expire after
-    their TTL.
+  - **Matching scope:** only conversations whose *other* settings match are compared: tools,
+    response format, sampling, limits and the embedding model. Requests with images or
+    files are matched exactly only.
+  - **Index size:** at `max_entries`, a random old entry makes room. An idle index expires
+    with its TTL.
+  - **Embedding timeout:** embedding calls time out after 2 s; on a timeout the lookup is
+    exact only.
 
 ## Scope: who shares answers
 
@@ -51,10 +52,10 @@ callers when the content isn't private.
 | | |
 |---|---|
 | Header | `x-gateway-cache: hit`, `miss`, `bypass` or `refresh`. On a hit, `x-gateway-provider: cache/exact` (or `cache/semantic`) |
-| Cost | A hit costs 0, refunds its token reservation, and is recorded with target `cache/…` |
+| Cost | A hit costs 0, refunds its token reservation, reports zero usage, and is recorded with target `cache/…` |
 | Limits | A hit still counts as one request against requests/min |
 | Streams | Streams are replayed from the stored answer, in OpenAI or Anthropic format, thinking blocks included |
-| What's stored | Only complete answers: finish reason `stop` or `tool_calls`. Truncated, errored and cut-off answers aren't stored |
+| What's stored | Only complete answers: finish reason `stop` or `tool_calls`. Truncated, errored and cut-off answers aren't stored. Requests with `n > 1` are never cached (`x-gateway-cache: uncacheable`) |
 | Client control | `x-gateway-cache: bypass` neither reads nor writes. `refresh` skips the read and stores the new answer |
 | Failure | Cache errors are logged and ignored. A cache never fails a request |
 | Metric | `gateway_cache_total{mode, result}`: `hit_exact`, `hit_semantic`, `miss`, `store`, `bypass`, `refresh` |

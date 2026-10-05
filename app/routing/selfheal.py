@@ -36,8 +36,8 @@ PROBE_MESSAGES = [{"role": "user", "content": "ping"}]
 
 
 def chain_targets() -> list[str]:
-    reg = config.registry
-    return sorted({t for a in reg.aliases.values() for t in a.targets})
+    """Every target a request can reach, policy candidates included."""
+    return sorted(config.registry.routable_targets())
 
 
 async def probe_once(target: str) -> str:
@@ -63,6 +63,9 @@ async def probe_once(target: str) -> str:
     except UnsupportedRequest:
         await router.store.release(target, ticket)
         return "skipped"
+    except TimeoutError:  # a hung provider: that's a failed probe, not "no verdict"
+        await router.store.record_failure(target, cb, ticket)
+        return "failed"
     except ProviderError as exc:
         if router.classify(exc, reg.retry) is router.Kind.CLIENT:
             await router.store.record_success(target, cb, ticket)  # it answered
@@ -105,14 +108,25 @@ class Alerts:
         self.known: dict[str, str] = {}
         self._post = post  # tests inject this; default: httpx
         self.host = socket.gethostname()
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def drain(self) -> None:
+        """Wait for alerts being sent (tests, shutdown)."""
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def observe(self, target: str, state: str) -> None:
         before = self.known.get(target)
         self.known[target] = state
         if before is None or before == state:
             return  # first sight (startup) or no change
+        if state == State.HALF_OPEN:
+            return  # a step on the way to open or closed: noise on its own
         reason = await router.store.reason(target) if state != State.CLOSED else None
-        await self.send(target, before, state, reason)
+        # In the background: a slow webhook mustn't hold up polling the other targets.
+        task = asyncio.create_task(self.send(target, before, state, reason))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def _first_to_send(self, target: str, state: str) -> bool:
         interval = config.registry.self_healing.alert_min_interval_seconds

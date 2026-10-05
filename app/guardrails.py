@@ -29,8 +29,14 @@ from app.observability import metrics
 
 log = logging.getLogger(__name__)
 
-_ZERO_WIDTH = re.compile("[​-‏⁠-⁤﻿­]")
+_ZERO_WIDTH = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff\u00ad]")
 _SPACE = re.compile(r"\s+")
+# Common look-alikes (Cyrillic, Greek) folded to Latin, so `ignоre` with a Cyrillic о matches.
+_CONFUSABLES = str.maketrans(
+    "\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0456\u0458\u0455\u0501\u0432\u043d\u043a\u043c\u0442"
+    "\u03bf\u03b1\u03b5\u03b9\u03ba\u03bd\u03c1\u03c4\u03c5\u03c7\u0131",
+    "aeopcyxijsdbhkmtoaeiknptuxi",
+)
 
 CLASSIFIER_PROMPT = (
     "You are a security classifier for an AI gateway. The text between <untrusted> tags was "
@@ -54,9 +60,10 @@ class Verdict:
 def normalise(text: str) -> str:
     """Undo cheap obfuscation: full-width/compatibility forms, zero-width characters,
     case, and spacing."""
-    text = unicodedata.normalize("NFKC", text)
-    text = _ZERO_WIDTH.sub("", text)
-    return _SPACE.sub(" ", text).lower()
+    text = unicodedata.normalize("NFKD", text)  # compatibility forms, accents split off
+    text = "".join(c for c in text if not unicodedata.combining(c))  # drop combining marks
+    text = _ZERO_WIDTH.sub("", text).lower().translate(_CONFUSABLES)
+    return _SPACE.sub(" ", text)
 
 
 @lru_cache(maxsize=64)
@@ -84,7 +91,15 @@ def _texts(messages: list[Any]) -> list[tuple[str, str]]:
 
 def scan(messages: list[Any], rules: Guardrails) -> Verdict:
     verdict = Verdict()
-    texts = [(role, normalise(text)) for role, text in _texts(messages)]
+    # Bounded work per request: the end of each message (where new input usually is) and
+    # the most recent messages overall.
+    budget, texts = rules.max_chars_total, []
+    for role, text in reversed(_texts(messages)):
+        if budget <= 0:
+            break
+        part = text[-min(rules.max_chars_per_message, budget) :]
+        budget -= len(part)
+        texts.append((role, normalise(part)))
     for rule in rules.rules:
         pattern = _compiled(rule.pattern)
         if any(role in rule.applies_to and pattern.search(text) for role, text in texts):
@@ -105,7 +120,7 @@ async def classify(messages: list[Any], rules: Guardrails) -> str:
     body = ChatCompletionRequest.model_validate(
         {
             "model": clf.alias,
-            "max_tokens": 5,
+            "max_tokens": 16,  # the Responses API minimum; one word is all that's needed
             "temperature": 0,
             "messages": [
                 {"role": "system", "content": CLASSIFIER_PROMPT},

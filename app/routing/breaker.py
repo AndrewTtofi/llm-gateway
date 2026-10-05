@@ -121,7 +121,7 @@ return 0
 _QUARANTINE = """
 redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
 redis.call('SET', KEYS[3], '1', 'EX', ARGV[2])
-redis.call('SET', KEYS[5], ARGV[3], 'EX', ARGV[2])
+redis.call('SET', KEYS[5], ARGV[3], 'EX', ARGV[1])
 redis.call('DEL', KEYS[1], KEYS[4])
 return 1
 """

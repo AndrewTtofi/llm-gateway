@@ -126,8 +126,10 @@ async def test_alerts_on_state_changes_only(
     await alerts.observe("a/b", "closed")  # first sight: no alert
     await alerts.observe("a/b", "closed")
     await alerts.observe("a/b", "open")
+    await alerts.observe("a/b", "half_open")  # not alerted on its own
     await alerts.observe("a/b", "closed")
-    assert [(p["from"], p["to"]) for p in posted] == [("closed", "open"), ("open", "closed")]
+    await alerts.drain()
+    assert [(p["from"], p["to"]) for p in posted] == [("closed", "open"), ("half_open", "closed")]
     assert "a/b circuit closed → open" in posted[0]["text"]
 
 
@@ -141,6 +143,7 @@ async def test_alerts_include_the_quarantine_reason(
     await alerts.observe("chaos/ok", "closed")
     await router.store.quarantine("chaos/ok", registry.circuit_breaker, 600, "quota exhausted")
     await alerts.observe("chaos/ok", "open")
+    await alerts.drain()
     assert posted[0]["reason"] == "quota exhausted" and "(quota exhausted)" in posted[0]["text"]
 
 
@@ -155,6 +158,8 @@ async def test_one_replica_sends_each_alert(
     for r in replicas:
         await r.observe("a/b", "closed")
         await r.observe("a/b", "open")
+    for r in replicas:
+        await r.drain()
     assert len(posted) == 1
 
 
@@ -170,6 +175,7 @@ async def test_no_webhook_no_alerts(
     alerts = selfheal.Alerts(post=post)
     await alerts.observe("a/b", "closed")
     await alerts.observe("a/b", "open")
+    await alerts.drain()
     assert sent == []
 
 
@@ -181,4 +187,35 @@ async def test_failing_webhook_doesnt_raise(
 
     alerts = selfheal.Alerts(post=post)
     await alerts.observe("a/b", "closed")
-    await alerts.observe("a/b", "open")  # logged and counted, not raised
+    await alerts.observe("a/b", "open")
+    await alerts.drain()  # logged and counted, not raised
+
+
+async def test_a_hung_probe_reopens_the_breaker(
+    registry: Registry, clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from app import providers
+
+    cfg = registry.circuit_breaker
+    await trip("chaos/ok", cfg)
+    clock[0] += cfg.open_seconds + 1
+    adapter = providers.pool.get("chaos", registry.providers["chaos"])
+
+    async def hang(model: str, request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {}
+
+    monkeypatch.setattr(adapter, "chat", hang)
+    monkeypatch.setattr(cfg, "probe_timeout_seconds", 0.05)
+    assert await selfheal.probe_once("chaos/ok") == "failed"
+    assert await router.store.state("chaos/ok") == State.OPEN
+
+
+def test_a_403_or_404_alone_does_not_quarantine(
+    client: TestClient, clock: list[float], registry: Registry
+) -> None:
+    from app.config import SelfHealing
+
+    assert 403 not in SelfHealing().quarantine_status and 404 not in SelfHealing().quarantine_status

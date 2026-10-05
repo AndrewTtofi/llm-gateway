@@ -227,3 +227,34 @@ def test_shipped_auto_alias_excludes_test_providers() -> None:
         mp.setattr(config, "registry", reg)
         pool = policy.candidates("auto", reg.aliases["auto"].policy)  # type: ignore[arg-type]
     assert pool and not any(t.startswith(("fake/", "bench/")) for t in pool)
+
+
+def test_operators_can_forbid_optimize_hints(
+    client: TestClient, auto: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_cfg = auto["aliases"]["auto"].policy
+    monkeypatch.setattr(policy_cfg, "allowed_hints", ["needs"])
+    resp = chat(client, route={"optimize": "quality"})
+    assert resp.status_code == 400 and resp.json()["error"]["code"] == "invalid_route"
+    assert chat(client, route={"needs": ["tools"]}).status_code == 200
+
+
+def test_routable_targets_include_policy_candidates(registry: Registry, auto: Any) -> None:
+    assert {"mock/tiny", "chaos/ok", "claude/old"} <= registry.routable_targets()
+
+
+@respx.mock
+def test_route_hints_change_the_cache_key(
+    client: TestClient, auto: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import cache, services
+    from app.config import CacheConfig
+
+    monkeypatch.setattr(services, "response_cache", cache.MemoryCacheStore())
+    monkeypatch.setattr(auto["aliases"]["auto"], "cache", CacheConfig())
+    respx.post(f"{UPSTREAM}/chat/completions").mock(
+        return_value=httpx.Response(200, json=COMPLETION)
+    )
+    assert chat(client).headers["x-gateway-cache"] == "miss"
+    assert chat(client).headers["x-gateway-cache"] == "hit"
+    assert chat(client, route={"optimize": "quality"}).headers["x-gateway-cache"] == "miss"

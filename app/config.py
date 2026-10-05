@@ -45,6 +45,14 @@ class Policy(BaseModel):
     max_blended_price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     max_chain: int = Field(default=4, ge=1, le=10)
     client_hints: bool = True  # clients may tighten it (route field / x-gateway-route)
+    # Which hints clients may send. `optimize` can move a request to a dearer model
+    # (cost → quality); drop it here to keep that choice the operator's.
+    allowed_hints: list[Literal["optimize", "needs", "min_quality", "max_blended_price"]] = [
+        "optimize",
+        "needs",
+        "min_quality",
+        "max_blended_price",
+    ]
 
 
 class CacheConfig(BaseModel):
@@ -93,6 +101,7 @@ class Alias(BaseModel):
     policy: Policy | None = None  # instead of a chain: chosen per request
     variants: list[Variant] = []  # instead of a chain: an A/B test (ADR 0020)
     sticky: Literal["key", "user", "request"] = "key"  # what keeps a caller on one variant
+    allow_pin: bool = False  # honour x-gateway-variant (QA); off: callers can't pick an arm
     cache: CacheConfig | None = None  # response cache, opt-in (ADR 0018)
     judge: JudgeConfig | None = None  # LLM-as-judge sampling, opt-in (ADR 0022)
 
@@ -137,7 +146,10 @@ class SelfHealing(BaseModel):
     probe_max_tokens: int = Field(default=16, ge=1, le=64)  # Responses API minimum is 16
     # Faults that won't heal in seconds: hold the breaker open longer.
     quarantine_seconds: float = Field(default=600, gt=0)
-    quarantine_status: list[int] = [401, 403, 404]
+    # Quarantine only on faults that are about the provider account, not the request: a
+    # rejected API key (401) or exhausted quota. 403/404 can be request-specific (a feature
+    # not enabled, a model id in one request), so those go through the normal breaker.
+    quarantine_status: list[int] = [401]
     alert_webhook_env: str | None = "ALERT_WEBHOOK_URL"  # env var holding the URL; unset = off
     alert_min_interval_seconds: float = Field(default=60, ge=0)  # per target and state, fleet-wide
 
@@ -149,6 +161,36 @@ class Registry(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     circuit_breaker: BreakerConfig = Field(default_factory=BreakerConfig)
     self_healing: SelfHealing = Field(default_factory=SelfHealing)
+
+    @model_validator(mode="after")
+    def _references(self) -> Registry:
+        """Fail at load (not at request time) on aliases that point at nothing usable."""
+        chain_aliases = {n for n, a in self.aliases.items() if a.chain}
+        for name, a in self.aliases.items():
+            if a.judge is not None and a.judge.judge not in chain_aliases:
+                raise ValueError(
+                    f"alias {name!r}: judge {a.judge.judge!r} must be an alias with a chain"
+                )
+            if a.cache is not None and a.cache.mode == "semantic":
+                emb = a.cache.embedding
+                if not emb or emb.partition("/")[0] not in self.providers:
+                    raise ValueError(
+                        f"alias {name!r}: semantic cache needs `embedding: provider/model`"
+                    )
+        return self
+
+    def routable_targets(self) -> set[str]:
+        """Every target a request can reach: chains, A/B arms, and policy candidates (for
+        probes, breaker metrics and alerts)."""
+        targets = {t for a in self.aliases.values() for t in a.targets}
+        test_providers = {
+            n for n, p in self.providers.items() if p.get("type") == "fake" or p.get("dev_only")
+        }
+        for a in self.aliases.values():
+            if a.policy is not None:
+                pool = a.policy.candidates or self.known_targets()
+                targets |= {t for t in pool if t.partition("/")[0] not in test_providers}
+        return targets
 
     def known_targets(self) -> set[str]:
         """provider/model names the gateway knows: alias chains + models listed per provider."""
@@ -368,6 +410,9 @@ class Guardrails(BaseModel):
     """config/guardrails.yaml: prompt-injection heuristics (ADR 0021)."""
 
     threshold: float = Field(default=1.0, gt=0)  # score at which a request counts as injection
+    # Bound the work per request: the last N characters of each message, and of all of them.
+    max_chars_per_message: int = Field(default=20_000, ge=100)
+    max_chars_total: int = Field(default=200_000, ge=1000)
     rules: list[GuardRule] = []
     classifier: Classifier | None = None
 
@@ -452,6 +497,17 @@ catalog = load_catalog(settings.config_dir)
 guardrails = load_guardrails(settings.config_dir)
 
 
+def check_guardrails(reg: Registry, rules: Guardrails) -> None:
+    if rules.classifier is not None:
+        alias = reg.aliases.get(rules.classifier.alias)
+        if alias is None or not alias.chain:
+            name = rules.classifier.alias
+            raise ValueError(f"guardrails classifier alias {name!r} must be an alias with a chain")
+
+
+check_guardrails(registry, guardrails)
+
+
 def reload_registry() -> Registry:
     """Reload models, limits, pricing and the catalog together. If any file is broken,
     raise and keep all of them as they were — never a half-applied config."""
@@ -461,6 +517,7 @@ def reload_registry() -> Registry:
     new_pricing = load_pricing(settings.config_dir)
     new_catalog = load_catalog(settings.config_dir)
     new_guardrails = load_guardrails(settings.config_dir)
+    check_guardrails(new_registry, new_guardrails)
     registry, limits, pricing, catalog = new_registry, new_limits, new_pricing, new_catalog
     guardrails = new_guardrails
     return registry

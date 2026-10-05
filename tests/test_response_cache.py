@@ -205,10 +205,18 @@ def test_embedding_failure_falls_back_to_exact(
 # --- units -------------------------------------------------------------------------------
 
 
-def test_request_hash_ignores_transport_fields() -> None:
-    a = cache.request_hash("x", {"messages": MSGS, "stream": True, "user": "u", "route": {}})
-    b = cache.request_hash("x", {"messages": MSGS, "stream": False})
-    assert a == b and a != cache.request_hash("y", {"messages": MSGS})
+def test_request_hash_ignores_transport_fields_only() -> None:
+    base = {"messages": MSGS}
+    same = cache.request_hash("x", {**base, "stream": True, "user": "u", "stream_options": {}})
+    assert same == cache.request_hash("x", base)
+    # anything else can change the answer: routing hints, unknown extras, penalties
+    for extra in (
+        {"route": {"optimize": "quality"}},
+        {"frequency_penalty": 1},
+        {"logit_bias": {"1": 2}},
+    ):
+        assert cache.request_hash("x", {**base, **extra}) != cache.request_hash("x", base), extra
+    assert cache.request_hash("y", base) != cache.request_hash("x", base)
 
 
 def test_replay_round_trips_tool_calls() -> None:
@@ -255,7 +263,8 @@ async def test_redis_store_round_trip() -> None:
         await store.set("t:1", {"a": 1}, ttl=30)
         assert await store.get("t:1") == {"a": 1}
         assert await store.similar("t-index", [1.0, 0.0, 0.0], 0.9) is None  # no index yet
-        await store.add_vector("t-index", [1.0, 0.0, 0.0], "e1", max_entries=10)
+        await store.add_vector("t-index", [1.0, 0.0, 0.0], "e1", max_entries=10, ttl=30)
+        assert 0 < await redis.ttl("vcache:t-index") <= 30  # the index expires when idle
         assert await store.similar("t-index", [0.99, 0.01, 0.0], 0.9) == "e1"
         assert await store.similar("t-index", [0.0, 0.0, 1.0], 0.9) is None
         await store.forget("t-index", "e1")
@@ -263,3 +272,53 @@ async def test_redis_store_round_trip() -> None:
     finally:
         await redis.delete("rcache:t:1", "vcache:t-index")
         await redis.aclose()
+
+
+@respx.mock
+def test_n_greater_than_one_is_never_cached(client: TestClient, cached: CacheConfig) -> None:
+    route = respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    assert ask(client, n=2).headers["x-gateway-cache"] == "uncacheable"
+    ask(client, n=2)
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_team_scope_shares_within_a_team(
+    registry: Registry, cached: CacheConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    monkeypatch.setattr(cached, "scope", "team")
+    from app.auth import hash_key
+
+    keys = [add_key(allowed_aliases=["*"]) for _ in range(3)]
+    store = services.keys.store
+    for k, team in zip(keys, ["web", "web", "data"], strict=True):
+        h = hash_key(k)
+        store._by_hash[h] = store._by_hash[h].__class__(**{**vars(store._by_hash[h]), "team": team})  # type: ignore[attr-defined]
+    results = []
+    for k in keys:
+        with TestClient(main.app, headers={"Authorization": f"Bearer {k}"}) as c:
+            results.append(ask(c).headers["x-gateway-cache"])
+    assert results == ["miss", "hit", "miss"]  # shared inside "web" only
+
+
+async def test_semantic_index_evicts_instead_of_freezing() -> None:
+    store = cache.MemoryCacheStore()
+    for i in range(5):
+        await store.add_vector("ix", [float(i), 1.0], f"e{i}", max_entries=3, ttl=60)
+    assert await store.similar("ix", [4.0, 1.0], 0.999) == "e4"  # newest kept
+    assert await store.similar("ix", [0.0, 1.0], 0.999) is None  # oldest evicted
+
+
+def test_semantic_matching_skips_images_and_partitions_by_settings() -> None:
+    plain = {"messages": MSGS}
+    with_image = {
+        "messages": [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}
+        ]
+    }
+    assert not cache.multimodal(plain) and cache.multimodal(with_image)
+    assert cache.semantic_partition(plain, "e/m") != cache.semantic_partition(
+        {**plain, "tools": [1]}, "e/m"
+    )
+    assert cache.semantic_partition(plain, "e/m") != cache.semantic_partition(plain, "e/other")

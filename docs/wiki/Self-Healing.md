@@ -10,7 +10,7 @@ self_healing:
   probe_interval_seconds: 10
   probe_max_tokens: 16
   quarantine_seconds: 600
-  quarantine_status: [401, 403, 404]
+  quarantine_status: [401]
   alert_webhook_env: ALERT_WEBHOOK_URL
   alert_min_interval_seconds: 60
 ```
@@ -24,7 +24,7 @@ probes, a background task sends a tiny request (`probe_max_tokens` output tokens
 | Probe result | Breaker |
 |--------------|---------|
 | Answer | Closed; traffic returns |
-| Provider error | Open again |
+| Provider error, or no answer within `probe_timeout_seconds` | Open again |
 | Client-fault answer (e.g. 400) | Closed: the provider is up and answering |
 | Provider has no API key | Skipped |
 
@@ -34,10 +34,14 @@ account. `gateway_probes_total{target,result}` counts the probes.
 
 ## Quarantine
 
-Some failures don't fix themselves in 30 seconds:
-- a revoked or wrong API key (401/403);
-- a model name the provider doesn't know (404);
+Some failures don't fix themselves in 30 seconds and are about the provider account, not
+the request:
+- a revoked or wrong API key (401);
 - exhausted credit.
+
+403 and 404 aren't on the list by default. They can be specific to one request (a feature
+not enabled, a resource id), and one request shouldn't take a model away from every tenant.
+They go through the normal breaker threshold.
 
 These **quarantine** the target: the breaker stays open for `quarantine_seconds` (default
 10 minutes) instead of `open_seconds`, and records the reason. Traffic goes to the next
@@ -57,6 +61,9 @@ Slack accepts the payload as-is; other tools get the same JSON.
 - **Deduplication:** each replica watches breaker states, but a Redis lock per target and
   state lets **one** alert through per `alert_min_interval_seconds` across the fleet.
 - **Startup:** at startup the current states are the baseline, so a restart doesn't alert.
+- **Half-open:** moves into half-open aren't alerted on their own. You hear "open" and then
+  "closed" (or nothing more, while it stays down).
+- **Delivery:** alerts are sent in the background, so a slow webhook never delays polling.
 - **Privacy:** alerts never include request content.
 - **Metric:** `gateway_alerts_total{result}` counts sent and failed posts.
 

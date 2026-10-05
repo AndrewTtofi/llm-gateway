@@ -164,6 +164,8 @@ class Judge:
         self._task: asyncio.Task[None] | None = None
 
     def submit(self, job: Job) -> None:
+        half = job.cfg.max_chars // 2  # what's sent anyway: keep no more in memory
+        job.conversation, job.answer = job.conversation[-half:], job.answer[:half]
         if self.queue is None:  # not running (e.g. during shutdown)
             metrics.judge.labels(job.alias, "dropped").inc()
             return
@@ -212,7 +214,7 @@ class Judge:
         body = ChatCompletionRequest.model_validate(
             {
                 "model": job.cfg.judge,
-                "max_tokens": 200,
+                "max_tokens": 400,  # room for reasoning models to finish the JSON
                 "messages": [
                     {"role": "system", "content": JUDGE_SYSTEM},
                     {"role": "user", "content": prompt},

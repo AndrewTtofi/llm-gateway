@@ -10,7 +10,9 @@
   parameters), keyed by a SHA-256 of their canonical JSON.
 - **semantic**: also the answer for a *similar* conversation. Its text is embedded with
   the configured OpenAI-compatible embedding model and looked up in a Redis 8 vector set;
-  a match at or above `threshold` (cosine similarity, 0–1) is a hit.
+  a match at or above `threshold` (cosine similarity, -1 to 1) is a hit. Only conversations
+  whose other settings (tools, response format, sampling) are identical are compared, and
+  requests with images or files are matched exactly only.
 
 **Scope** decides who shares answers: `key` (default), `team`, or `global`. Sharing is a
 data-isolation decision: a semantic hit hands one caller an answer generated for someone
@@ -24,6 +26,7 @@ stored (finish reason `stop` or `tool_calls`).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -42,24 +45,12 @@ from app.observability import metrics
 
 log = logging.getLogger(__name__)
 
-# Request fields that change the answer; everything else (stream, stream_options, user,
-# routing hints) doesn't.
-KEY_FIELDS = (
-    "messages",
-    "tools",
-    "tool_choice",
-    "response_format",
-    "temperature",
-    "top_p",
-    "max_tokens",
-    "max_completion_tokens",
-    "stop",
-    "seed",
-    "reasoning_effort",
-    "thinking",
-    "parallel_tool_calls",
-    "n",
+# Every request field is part of the key except these, which don't change the answer.
+# (A denylist: the request model allows extra fields, and anything unknown might matter.)
+IGNORED_FIELDS = frozenset(
+    {"model", "stream", "stream_options", "user", "metadata", "safety_identifier"}
 )
+EMBED_TIMEOUT_SECONDS = 2.0  # on the request path: a slow embedding provider mustn't stall it
 STORABLE_FINISH = ("stop", "tool_calls")
 
 
@@ -71,10 +62,38 @@ def scope_id(cfg: CacheConfig, key: ApiKey) -> str:
     return f"key:{key.id}"  # team scope without a team falls back to the key
 
 
-def request_hash(alias: str, request: dict[str, Any]) -> str:
-    material = {"alias": alias, **{k: request[k] for k in KEY_FIELDS if k in request}}
+def _digest(material: dict[str, Any]) -> str:
     canonical = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def request_hash(alias: str, request: dict[str, Any]) -> str:
+    """Everything that can change the answer, including routing hints (`route`)."""
+    return _digest(
+        {"alias": alias, **{k: v for k, v in request.items() if k not in IGNORED_FIELDS}}
+    )
+
+
+def semantic_partition(request: dict[str, Any], embedding: str) -> str:
+    """Semantic matches only compare conversations whose *other* settings are identical
+    (tools, response format, sampling, limits) and that used the same embedding model."""
+    rest = {k: v for k, v in request.items() if k not in IGNORED_FIELDS and k != "messages"}
+    return _digest({"embedding": embedding, **rest})[:16]
+
+
+def cacheable(request: dict[str, Any]) -> bool:
+    """n > 1 asks for several different answers: never served from (or into) the cache."""
+    return int(request.get("n") or 1) == 1
+
+
+def multimodal(request: dict[str, Any]) -> bool:
+    for msg in request.get("messages") or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list) and any(
+            isinstance(p, dict) and p.get("type") not in ("text", "refusal") for p in content
+        ):
+            return True
+    return False
 
 
 def text_for_embedding(request: dict[str, Any]) -> str:
@@ -144,6 +163,7 @@ class Collector:
         self.id, self.model = "", ""
         self.content: list[str] = []
         self.calls: dict[int, dict[str, Any]] = {}
+        self.thinking: dict[int, dict[str, Any]] = {}  # extension deltas (ADR 0013)
         self.finish: str | None = None
 
     def feed(self, chunk: dict[str, Any]) -> None:
@@ -151,6 +171,21 @@ class Collector:
         self.model = self.model or chunk.get("model", "")
         for choice in chunk.get("choices") or []:
             delta = choice.get("delta") or {}
+            if isinstance(t := delta.get("thinking"), dict):
+                i = int(t.get("index") or 0)
+                if isinstance(start := t.get("start"), dict):
+                    block: dict[str, Any] = {"type": start.get("type", "thinking")}
+                    if block["type"] == "redacted_thinking":
+                        block["data"] = start.get("data", "")
+                    else:
+                        block.update(thinking="", signature="")
+                    self.thinking[i] = block
+                elif i in self.thinking:
+                    self.thinking[i]["thinking"] = self.thinking[i].get("thinking", "") + (
+                        t.get("thinking") or ""
+                    )
+                    if t.get("signature"):
+                        self.thinking[i]["signature"] = t["signature"]
             if text := delta.get("content"):
                 self.content.append(text)
             for call in delta.get("tool_calls") or []:
@@ -171,6 +206,8 @@ class Collector:
         message: dict[str, Any] = {"role": "assistant", "content": "".join(self.content) or None}
         if self.calls:
             message["tool_calls"] = [self.calls[i] for i in sorted(self.calls)]
+        if self.thinking:
+            message["thinking_blocks"] = [self.thinking[i] for i in sorted(self.thinking)]
         return {
             "id": self.id,
             "object": "chat.completion",
@@ -188,7 +225,7 @@ class CacheStore(Protocol):
     async def set(self, key: str, value: dict[str, Any], ttl: int) -> None: ...
     async def similar(self, index: str, vector: list[float], threshold: float) -> str | None: ...
     async def add_vector(
-        self, index: str, vector: list[float], element: str, max_entries: int
+        self, index: str, vector: list[float], element: str, max_entries: int, ttl: int
     ) -> None: ...
     async def forget(self, index: str, element: str) -> None: ...
 
@@ -200,7 +237,8 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 class MemoryCacheStore:
-    """Tests and single-process dev. Bounded LRU; brute-force similarity."""
+    """Tests and single-process dev only: a bounded LRU and brute-force similarity in
+    Python, with indexes growing per scope × alias (each capped at max_entries)."""
 
     def __init__(self, max_items: int = 1000) -> None:
         self._items: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
@@ -222,20 +260,20 @@ class MemoryCacheStore:
             self._items.popitem(last=False)
 
     async def similar(self, index: str, vector: list[float], threshold: float) -> str | None:
-        best, best_score = None, -1.0
+        best, best_score = None, -2.0
         for element, v in self._vectors.get(index, {}).items():
-            # Same scale as Redis VSIM with cosine: 1 identical … 0 opposite.
-            score = (1 + _cosine(vector, v)) / 2
+            score = _cosine(vector, v)  # cosine similarity, as `threshold` is defined
             if score > best_score:
                 best, best_score = element, score
         return best if best is not None and best_score >= threshold else None
 
     async def add_vector(
-        self, index: str, vector: list[float], element: str, max_entries: int
+        self, index: str, vector: list[float], element: str, max_entries: int, ttl: int
     ) -> None:
         vectors = self._vectors.setdefault(index, {})
-        if len(vectors) < max_entries:
-            vectors[element] = vector
+        while len(vectors) >= max_entries:  # full: the oldest entry makes room
+            vectors.pop(next(iter(vectors)))
+        vectors[element] = vector
 
     async def forget(self, index: str, element: str) -> None:
         self._vectors.get(index, {}).pop(element, None)
@@ -280,18 +318,30 @@ class RedisCacheStore:
             return None
         if not isinstance(result, dict) or not result:
             return None
-        element, score = next(iter(result.items()))  # {element: similarity 0..1}
+        element, score = next(iter(result.items()))
         element = element.decode() if isinstance(element, bytes) else str(element)
-        return element if float(score) >= threshold else None
+        # VSIM's score is (1 + cosine) / 2; `threshold` is a cosine similarity.
+        return element if 2 * float(score) - 1 >= threshold else None
 
     async def add_vector(
-        self, index: str, vector: list[float], element: str, max_entries: int
+        self, index: str, vector: list[float], element: str, max_entries: int, ttl: int
     ) -> None:
         name = f"vcache:{index}"
         try:
-            if await self.redis.vset().vcard(name) >= max_entries:
-                return  # full: answers still expire; the index stops growing
-            await self.redis.vset().vadd(name, vector, element)
+            vs = self.redis.vset()
+            if await vs.vcard(name) >= max_entries:
+                # Full: a random entry makes room, so the cache keeps learning. (Not atomic
+                # with the add: concurrent writers may briefly exceed the cap by a few.)
+                victim = await vs.vrandmember(name)
+                if isinstance(victim, list):
+                    victim = victim[0] if victim else None
+                if victim:
+                    await vs.vrem(
+                        name, victim.decode() if isinstance(victim, bytes) else str(victim)
+                    )
+            await vs.vadd(name, vector, element)
+            # The index lives as long as its newest answer; an idle index expires.
+            await self.redis.expire(name, ttl)
         except Exception as exc:
             log.warning("semantic cache write failed: %s", type(exc).__name__)
 
@@ -313,7 +363,7 @@ class Lookup:
     store: CacheStore
     scope: str
     key_hash: str
-    index: str  # semantic index name (scope + alias)
+    index: str  # semantic index name (scope + alias + partition)
     vector: list[float] | None
     write: bool
 
@@ -331,7 +381,11 @@ class Lookup:
             await self.store.set(self.entry_key, result, self.cfg.ttl_seconds)
             if self.vector is not None:
                 await self.store.add_vector(
-                    self.index, self.vector, self.key_hash, self.cfg.max_entries
+                    self.index,
+                    self.vector,
+                    self.key_hash,
+                    self.cfg.max_entries,
+                    self.cfg.ttl_seconds,
                 )
             metrics.cache.labels(self.cfg.mode, "store").inc()
             return True
@@ -352,7 +406,7 @@ async def _embed(target: str, text: str) -> list[float] | None:
         if embed is None:
             log.warning("provider %s can't make embeddings; semantic cache off", provider)
             return None
-        vectors = await embed(model, [text])
+        vectors = await asyncio.wait_for(embed(model, [text]), EMBED_TIMEOUT_SECONDS)
         return list(vectors[0])
     except Exception as exc:
         log.warning("cache embedding failed: %s", type(exc).__name__)
@@ -365,14 +419,16 @@ async def lookup(
     """→ (cached answer or None, the lookup for storing later, result label).
 
     `mode`: "" (normal), "bypass" (no read, no write), "refresh" (no read, write)."""
-    if mode == "bypass":
-        metrics.cache.labels(cfg.mode, "bypass").inc()
-        return None, None, "bypass"
+    if mode == "bypass" or not cacheable(request):
+        label = "bypass" if mode == "bypass" else "uncacheable"
+        metrics.cache.labels(cfg.mode, label).inc()
+        return None, None, label
     scope = scope_id(cfg, key)
     key_hash = request_hash(alias, request)
-    index = f"{scope}:{alias}"
+    index = f"{scope}:{alias}:{semantic_partition(request, cfg.embedding or '')}"
     vector = None
-    if cfg.mode == "semantic" and cfg.embedding and (text := text_for_embedding(request)):
+    semantic = cfg.mode == "semantic" and cfg.embedding and not multimodal(request)
+    if semantic and cfg.embedding and (text := text_for_embedding(request)):
         vector = await _embed(cfg.embedding, text)
     ctx = Lookup(cfg, store, scope, key_hash, index, vector, write=True)
     if mode == "refresh":

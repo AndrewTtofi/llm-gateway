@@ -8,20 +8,45 @@ Keep "Current state" short and always true.
 - **Phase:** 8 — extensions. First: inbound Anthropic Messages API (`phase-8-messages-api`)
 - **Branch:** `phase-8-cost-catalog` (on top of `docs-wiki`) · `v1.0.0` tagged + released on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
 - **Status:**
-  - PR #9 (`/v1/messages`, v1.1.0) is waiting on CI after the GitHub outage.
-  - The `docs-wiki` branch has the wiki (17 pages + publish script).
-  - `phase-8-cost-catalog` has the model catalog, `/v1/catalog` and `make prices` + the weekly drift issue (ADR 0011). `make test` 322.
-  - `phase-8-frontier-models` (on the catalog branch) adds Fable 5.1, Gemini, xAI, Mistral, DeepSeek, the `frontier` alias and per-provider parameter rules (ADR 0012). `make test` 356. The new providers are untested live: no keys yet.
-- **Next up:**
-  1. Merge #9 → tag v1.1.0, then the wiki PR, then the catalog PR.
-  2. Owner: enable Wikis and restrict editing to collaborators, then run `scripts/publish_wiki.sh`.
-  3. Then policy routing (`model: auto` + hints, built on the catalog), or lossless caching/thinking for `/v1/messages`.
+  - Phases 9 and 10 done and reviewed: `phase-9-gaps` → `phase-10-extensions`, stacked on #12 → #11 → #10.
+  - `make test` 539; lint clean.
+  - Merging waits on GitHub Actions (degraded).
+- **Next up:** full security audit, then merge #10 → #11 → #12 → phase 9 → phase 10 once CI runs, then tag releases.
 - **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional
 
 ---
 
 ## Session log
+
+### 2026-10-06 — Session 13 (continued)
+**Did**
+- Phase 10 (`phase-10-extensions`), ADRs 0017–0022:
+  - policy routing (`auto`);
+  - response cache, exact and semantic;
+  - self-healing: probes, quarantine, alerts;
+  - A/B routing;
+  - prompt-injection filter;
+  - LLM-as-judge.
+- Live: `auto` picked Haiku for cost and Opus 5.5 for quality; an injection was logged by rule name; all 25 dashboard queries ran.
+- Code review fixes (18 items + nits):
+  - **Quarantine:** only 401 and quota now.
+  - **Cache:**
+    - keys use a denylist and include routing hints;
+    - the semantic index is partitioned, expires and evicts;
+    - the threshold is a true cosine similarity;
+    - embeddings time out after 2 s;
+    - multimodal requests are exact-only, and `n > 1` isn't cached.
+  - **Policy:** `allow_pin` and `allowed_hints`; concurrent breaker reads; policy candidates are probed.
+  - **Self-healing:** probe timeouts count as failures; half-open isn't alerted; webhooks are async.
+  - **Guardrails:** bounded scan; NFKD and confusables; the block response hides rule names.
+  - **Load-time checks** for judge, classifier and embedding references.
+- Wiki and README for phases 9–10 (5 new pages). `make test` 539.
+
+**Learned**
+- Cache keys built from an allowlist of fields silently collide when the request model allows extras: use a denylist
+- Redis VSIM scores are (1 + cosine) / 2, not cosine
+- Quarantining on a single 403/404 lets one request take a model away from every tenant
 
 ### 2026-10-06 — Session 13
 **Did**

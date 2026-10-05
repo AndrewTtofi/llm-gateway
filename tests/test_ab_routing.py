@@ -24,6 +24,7 @@ MSGS = [{"role": "system", "content": "Be helpful."}, {"role": "user", "content"
 def experiment(registry: Registry, monkeypatch: pytest.MonkeyPatch) -> Alias:
     alias = Alias(
         sticky="key",
+        allow_pin=True,  # the tests pin arms; off by default
         variants=[
             Variant(name="control", weight=50, chain=["mock/tiny"]),
             Variant(name="concise", weight=50, chain=["chaos/ok"], system_prefix="Answer briefly."),
@@ -193,3 +194,18 @@ def test_split_across_real_keys(registry: Registry, experiment: Alias) -> None:
                 ]
             ] += 1
     assert seen["control"] and seen["concise"]  # both arms get traffic
+
+
+def test_pinning_is_ignored_unless_the_alias_allows_it(
+    client: TestClient, experiment: Alias, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(experiment, "allow_pin", False)
+    seen = {
+        client.post(
+            "/v1/chat/completions",
+            json={"model": "exp", "messages": MSGS},
+            headers={"x-gateway-variant": pin},
+        ).headers["x-gateway-variant"]
+        for pin in ("control", "concise")
+    }
+    assert len(seen) == 1  # the caller's own sticky arm, whatever it asks for

@@ -26,6 +26,7 @@ max_price=5`): a different `optimize`, more `needs`, a higher `min_quality`, a l
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -118,9 +119,11 @@ def effective(policy: Policy, hints: dict[str, Any] | None) -> Policy:
     """Apply client hints, which can only tighten. Invalid hints are a ValueError (400)."""
     if not hints or not policy.client_hints:
         return policy
-    allowed = {"optimize", "needs", "min_quality", "max_blended_price"}
+    allowed = set(policy.allowed_hints)
     if unknown := set(hints) - allowed:
-        raise ValueError(f"unknown route hints: {sorted(unknown)}; allowed: {sorted(allowed)}")
+        raise ValueError(
+            f"route hints not allowed here: {sorted(unknown)}; allowed: {sorted(allowed)}"
+        )
     merged = policy.model_dump()
     if "optimize" in hints:
         merged["optimize"] = hints["optimize"]
@@ -192,20 +195,25 @@ async def plan(alias: str, policy: Policy, body: dict[str, Any], prompt_tokens: 
         )
 
     # 2. Availability right now: provider key present, breaker not open.
-    ranked: list[tuple[str, CatalogEntry]] = []
+    configured: list[tuple[str, CatalogEntry]] = []
     for target, facts in fitting:
         provider = target.partition("/")[0]
         try:
-            configured = providers.pool.get(provider, reg.providers[provider]).configured
+            ok = providers.pool.get(provider, reg.providers[provider]).configured
         except providers.UnsupportedProvider:
-            configured = False
-        if not configured:
+            ok = False
+        if ok:
+            configured.append((target, facts))
+        else:
             skip("not_configured")
-            continue
-        if await router.store.state(target) == State.OPEN:
+    # One concurrent round of breaker reads, not one Redis round trip per candidate.
+    states = await asyncio.gather(*(router.store.state(t) for t, _ in configured))
+    ranked: list[tuple[str, CatalogEntry]] = []
+    for (target, facts), state in zip(configured, states, strict=True):
+        if state == State.OPEN:
             skip("circuit_open")
-            continue
-        ranked.append((target, facts))
+        else:
+            ranked.append((target, facts))
     if not ranked:  # models would fit, but none can serve now: retryable
         raise NoRoute(
             f"no model for '{alias}' is available right now (excluded: {excluded})", capacity=True

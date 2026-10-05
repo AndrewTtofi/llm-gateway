@@ -21,8 +21,15 @@ catch the common forms.
 ## Decision
 Option 3 (`app/guardrails.py`, rules in `config/guardrails.yaml`, hot-reloaded):
 
-- **Rules:** weighted regular expressions, matched against **normalised** text (Unicode
-  NFKC, zero-width characters removed, lower-cased, whitespace collapsed).
+- **Rules:** weighted regular expressions, matched against **normalised** text:
+  - Unicode NFKD with combining marks dropped;
+  - common Cyrillic and Greek confusables mapped to Latin;
+  - zero-width characters removed;
+  - lower-cased, with whitespace collapsed.
+
+  The scan is bounded per message and per request.
+  - **ReDoS:** the patterns have bounded gaps (`.{0,40}`), so matching is linear. The review
+    measured this with crafted input.
   - They apply per role: user and tool by default. Tool results are the main carrier of
     indirect injection. System messages are the operator's.
   - The default set covers instruction overrides, system-prompt extraction, role/persona
@@ -38,7 +45,8 @@ Option 3 (`app/guardrails.py`, rules in `config/guardrails.yaml`, hot-reloaded):
   - Errors and timeouts fail open.
 - **Action per tier:** `injection: off | log | flag | block`.
   - `flag` adds `x-gateway-guardrail: flagged; rules=…`.
-  - `block` returns 400 `prompt_injection_detected` in the client's format.
+  - `block` returns 400 `prompt_injection_detected` in the client's format, without saying
+    which rule fired.
 - **Privacy:** logs and the `gateway_guardrail_detections_total` metric carry rule names,
   scores and the action, never content.
 

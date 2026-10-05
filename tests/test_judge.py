@@ -204,3 +204,31 @@ async def test_postgres_store(monkeypatch: pytest.MonkeyPatch) -> None:
         row = (await conn.execute(text("SELECT request_id, score, labels FROM judge_scores"))).one()
     await engine.dispose()
     assert row.request_id == "req-9" and row.score == 3 and row.labels == ["incomplete"]
+
+
+def test_judge_and_semantic_cache_references_are_checked_on_load(registry: Registry) -> None:
+    from app.config import Registry as R
+
+    data = registry.model_dump()
+    data["aliases"]["local"]["judge"] = {"sample_rate": 0.5, "judge": "nonexistent"}
+    with pytest.raises(ValueError):
+        R.model_validate(data)
+    data["aliases"]["local"]["judge"] = None
+    data["aliases"]["local"]["cache"] = {"mode": "semantic"}  # no embedding model
+    with pytest.raises(ValueError):
+        R.model_validate(data)
+
+
+def test_submitted_text_is_truncated() -> None:
+    j = judge.Judge(judge.MemoryScoreStore())
+    job = judge.Job(
+        "r",
+        "a",
+        None,
+        None,
+        JudgeConfig(sample_rate=1, judge="x", max_chars=1000),
+        "c" * 10_000,
+        "a" * 10_000,
+    )
+    j.submit(job)
+    assert len(job.conversation) == 500 and len(job.answer) == 500

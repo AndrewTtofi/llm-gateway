@@ -45,7 +45,11 @@ Per request:
 - a higher `min_quality`;
 - a lower `max_blended_price`.
 
-Hints never widen the candidate list. Unknown hints are a 400. `route` is an extension field
+Hints never widen the candidate list. `allowed_hints` restricts which hints a policy
+accepts. `optimize` can move a request to a pricier model, so an operator can remove it.
+Unknown or disallowed hints are a 400. Breaker states for all candidates are read
+concurrently. Policy candidates count as routable targets for probes, breaker metrics and
+alerts. `route` is an extension field
 and never reaches a provider. Authorisation is on the alias name: a key allowed `auto` may
 use its candidates. The response carries `x-gateway-route: optimize=…; considered=…; chain=…`.
 

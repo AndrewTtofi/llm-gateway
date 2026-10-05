@@ -29,9 +29,13 @@ Option 2, plus quarantine and webhooks (`app/routing/selfheal.py`, config
   - Success closes the breaker; a provider error reopens it; a client-fault answer counts
     as healthy (it answered).
   - Unconfigured providers are skipped.
-- **Quarantine:** an auth failure (401/403), unknown model (404) or exhausted quota holds
-  the breaker open for `quarantine_seconds` (default 600) with a reason. This happens both
-  on user traffic and on probes.
+- **Quarantine:** an auth failure (401) or exhausted quota holds the breaker open for
+  `quarantine_seconds` (default 600), with a reason. This happens both on user traffic and
+  on probes. 403 and 404 are left to the normal breaker by default, because they can be
+  specific to one request and quarantine affects every tenant.
+- **Probe timeouts:** a probe that times out counts as a failure.
+- **Half-open:** half-open transitions aren't alerted on their own.
+- **Delivery:** alerts are sent in background tasks.
 - **Alerts:**
   - Breaker state changes (closed, open, half-open), with the quarantine reason, are posted
     to a Slack-compatible webhook. The URL comes from `$ALERT_WEBHOOK_URL`; unset means off.

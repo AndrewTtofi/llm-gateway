@@ -66,7 +66,7 @@ async def poll_breakers(interval: float = 15.0, alerts: selfheal.Alerts | None =
     known: set[str] = set()
     while True:
         try:
-            targets = {t for a in config.registry.aliases.values() for t in a.targets}
+            targets = config.registry.routable_targets()
             for gone in known - targets:
                 with contextlib.suppress(KeyError):
                     metrics.breaker.remove(gone)
@@ -405,8 +405,8 @@ async def list_models(key: Authenticated) -> dict[str, object]:
     return {"object": "list", "data": data}
 
 
-# Blended price for sorting: a typical 3:1 mix of input to output tokens.
-BLEND_INPUT, BLEND_OUTPUT = 3, 1
+# Blended price for sorting: a typical 3:1 mix of input to output tokens (shared with policy).
+BLEND_INPUT, BLEND_OUTPUT = policy.BLEND_INPUT, policy.BLEND_OUTPUT
 SortBy = Literal["name", "price", "quality", "ttft", "latency"]
 
 
@@ -718,7 +718,7 @@ async def _chat(
                 400,
                 "The request was blocked by the gateway's prompt-injection filter.",
                 code="prompt_injection_detected",
-                headers={**rl_headers, "x-gateway-guardrail": flag.replace("flagged", "blocked")},
+                headers={**rl_headers, "x-gateway-guardrail": "blocked"},  # no rule names
             )
         if action == "flag":
             rl_headers["x-gateway-guardrail"] = flag
@@ -726,17 +726,23 @@ async def _chat(
     variant = None
     if alias_cfg is not None and alias_cfg.variants:
         # A/B test (ADR 0020): pick the arm before the cache, whose key depends on it.
-        pinned = request.headers.get("x-gateway-variant")
+        pinned = request.headers.get("x-gateway-variant") if alias_cfg.allow_pin else None
         user = (body.model_extra or {}).get("user")
         variant = ab.assign(body.model, alias_cfg, key, str(user) if user else None, pinned)
         if variant.system_prefix:
             body = ab.with_prefix(body, variant.system_prefix)
         meter.variant = variant.name
         rl_headers["x-gateway-variant"] = variant.name
-    if alias_cfg is not None and alias_cfg.judge is not None and judge.sampled(alias_cfg.judge):
+    if (
+        alias_cfg is not None
+        and alias_cfg.judge is not None
+        and int((body.model_extra or {}).get("n") or 1) == 1  # one answer to grade
+        and judge.sampled(alias_cfg.judge)
+    ):
         # Sampled for LLM-as-judge (ADR 0022): keep the conversation text until it's judged.
         meter.judge_cfg = alias_cfg.judge
-        meter.judge_conversation = judge.conversation_text(body.model_dump()["messages"])
+        text = judge.conversation_text(body.model_dump()["messages"])
+        meter.judge_conversation = text[-alias_cfg.judge.max_chars :]  # bounded in memory
         if body.stream and meter.collector is None:
             meter.collector = cache.Collector()  # to assemble the streamed answer
     if alias_cfg is not None and alias_cfg.cache is not None:
@@ -786,7 +792,14 @@ async def _chat(
         chain = list(variant.chain)
     else:
         chain = []  # the router resolves the alias itself
-    await meter.reserve(chain[0] if chain else config.registry.resolve(body.model)[0])
+    try:
+        first = chain[0] if chain else config.registry.resolve(body.model)[0]
+    except (KeyError, IndexError):  # the alias vanished in a config reload mid-request
+        meter.status, meter.error_code = 404, "model_not_found"
+        meter.alias_label = "_unknown"
+        await meter.settle()
+        return _unknown(body)
+    await meter.reserve(first)
     if body.stream:
         # Always ask the provider for usage so streams can be metered (ADR 0007); the
         # meter drops the usage chunk again if the client didn't ask for it. Keep any
@@ -845,6 +858,8 @@ def _serve_cached(
     anthropic_client: bool,
 ) -> JSONResponse | Response:
     headers = {**rl_headers, "x-gateway-provider": meter.cache_hit or "cache"}
+    # A hit consumes no tokens; report that the same way for streamed and plain answers.
+    hit = {**hit, "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
     if not body.stream:
         result = hit if anthropic_client else extensions.strip_response(hit)
         return JSONResponse(result, headers=headers)
@@ -1116,7 +1131,7 @@ async def reload(_: Admin) -> dict[str, object] | JSONResponse:
 @app.get("/admin/providers", response_model=None)
 async def provider_status(_: Admin) -> dict[str, object]:
     """Circuit-breaker state of every target used by an alias."""
-    targets = dict.fromkeys(t for a in config.registry.aliases.values() for t in a.targets)
+    targets = dict.fromkeys(sorted(config.registry.routable_targets()))
     return {"targets": {t: str(await router.store.state(t)) for t in targets}}
 
 
