@@ -192,7 +192,7 @@ To route Claude Code through the gateway:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8000
-export ANTHROPIC_AUTH_TOKEN=gw_...                 # a gateway key on a tier with a large tokens/min
+export ANTHROPIC_AUTH_TOKEN=gw_...                 # a gateway key (see the note on tokens/min below)
 export ANTHROPIC_MODEL=smart                        # gateway aliases, not Anthropic model IDs
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=fast
 claude
@@ -205,7 +205,13 @@ applies, including non-Claude models. Some features don't survive the translatio
 - **Extended thinking:** dropped.
 - **Rejected with a 400:** server tools (web search, code execution) and document blocks.
 
-`/v1/messages/count_tokens` returns the gateway's estimate, not an exact count.
+Claude Code asks for a large `max_tokens` (often 32 000) on every request. The rate limiter
+reserves the prompt plus `max_tokens` up front and returns the unused part when the request
+finishes, so a Claude Code key needs a tier with a tokens/min well above that, or a per-key
+`tokens_per_minute` override.
+
+`/v1/messages/count_tokens` returns the gateway's estimate, not an exact count. Each call counts
+as one request against the key's limit.
 [ADR 0010](docs/decisions/0010-anthropic-messages-inbound.md) has the details.
 
 ### What gets translated for Claude

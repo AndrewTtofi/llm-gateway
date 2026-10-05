@@ -7,7 +7,7 @@ Keep "Current state" short and always true.
 ## Current state
 - **Phase:** 8 — extensions. First: inbound Anthropic Messages API (`phase-8-messages-api`)
 - **Branch:** `phase-8-messages-api` · `v1.0.0` tagged + released on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
-- **Status:** `/v1/messages` + `count_tokens` done, tested with the real Anthropic SDK; Claude Code verified against the fake provider. `make test` 299
+- **Status:** `/v1/messages` + `count_tokens` done, tested with the real Anthropic SDK; Claude Code verified against the fake provider. `make test` 310
 - **Next up:** review + merge; then lossless prompt caching / thinking for Anthropic targets via `/v1/messages` (ADR 0010 consequences), or another Phase 8 extension
 - **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional

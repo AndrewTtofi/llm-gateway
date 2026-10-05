@@ -15,7 +15,9 @@ Pure functions and a stream encoder, no I/O.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import uuid
 from typing import Any
 
@@ -39,6 +41,7 @@ ERROR_TYPE = {
     413: "request_too_large",
     429: "rate_limit_error",
     503: "overloaded_error",
+    504: "timeout_error",
     529: "overloaded_error",
 }
 
@@ -46,7 +49,15 @@ EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 
 
 class InboundError(ValueError):
-    """The Messages request can't be expressed internally → 400 for the client."""
+    """The Messages request can't be expressed internally → 400 for the client.
+
+    The message may quote client values (a block type, a role), so it goes in the 400
+    body only. Logs get `field`, a fixed name chosen here.
+    """
+
+    def __init__(self, message: str, field: str = "request") -> None:
+        super().__init__(message)
+        self.field = field
 
 
 # --- request ---------------------------------------------------------------
@@ -59,13 +70,13 @@ def to_openai(body: dict[str, Any]) -> dict[str, Any]:
     except InboundError:
         raise
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
-        raise InboundError(f"malformed request: {type(exc).__name__}: {exc}") from exc
+        raise InboundError(f"malformed request: {type(exc).__name__}: {exc}", "malformed") from exc
 
 
 def _to_openai(body: dict[str, Any]) -> dict[str, Any]:
     for field in ("model", "max_tokens", "messages"):
         if field not in body:
-            raise InboundError(f"{field}: Field required")
+            raise InboundError(f"{field}: Field required", field)
     messages: list[dict[str, Any]] = []
     if system := _system_text(body.get("system")):
         messages.append({"role": "system", "content": system})
@@ -88,7 +99,8 @@ def _to_openai(body: dict[str, Any]) -> dict[str, Any]:
     if (choice := body.get("tool_choice")) is not None:
         out.update(_tool_choice(choice))
     if user := (body.get("metadata") or {}).get("user_id"):
-        out["user"] = str(user)
+        # Opaque and fixed-length for every provider (clients can send long ids).
+        out["user"] = hashlib.sha256(str(user).encode()).hexdigest()
     effort = (body.get("output_config") or {}).get("effort")
     if effort in EFFORTS:
         out["reasoning_effort"] = effort
@@ -110,7 +122,7 @@ def _message(msg: dict[str, Any]) -> list[dict[str, Any]]:
         # role; the outbound Claude adapter folds it into the top-level system prompt.
         return [{"role": "system", "content": _system_text(content)}]
     if role not in ("user", "assistant"):
-        raise InboundError(f"messages: role {role!r} is not supported")
+        raise InboundError(f"messages: role {role!r} is not supported", "messages.role")
     if isinstance(content, str):
         return [{"role": role, "content": content}]
     if role == "assistant":
@@ -144,7 +156,7 @@ def _user_part(block: dict[str, Any]) -> dict[str, Any]:
         return {"type": "text", "text": block["text"]}
     if kind == "image":
         return {"type": "image_url", "image_url": {"url": _image_url(block["source"])}}
-    raise InboundError(f"content block type {kind!r} is not supported")
+    raise InboundError(f"content block type {kind!r} is not supported", "content.type")
 
 
 def _image_url(source: dict[str, Any]) -> str:
@@ -152,7 +164,9 @@ def _image_url(source: dict[str, Any]) -> str:
         return f"data:{source['media_type']};base64,{source['data']}"
     if source.get("type") == "url":
         return str(source["url"])
-    raise InboundError(f"image source type {source.get('type')!r} is not supported")
+    raise InboundError(
+        f"image source type {source.get('type')!r} is not supported", "image.source.type"
+    )
 
 
 def _tool_result(content: Any) -> tuple[str, list[dict[str, Any]]]:
@@ -188,8 +202,15 @@ def _assistant(content: list[dict[str, Any]]) -> dict[str, Any]:
         elif kind in ("thinking", "redacted_thinking"):
             continue  # earlier reasoning: no OpenAI equivalent, and not needed to continue
         else:
-            raise InboundError(f"assistant content block type {kind!r} is not supported")
-    out: dict[str, Any] = {"role": "assistant", "content": "".join(texts) or None}
+            raise InboundError(
+                f"assistant content block type {kind!r} is not supported", "assistant.content.type"
+            )
+    # OpenAI rejects an assistant turn with neither content nor tool calls (e.g. one that
+    # held only thinking blocks), so that keeps an empty string.
+    out: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(texts) or (None if calls else ""),
+    }
     if calls:
         out["tool_calls"] = calls
     return out
@@ -199,7 +220,7 @@ def _tool(tool: dict[str, Any]) -> dict[str, Any]:
     if tool.get("type") not in (None, "custom"):
         # Server tools (web search, code execution, …) run inside Anthropic's API and
         # can't be routed to other providers.
-        raise InboundError(f"tool type {tool['type']!r} is not supported")
+        raise InboundError(f"tool type {tool['type']!r} is not supported", "tools.type")
     fn: dict[str, Any] = {
         "name": tool["name"],
         "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
@@ -223,7 +244,7 @@ def _tool_choice(choice: dict[str, Any]) -> dict[str, Any]:
     elif kind == "none":
         out = {"tool_choice": "none"}
     else:
-        raise InboundError(f"tool_choice type {kind!r} is not supported")
+        raise InboundError(f"tool_choice type {kind!r} is not supported", "tool_choice.type")
     if choice.get("disable_parallel_tool_use"):
         out["parallel_tool_calls"] = False
     return out
@@ -265,6 +286,8 @@ def from_openai(result: dict[str, Any]) -> dict[str, Any]:
     content: list[dict[str, Any]] = []
     if text := msg.get("content"):
         content.append({"type": "text", "text": text})
+    if refusal := msg.get("refusal"):
+        content.append({"type": "text", "text": refusal})
     for call in msg.get("tool_calls") or []:
         fn = call.get("function") or {}
         content.append(
@@ -282,7 +305,9 @@ def from_openai(result: dict[str, Any]) -> dict[str, Any]:
         "model": result.get("model", ""),
         "content": content,
         # OpenAI doesn't say which stop sequence matched, so it's always null.
-        "stop_reason": STOP_REASON.get(choice.get("finish_reason") or "", "end_turn"),
+        "stop_reason": "refusal"
+        if msg.get("refusal")
+        else STOP_REASON.get(choice.get("finish_reason") or "", "end_turn"),
         "stop_sequence": None,
         "usage": usage_from_openai(result.get("usage")),
     }
@@ -306,7 +331,9 @@ def convert_response(resp: JSONResponse) -> JSONResponse:
         content = from_openai(data)
     else:
         err = data.get("error") or {}
-        content = error_body(resp.status_code, str(err.get("message") or "error"))
+        # Budget exhausted: retrying won't help, unlike a rate limit (same 429 status).
+        type_ = "billing_error" if err.get("code") == "insufficient_quota" else None
+        content = error_body(resp.status_code, str(err.get("message") or "error"), type_)
     headers = {
         k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "content-type")
     }
@@ -326,20 +353,31 @@ class MessagesStream:
     Anthropic streams numbered content blocks, each opened, filled with deltas and
     closed: message_start, then content_block_start / content_block_delta… /
     content_block_stop per text or tool_use block, then message_delta (stop reason and
-    usage) and message_stop. OpenAI streams flat deltas; this opens a new block whenever
-    the kind of output changes (text → tool call, or one tool call → the next).
+    usage) and message_stop. OpenAI streams flat deltas; this opens a block whenever the
+    output changes kind (text ↔ tool calls) or a new tool call starts.
+
+    Tool-call blocks stay open until the tool calls end (finish reason, or text again),
+    then all close. Clients act on content_block_stop (an agent runs the tool), so a
+    block must not close while its arguments can still arrive — and some providers
+    interleave the arguments of parallel calls.
 
     Usage arrives in OpenAI's last chunk, after the finish reason, so message_delta
-    waits for the end of the stream.
+    waits for the end of the stream. `input_tokens` / `chars_per_token` give estimates
+    for message_start (the real count isn't known yet) and for providers that send no
+    usage at all.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, input_tokens: int = 0, chars_per_token: float = 4.0) -> None:
+        self.input_tokens = input_tokens
+        self.chars_per_token = chars_per_token
         self.started = False
-        self.index = -1  # current content block
-        self.open: str | int | None = None  # "text", an OpenAI tool-call index, or None
-        self.tool_blocks: dict[int, int] = {}  # OpenAI tool-call index → block index
+        self.index = -1  # last block opened
+        self.text_open = False
+        self.open_tools: list[int] = []  # block indices of open tool_use blocks
+        self.tools: dict[int, tuple[str | None, int]] = {}  # OpenAI index → (id, block)
         self.stop_reason: str | None = None
         self.usage: dict[str, Any] | None = None
+        self.chars = 0
 
     def _start(self, chunk: dict[str, Any]) -> list[str]:
         self.started = True
@@ -351,22 +389,25 @@ class MessagesStream:
             "content": [],
             "stop_reason": None,
             "stop_sequence": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},  # real numbers in message_delta
+            # An estimate: the provider's count arrives with message_delta.
+            "usage": {"input_tokens": self.input_tokens, "output_tokens": 0},
         }
         return [_event("message_start", {"message": message})]
 
-    def _close(self) -> list[str]:
-        if self.open is None:
+    def _close_text(self) -> list[str]:
+        if not self.text_open:
             return []
-        self.open = None
+        self.text_open = False
         return [_event("content_block_stop", {"index": self.index})]
 
-    def _open(self, block: dict[str, Any], kind: str | int) -> list[str]:
-        out = self._close()
-        self.index += 1
-        self.open = kind
-        out.append(_event("content_block_start", {"index": self.index, "content_block": block}))
+    def _close_tools(self) -> list[str]:
+        out = [_event("content_block_stop", {"index": i}) for i in self.open_tools]
+        self.open_tools.clear()
         return out
+
+    def _open(self, block: dict[str, Any]) -> list[str]:
+        self.index += 1
+        return [_event("content_block_start", {"index": self.index, "content_block": block})]
 
     def encode(self, chunk: dict[str, Any]) -> list[str]:
         out = [] if self.started else self._start(chunk)
@@ -375,8 +416,11 @@ class MessagesStream:
         for choice in chunk.get("choices") or []:
             delta = choice.get("delta") or {}
             if text := delta.get("content"):
-                if self.open != "text":
-                    out += self._open({"type": "text", "text": ""}, "text")
+                self.chars += len(text)
+                if not self.text_open:
+                    out += self._close_tools()
+                    out += self._open({"type": "text", "text": ""})
+                    self.text_open = True
                 out.append(
                     _event(
                         "content_block_delta",
@@ -387,37 +431,50 @@ class MessagesStream:
                 out += self._tool_delta(call)
             if reason := choice.get("finish_reason"):
                 self.stop_reason = STOP_REASON.get(reason, "end_turn")
+                out += self._close_text() + self._close_tools()
         return out
 
     def _tool_delta(self, call: dict[str, Any]) -> list[str]:
         out: list[str] = []
-        i = int(call.get("index") or 0)
+        i = call.get("index")
+        i = int(i) if isinstance(i, int) else len(self.tools)  # no index: a new call
         fn = call.get("function") or {}
-        if i not in self.tool_blocks:
+        known = self.tools.get(i)
+        # A different id at a known index is a new call too (providers that send every
+        # call as index 0); arguments without an id belong to the latest call there.
+        if known is None or (call.get("id") and call["id"] != known[0]):
+            out += self._close_text()
             block: dict[str, Any] = {
                 "type": "tool_use",
                 "id": call.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
                 "name": fn.get("name") or "",
                 "input": {},
             }
-            out += self._open(block, i)
-            self.tool_blocks[i] = self.index
+            out += self._open(block)
+            self.tools[i] = (call.get("id"), self.index)
+            self.open_tools.append(self.index)
         if args := fn.get("arguments"):
-            # Providers stream one tool call after another; arguments for an earlier
-            # call are still sent to its own block index.
+            self.chars += len(args)
             delta = {"type": "input_json_delta", "partial_json": args}
-            out.append(
-                _event("content_block_delta", {"index": self.tool_blocks[i], "delta": delta})
-            )
+            out.append(_event("content_block_delta", {"index": self.tools[i][1], "delta": delta}))
         return out
+
+    def _final_usage(self) -> dict[str, int]:
+        if self.usage is not None:
+            return usage_from_openai(self.usage)
+        # The provider sent no usage: report the same estimates the meter bills.
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": math.ceil(self.chars / self.chars_per_token),
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
 
     def end(self) -> list[str]:
         out = [] if self.started else self._start({})
-        out += self._close()
+        out += self._close_text() + self._close_tools()
         delta = {"stop_reason": self.stop_reason or "end_turn", "stop_sequence": None}
-        out.append(
-            _event("message_delta", {"delta": delta, "usage": usage_from_openai(self.usage)})
-        )
+        out.append(_event("message_delta", {"delta": delta, "usage": self._final_usage()}))
         out.append(_event("message_stop", {}))
         return out
 

@@ -117,7 +117,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await services.stop()
 
 
-app = FastAPI(title="LLM Gateway", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="LLM Gateway", version="1.1.0", lifespan=lifespan)
 
 
 class RequestContext:
@@ -177,7 +177,8 @@ async def metrics_endpoint() -> Response:
 
 
 def _anthropic_client(request: Request) -> bool:
-    return request.url.path.startswith("/v1/messages")
+    path = request.url.path
+    return path == "/v1/messages" or path.startswith("/v1/messages/")
 
 
 @app.exception_handler(HTTPException)
@@ -328,9 +329,12 @@ async def messages(
     body = await _messages_body(request)
     if isinstance(body, JSONResponse):
         return body
-    resp = await _chat(
-        body, request, key, fmt=messages_api.MessagesStream() if body.stream else None
-    )
+    fmt = None
+    if body.stream:
+        cpt = config.limits.estimation.chars_per_token
+        prompt = estimate_prompt_tokens(body.model_dump()["messages"], cpt)
+        fmt = messages_api.MessagesStream(input_tokens=prompt, chars_per_token=cpt)
+    resp = await _chat(body, request, key, fmt=fmt)
     # Streams are already written as Anthropic events; JSON answers and errors convert here.
     return messages_api.convert_response(resp) if isinstance(resp, JSONResponse) else resp
 
@@ -346,6 +350,17 @@ async def count_tokens(request: Request, key: Authenticated) -> dict[str, int] |
         oai = messages_api.to_openai({"max_tokens": 1, **raw})
     except messages_api.InboundError as exc:
         return messages_api.error_response(400, str(exc))
+    lim = key_limits(key)
+    if not lim.allows(str(oai["model"])):
+        metrics.rejected.labels("model_not_allowed").inc()
+        return messages_api.error_response(403, f"This key may not use model '{oai['model']}'")
+    # Free upstream, but not free here: it counts as a request (no tokens) like any other.
+    verdict = await services.limiter.take(key.id, lim.requests_per_minute, lim.tokens_per_minute, 0)
+    if not verdict.allowed:
+        metrics.rejected.labels("rate_limit").inc()
+        return messages_api.error_response(
+            429, "Rate limit reached for this key.", headers=verdict.headers()
+        )
     cpt = config.limits.estimation.chars_per_token
     tools = len(json.dumps(oai.get("tools") or [])) / cpt
     return {"input_tokens": estimate_prompt_tokens(oai["messages"], cpt) + int(tools)}
@@ -368,8 +383,8 @@ async def _messages_body(request: Request) -> ChatCompletionRequest | JSONRespon
     try:
         return ChatCompletionRequest.model_validate(messages_api.to_openai(raw))
     except messages_api.InboundError as exc:
-        # Names the unsupported field or block type; never request content.
-        log.warning("messages request rejected: %s", str(exc)[:200])
+        # A fixed field name only: the message itself may quote client input.
+        log.warning("messages request rejected: unsupported %s", exc.field)
         return messages_api.error_response(400, str(exc))
     except ValidationError as exc:
         err = exc.errors()[0]  # a ValidationError always has at least one

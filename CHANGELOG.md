@@ -9,11 +9,14 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-05 (Phase 8 — Anthropic Messages API)
+
 ### Added
 - `POST /v1/messages`: the Anthropic Messages API, for the Anthropic SDKs and Claude Code. It's translated at the edge into the internal format, so fallback, limits, budgets and metering all apply, and it can fall back to non-Anthropic models. Responses, stream events and errors come back in Anthropic's format (ADR 0010)
 - `POST /v1/messages/count_tokens` (the gateway's estimate)
 - `x-api-key` accepted as an alternative to `Authorization: Bearer`
 - Streams can be written in more than one wire format (`StreamFormat`; OpenAI by default)
+- `/v1/messages` streams keep tool-call blocks open until the calls end (interleaved arguments stay correct). Rejections log a field name only. `count_tokens` is rate-limited. Budget 429s have type `billing_error`. `metadata.user_id` is hashed. Refusals are mapped
 
 ## [1.0.0] - 2026-10-05 (Phase 7 — ship it)
 
