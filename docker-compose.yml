@@ -40,7 +40,15 @@ services:
     ports: ["3000:3000"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
-    volumes: [grafana:/var/lib/grafana]
+      GRAFANA_PG_USER: gateway          # dev only: use a read-only role in production
+      GRAFANA_PG_PASSWORD: gateway
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus: { condition: service_started }
+      postgres: { condition: service_healthy }
 
 volumes:
   pgdata:

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app import config
 from app.auth import CachedKeys, MemoryKeyStore, PostgresKeyStore
 from app.db import make_engine, make_sessions
+from app.observability.usage import MemoryUsageSink, PostgresUsageWriter, UsageSink
 from app.ratelimit import (
     Limiter,
     MemoryLimiter,
@@ -29,13 +30,15 @@ from app.routing.breaker import MemoryBreakerStore, RedisBreakerStore
 keys: CachedKeys = CachedKeys(MemoryKeyStore())
 limiter: Limiter = MemoryLimiter()
 spend: SpendTracker = MemorySpend()
+usage: UsageSink = MemoryUsageSink()
+_writer: PostgresUsageWriter | None = None
 
 _redis: Redis | None = None
 _engine: AsyncEngine | None = None
 
 
 async def start() -> None:
-    global keys, limiter, spend, _redis, _engine
+    global keys, limiter, spend, usage, _redis, _engine, _writer
     if config.settings.gateway_stores == "memory":
         router.store = MemoryBreakerStore()
         return
@@ -44,7 +47,11 @@ async def start() -> None:
         config.settings.redis_url, socket_timeout=timeout, socket_connect_timeout=timeout
     )
     _engine = make_engine(config.settings.database_url, timeout=config.settings.db_timeout_seconds)
-    keys = CachedKeys(PostgresKeyStore(make_sessions(_engine)))
+    sessions = make_sessions(_engine)
+    keys = CachedKeys(PostgresKeyStore(sessions))
+    _writer = PostgresUsageWriter(sessions)
+    _writer.start()
+    usage = _writer
     limiter = RedisLimiter(_redis)
     spend = RedisSpend(_redis)
     router.store = (
@@ -55,7 +62,10 @@ async def start() -> None:
 
 
 async def stop() -> None:
-    global _redis, _engine
+    global _redis, _engine, _writer
+    if _writer is not None:
+        await _writer.stop()  # flush queued usage rows before the engine goes
+        _writer = None
     if _redis is not None:
         await _redis.aclose()
         _redis = None

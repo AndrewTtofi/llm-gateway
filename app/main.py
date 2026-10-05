@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import secrets
 import signal
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -19,12 +21,15 @@ import anyio
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import config, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
+from app.observability import logging as obs_log
+from app.observability import metrics
 from app.providers.base import ProviderAdapter
 from app.ratelimit import estimate_prompt_tokens
 from app.routing import router
@@ -50,20 +55,107 @@ def reload_from_signal() -> None:
         log.exception("config reload on SIGHUP failed; keeping the previous config")
 
 
+async def poll_breakers(interval: float = 15.0) -> None:
+    """Keep gateway_circuit_state current (the state lives in Redis, shared). Targets
+    removed by a config reload are dropped, so they don't linger as "open"."""
+    known: set[str] = set()
+    while True:
+        try:
+            targets = {t for a in config.registry.aliases.values() for t in a.chain}
+            for gone in known - targets:
+                with contextlib.suppress(KeyError):
+                    metrics.breaker.remove(gone)
+            known = targets
+            for t in targets:
+                with contextlib.suppress(Exception):
+                    state = await router.store.state(t)
+                    metrics.breaker.labels(t).set(metrics.BREAKER_VALUE.get(str(state), 0))
+        except Exception:
+            log.exception("breaker poll failed")
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    obs_log.configure(config.settings.log_level)
     await services.start()
+    poller = asyncio.create_task(poll_breakers())
+    metrics_server = None
+    if config.settings.metrics_port:
+        # Separate port: /metrics can be firewalled off while the API stays public.
+        metrics_server, _metrics_thread = start_http_server(
+            config.settings.metrics_port, registry=metrics.registry
+        )
     loop = asyncio.get_running_loop()
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.add_signal_handler(signal.SIGHUP, reload_from_signal)  # `kill -HUP <pid>`
     yield
+    poller.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await poller
+    if metrics_server is not None:
+        metrics_server.shutdown()
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.remove_signal_handler(signal.SIGHUP)
     await providers.pool.aclose()
     await services.stop()
 
 
-app = FastAPI(title="LLM Gateway", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="LLM Gateway", version="0.5.0", lifespan=lifespan)
+
+
+class RequestContext:
+    """Pure ASGI middleware: request id (in logs, usage rows and `x-request-id`) and one
+    access line per HTTP request. Pure ASGI rather than BaseHTTPMiddleware, which wraps
+    `receive` and would break disconnect detection on streams."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.inner(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        incoming = headers.get(b"x-request-id", b"").decode("latin-1")
+        rid = obs_log.new_request_id(incoming)
+        token = obs_log.request_id.set(rid)
+        start, status = time.perf_counter(), 0
+
+        async def send_with_id(message: Any) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                message.setdefault("headers", []).append((b"x-request-id", rid.encode()))
+            await send(message)
+
+        try:
+            await self.inner(scope, receive, send_with_id)
+        except BaseException:
+            status = status or 500  # crashed before a response went out
+            raise
+        finally:
+            if not str(scope.get("path", "")).startswith(("/metrics", "/healthz")):
+                obs_log.access.info(
+                    "http",
+                    method=scope.get("method"),
+                    path=scope.get("path"),
+                    status=status,
+                    ms=round((time.perf_counter() - start) * 1000),
+                )
+            obs_log.request_id.reset(token)
+
+
+app.add_middleware(RequestContext)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint() -> Response:
+    """Only when metrics_port is 0 (single-port setups, tests). Otherwise metrics are on
+    their own port and this is a 404, so the public API doesn't expose them."""
+    if config.settings.metrics_port:
+        return Response(status_code=404)
+    return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.exception_handler(HTTPException)
@@ -116,6 +208,7 @@ async def require_key(authorization: Annotated[str, Header()] = "") -> ApiKey:
             },
         ) from exc
     if key is None:
+        metrics.rejected.labels("unauthenticated").inc()
         raise HTTPException(
             401,
             detail={
@@ -178,6 +271,7 @@ async def chat_completions(
 ) -> JSONResponse | StreamingResponse | Response:
     lim = key_limits(key)
     if not lim.allows(body.model):
+        metrics.rejected.labels("model_not_allowed").inc()
         return error_response(
             403,
             f"This key may not use model '{body.model}'",
@@ -188,6 +282,7 @@ async def chat_completions(
 
     # Budget: checked before the call against month-to-date spend (ADR 0007).
     if await services.spend.spent(key.id) >= lim.monthly_budget_usd:
+        metrics.rejected.labels("budget").inc()
         return error_response(
             429,
             "Monthly budget for this key is exhausted.",
@@ -205,6 +300,7 @@ async def chat_completions(
     )
     rl_headers = verdict.headers()
     if not verdict.allowed:
+        metrics.rejected.labels("rate_limit").inc()
         return error_response(
             429,
             "Rate limit reached for this key. Retry after the `retry-after` header.",
@@ -215,11 +311,22 @@ async def chat_completions(
 
     client_wants_usage = bool(body.stream_options and body.stream_options.include_usage)
     meter = Meter(
-        key, lim, services.limiter, services.spend, estimate, prompt_estimate, client_wants_usage
+        key,
+        lim,
+        services.limiter,
+        services.spend,
+        estimate,
+        prompt_estimate,
+        client_wants_usage,
+        sink=services.usage,
+        alias=body.model,
+        streamed=body.stream,
     )
     try:
         chain = config.registry.resolve(body.model)
     except KeyError:
+        meter.status, meter.error_code = 404, "model_not_found"
+        meter.alias_label = "_unknown"  # never a client-chosen string as a metric label
         await meter.settle()
         return _unknown(body)
     await meter.reserve(chain[0])  # hold the estimated cost against the budget now
@@ -241,6 +348,19 @@ async def _settle(meter: Meter) -> None:
         log.exception("usage accounting failed")
 
 
+async def _settle_shielded(meter: Meter) -> None:
+    with anyio.CancelScope(shield=True):
+        await _settle(meter)
+
+
+def _code_of(resp: JSONResponse) -> str | None:
+    try:
+        code = json.loads(bytes(resp.body))["error"]["code"]
+        return str(code) if code is not None else None
+    except ValueError, KeyError, TypeError:
+        return None
+
+
 def _unknown(body: ChatCompletionRequest) -> JSONResponse:
     return error_response(
         404, f"The model '{body.model}' does not exist", code="model_not_found", param="model"
@@ -254,20 +374,33 @@ async def _complete(
     try:
         try:
             result, routed = await cancel_on_disconnect(request, router.route_chat(body, routed))
-        except UnknownModel:
+        except UnknownModel:  # the model vanished in a config reload mid-request
+            meter.status, meter.error_code = 404, "model_not_found"
+            meter.alias_label = "_unknown"
             return _unknown(body)
         except AllTargetsFailed as exc:
             resp = routing_error_response(exc)
             resp.headers.update(rl_headers)
+            meter.routed(exc.routed)
+            meter.status, meter.error_code = resp.status_code, _code_of(resp)
             return resp
         except ClientDisconnected:
             # The provider already has the prompt (and may still be generating): bill
             # at least the prompt to whoever was working on it, so hanging up isn't free.
             meter.target = routed.current or None
+            meter.routed(routed)
+            meter.status, meter.error_code = 499, "client_disconnected"
             return Response(status_code=499)  # nobody left to answer
+        except BaseException:
+            meter.status, meter.error_code = 500, "gateway_error"  # bug or shutdown
+            raise
         meter.target = routed.target
+        meter.routed(routed)
         meter.observe_completion(result)
         return JSONResponse(result, headers={**routed.headers(), **rl_headers})
+    except BaseException:
+        meter.status, meter.error_code = 500, "gateway_error"  # bug or shutdown
+        raise
     finally:
         with anyio.CancelScope(shield=True):
             await _settle(meter)
@@ -287,20 +420,30 @@ async def _stream(
     except BaseException as exc:
         # Nothing was streamed. Settle now (shielded: we may be cancelled) — after this
         # point the SSEResponse owns settling.
+        meter.routed(getattr(exc, "routed", routed))
+        meter.status, meter.error_code = 500, "gateway_error"
         if isinstance(exc, ClientDisconnected):
             meter.target = routed.current or None  # bill the prompt, as for non-streams
-        with anyio.CancelScope(shield=True):
-            await _settle(meter)
+            meter.status, meter.error_code = 499, "client_disconnected"
+        if isinstance(exc, UnknownModel):
+            meter.status, meter.error_code = 404, "model_not_found"
+            meter.alias_label = "_unknown"
+        if not isinstance(exc, AllTargetsFailed):  # that path settles after its status
+            await _settle_shielded(meter)
         if isinstance(exc, UnknownModel):
             return _unknown(body)
         if isinstance(exc, AllTargetsFailed):
             resp = routing_error_response(exc)
             resp.headers.update(rl_headers)
+            meter.status, meter.error_code = resp.status_code, _code_of(resp)
+            await _settle_shielded(meter)
             return resp
         if isinstance(exc, ClientDisconnected):
             return Response(status_code=499)
         raise
     meter.target = routed.target
+    meter.routed(routed)
+    meter.first_chunk_at = time.perf_counter()  # the first chunk was pulled before the 200
     return SSEResponse(
         relay_sse(first, chunks, meter),
         upstream=chunks,

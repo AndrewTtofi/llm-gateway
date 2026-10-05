@@ -1,12 +1,13 @@
 # USD per 1M tokens. Fill from each provider's current pricing page —
 # prices change, so check them whenever you add or swap a model.
 # Unknown models are logged with cost = null and a warning.
+# cached_input: price for prompt-cache reads (omit → billed as normal input).
 # Last checked: 2026-10-05 (Anthropic + OpenAI standard tier, short context).
 currency: USD
 models:
-  anthropic/claude-opus-5-5:           { input: 4.00,  output: 20.00 }
-  anthropic/claude-sonnet-5-5:         { input: 2.00,  output: 10.00 }
-  anthropic/claude-haiku-4-5-20251001: { input: 1.00,  output: 5.00 }
+  anthropic/claude-opus-5-5:           { input: 4.00,  output: 20.00, cached_input: 0.20 }  # published: 5% for Opus 5.5
+  anthropic/claude-sonnet-5-5:         { input: 2.00,  output: 10.00, cached_input: 0.20 }
+  anthropic/claude-haiku-4-5-20251001: { input: 1.00,  output: 5.00,  cached_input: 0.10 }  # standard 0.1× input — verify
   openai/gpt-6-astra:                  { input: 10.00, output: 50.00 }  # >272K input billed higher
   openai/gpt-6.1-sol:                  { input: 2.00,  output: 10.00 }  # >272K input billed higher
   openai/gpt-6-luna:                   { input: 0.10,  output: 0.50 }

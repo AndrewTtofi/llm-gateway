@@ -31,7 +31,7 @@ for chunk in resp:
 | Model aliases + hot-reloadable config | ✅ |
 | Retries, fallback chains, circuit breakers | ✅ |
 | Per-key request + token rate limits, USD budgets | ✅ |
-| Cost tracking, Prometheus metrics, Grafana dashboard | Phase 5 |
+| Cost tracking, Prometheus metrics, Grafana dashboard | ✅ |
 | Load + chaos test results | Phase 6 |
 
 ## Architecture
@@ -91,6 +91,18 @@ curl -s localhost:8000/admin/providers -H "Authorization: Bearer $GATEWAY_ADMIN_
 ```
 `chaos-blip` has a primary that is down 20 s of every minute — keep sending requests and
 watch its breaker open, go half-open and close again.
+
+## Observability
+
+Open **Grafana → LLM Gateway** (http://localhost:3000, admin/admin): spend per key
+(from the Postgres usage log), p95 latency per provider, time to first token, fallback
+and error rates, circuit-breaker states, tokens and cost per model, rejections.
+
+- `/metrics` — Prometheus, `gateway_*` metrics (labelled by alias/target, never by key)
+- `usage_log` table — one row per request, for exact per-key reports
+- JSON logs with `request_id`, also returned as `x-request-id`; no prompt content, ever
+
+The dashboard is code: edit `config/grafana/build_dashboard.py`, run it, commit both.
 
 ## Changing models
 

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app import config, main, providers, services
 from app.auth import ApiKey, CachedKeys, MemoryKeyStore, generate_key, hash_key
 from app.config import Registry
+from app.observability.usage import MemoryUsageSink
 from app.providers import AdapterPool
 from app.ratelimit import MemoryLimiter, MemorySpend
 from app.routing import router
@@ -42,9 +43,11 @@ def add_key(tier: str = "dev", **overrides: object) -> str:
 def api_key(monkeypatch: pytest.MonkeyPatch) -> str:
     """Every test: in-memory stores (never the real Redis/Postgres) and one unlimited key."""
     monkeypatch.setattr(config.settings, "gateway_stores", "memory")
+    monkeypatch.setattr(config.settings, "metrics_port", 0)  # /metrics on the app, no port
     monkeypatch.setattr(services, "keys", CachedKeys(MemoryKeyStore()))
     monkeypatch.setattr(services, "limiter", MemoryLimiter())
     monkeypatch.setattr(services, "spend", MemorySpend())
+    monkeypatch.setattr(services, "usage", MemoryUsageSink())
     return add_key(**UNLIMITED)
 
 

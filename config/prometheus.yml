@@ -3,4 +3,4 @@ global:
 scrape_configs:
   - job_name: gateway
     static_configs:
-      - targets: ["gateway:8000"]
+      - targets: ["gateway:9100"]   # metrics port, not the public API port

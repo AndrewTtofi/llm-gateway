@@ -1,0 +1,615 @@
+{
+  "uid": "llm-gateway",
+  "title": "LLM Gateway",
+  "tags": [
+    "llm-gateway"
+  ],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "editable": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Requests / s",
+      "description": "",
+      "gridPos": {
+        "w": 4,
+        "h": 4,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_requests_total[$__rate_interval]))",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Fallback rate",
+      "description": "Share of requests served by a target other than the alias's first choice.",
+      "gridPos": {
+        "w": 4,
+        "h": 4,
+        "x": 4,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "(sum(rate(gateway_fallbacks_total[$__rate_interval])) or vector(0)) / sum(rate(gateway_requests_total[$__rate_interval]))",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Error rate",
+      "description": "5xx and in-band stream failures. Excludes client errors (4xx).",
+      "gridPos": {
+        "w": 4,
+        "h": 4,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "(sum(rate(gateway_requests_total{status=~\"5.*|200:.*\",status!~\".*client_disconnected\"}[$__rate_interval])) or vector(0)) / sum(rate(gateway_requests_total[$__rate_interval]))",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "p95 latency",
+      "description": "",
+      "gridPos": {
+        "w": 4,
+        "h": 4,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_request_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Spend this month",
+      "description": "",
+      "gridPos": {
+        "w": 4,
+        "h": 4,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "gw-postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT coalesce(sum(cost_usd), 0) AS spend FROM usage_log WHERE created_at >= date_trunc('month', now())",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "gw-postgres"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Usage rows dropped",
+      "description": "Usage-log rows lost because Postgres was slow or down. Should be 0.",
+      "gridPos": {
+        "w": 4,
+        "h": 4,
+        "x": 20,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(gateway_usage_log_dropped_total) or vector(0)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "p95 latency per provider",
+      "description": "Whole request; for streams, until the last token.",
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, provider) (label_replace(rate(gateway_request_duration_seconds_bucket[$__rate_interval]), \"provider\", \"$1\", \"target\", \"([^/]+)/.*\")))",
+          "legendFormat": "{{provider}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "p95 time to first token per target",
+      "description": "Streams: how long users stare at an empty response.",
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, target) (rate(gateway_ttft_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{target}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Requests / s by target and status",
+      "description": "",
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (target, status) (rate(gateway_requests_total[$__rate_interval]))",
+          "legendFormat": "{{target}} {{status}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Fallback rate by alias",
+      "description": "",
+      "gridPos": {
+        "w": 12,
+        "h": 8,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (alias) (rate(gateway_fallbacks_total[$__rate_interval])) / sum by (alias) (rate(gateway_requests_total[$__rate_interval]))",
+          "legendFormat": "{{alias}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "state-timeline",
+      "title": "Circuit breakers",
+      "description": "0 closed \u00b7 1 half-open (probing) \u00b7 2 open (target skipped).",
+      "gridPos": {
+        "w": 12,
+        "h": 7,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max by (target) (gateway_circuit_state)",
+          "legendFormat": "{{target}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "closed",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "half-open",
+                  "color": "yellow"
+                },
+                "2": {
+                  "text": "open",
+                  "color": "red"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never"
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Upstream attempts by outcome",
+      "description": "Every upstream call, including retries that preceded a fallback.",
+      "gridPos": {
+        "w": 12,
+        "h": 7,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (target, outcome) (rate(gateway_upstream_attempts_total[$__rate_interval]))",
+          "legendFormat": "{{target}} {{outcome}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Tokens / min by target",
+      "description": "",
+      "gridPos": {
+        "w": 8,
+        "h": 8,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (target, kind) (rate(gateway_tokens_total{kind!=\"cached\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{target}} {{kind}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Spend / hour by target",
+      "description": "",
+      "gridPos": {
+        "w": 8,
+        "h": 8,
+        "x": 8,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (target) (rate(gateway_cost_usd_total[$__rate_interval])) * 3600",
+          "legendFormat": "{{target}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Rejected requests by reason",
+      "description": "Before routing: bad key, model not allowed, rate limit, budget.",
+      "gridPos": {
+        "w": 8,
+        "h": 8,
+        "x": 16,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(gateway_rejected_total[$__rate_interval]))",
+          "legendFormat": "{{reason}}",
+          "range": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "table",
+      "title": "Spend per key \u2014 this month",
+      "description": "Exact, from the usage log (ADR 0008).",
+      "gridPos": {
+        "w": 12,
+        "h": 9,
+        "x": 0,
+        "y": 35
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "gw-postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT coalesce(k.name, u.key_prefix) AS key, u.key_prefix AS prefix, count(*) AS requests, sum(u.prompt_tokens + u.completion_tokens) AS tokens, round(sum(coalesce(u.cost_usd, 0))::numeric, 4) AS spend_usd, round(avg(u.latency_ms)) AS avg_ms, round(100.0 * avg(CASE WHEN u.fallback THEN 1 ELSE 0 END), 1) AS fallback_pct FROM usage_log u LEFT JOIN api_keys k ON k.id = u.key_id WHERE u.created_at >= date_trunc('month', now()) GROUP BY 1, 2 ORDER BY spend_usd DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "gw-postgres"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Spend per key over time",
+      "description": "",
+      "gridPos": {
+        "w": 12,
+        "h": 9,
+        "x": 12,
+        "y": 35
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "gw-postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT $__timeGroupAlias(u.created_at, $__interval), coalesce(k.name, u.key_prefix) AS metric, sum(coalesce(u.cost_usd, 0)) AS value FROM usage_log u LEFT JOIN api_keys k ON k.id = u.key_id WHERE $__timeFilter(u.created_at) GROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "gw-postgres"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

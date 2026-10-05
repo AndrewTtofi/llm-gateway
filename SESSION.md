@@ -5,16 +5,40 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 4 — Rate limiting + API keys (`phase-4-ratelimit`, PR → `v0.4.0` on merge)
-- **Branch:** `phase-4-ratelimit` · `v0.3.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
-- **Status:** Phase 4 DoD met on the live stack: 30 concurrent clients, 120 rpm key → 140 allowed vs 140 expected (±0%), 5712 rate-limited; $0.05 budget blocks after $0.052 and stays blocked. `make test` 231, `make test-e2e` 5, `make test-live` 4
-- **Next up:** review + merge Phase 4 → `v0.4.0`; then Phase 5 (usage log in Postgres, Prometheus metrics, Grafana dashboard)
+- **Phase:** 5 — Observability + cost (`phase-5-observability`, PR → `v0.5.0` on merge)
+- **Branch:** `phase-5-observability` · `v0.4.0` tagged on main · remote `github.com/AndrewTtofi/llm-gateway` (**public**; old private repo archived as `llm-gateway-archive`)
+- **Status:** Phase 5 DoD met: Grafana dashboard provisioned; all 17 panels return data on the live stack — spend per key (team-a $0.22 / team-b $0.11 from the usage log), p95 latency per provider (anthropic, fake, ollama), fallback rate 41%. `make test` 259
+- **Next up:** review + merge Phase 5 → `v0.5.0`; then Phase 6 (k6/Locust load tests, chaos scenarios, gateway overhead, docs/RESULTS.md)
 - **Blockers:** none. Owner: rotate the Anthropic key (it was pasted in chat); `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
 - **Open questions:** none
 
 ---
 
 ## Session log
+
+### 2026-10-05 — Session 8
+**Did**
+- Phase 5: usage_log (Postgres, background batch writer), Prometheus metrics (bounded labels),
+  Grafana dashboard as code + provisioned datasources, JSON logs with request ids,
+  cached-token pricing. ADR 0008. Demo keys `team-a`, `team-b` left in the dev DB so the
+  dashboard has data
+
+- code-reviewer pass: 2 blockers (unknown models recorded as 200 with the client's model
+  string as a metric label → unbounded series; one oversized value sank a 100-row batch)
+  + 11 should-fix (shutdown lost the in-progress batch, failures flagged as fallbacks,
+  mid-stream disconnects as clean 200s, fallback latency blamed on the healthy provider,
+  /metrics on the public port, …). All fixed with tests; usage_log.id → BIGINT
+- Re-verified: all 17 panels return data after 400 mixed requests
+
+**Decided**
+- Spend per key from Postgres (exact, unbounded keys), not Prometheus labels (cardinality)
+- Usage writes never block requests: queue + batch, drop and count when Postgres is slow/down
+- Pure ASGI middleware for request ids (BaseHTTPMiddleware would break disconnect detection)
+
+**Learned**
+- Grafana's /api/ds/query runs a panel's real queries: a good DoD check that a dashboard
+  shows data, not just that it loads
+
 
 ### 2026-10-05 — Session 7
 **Did**

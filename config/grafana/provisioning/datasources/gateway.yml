@@ -1,0 +1,20 @@
+# Provisioned on Grafana start (ADR 0008). Prometheus: operational metrics.
+# Postgres: the usage log (exact spend per key). Dev credentials; use a read-only
+# database role in production.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: gw-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData: { timeInterval: 15s }
+  - name: Usage log (Postgres)
+    uid: gw-postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: ${GRAFANA_PG_USER}
+    secureJsonData: { password: "${GRAFANA_PG_PASSWORD}" }
+    jsonData: { database: gateway, sslmode: disable, postgresVersion: 1500 }
