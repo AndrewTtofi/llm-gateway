@@ -25,7 +25,7 @@ Keep "Current state" short and always true.
 - Kept Redis 7 / Postgres 16 / Python 3.12 majors; Postgres 18 needs a pgdata migration — separate decision
 - Standard pip-tools layout (`.in` → `.txt`) so Dependabot can regenerate locks
 
-- Merged PR #1. Then major upgrades on `chore/major-upgrades`: Python 3.14.8, Redis 8.8.3, Postgres 18.6
+- Merged PR #1. Then major upgrades on `chore/major-upgrades`: Python 3.14.8, Redis 8.10.2 (8.8.3 in #5, then Dependabot #2), Postgres 18.6
 - Postgres 18 image stores data under `/var/lib/postgresql/18/docker`; mount moved to `/var/lib/postgresql`.
   Old PG16 volume had 0 tables — dumped (`pg_dumpall`) then removed and recreated
 - Local `.venv` rebuilt on Python 3.14.8 (via `uv python install`, no system changes)

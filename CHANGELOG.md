@@ -21,7 +21,7 @@ Version plan: each completed phase bumps the minor version
 
 ### Changed
 - Python 3.12 → **3.14** (`python:3.14.8-slim`, CI, ruff/mypy targets, `requires-python`); lockfiles recompiled, same pins
-- Redis 7.4 → **8.8** (`redis:8.8.3-alpine`)
+- Redis 7.4 → **8.10** (`redis:8.10.2-alpine`, via Dependabot #2)
 - Postgres 16 → **18** (`postgres:18.6-alpine`); volume now mounts at `/var/lib/postgresql` (PG18 image layout). Existing dev volumes must be recreated — see SESSION.md
 - CI runs on push to `main` and on PRs (no more duplicate runs per PR)
 - Dependencies locked with pip-tools: `requirements*.in` (direct deps) → hashed `requirements*.txt`; Docker and CI install with `--require-hashes`
