@@ -1,0 +1,63 @@
+# Model registry — the ONLY place models are named.
+# Change a model: edit here, then `make reload` (no restart, no code change).
+# Verify current model IDs in each provider's docs before adding them.
+
+providers:
+  anthropic:
+    type: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    timeouts: { connect: 5, first_token: 30, total: 300 }
+  openai:
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    timeouts: { connect: 5, first_token: 30, total: 300 }
+  ollama:
+    type: openai          # Ollama exposes an OpenAI-compatible API
+    base_url: ${OLLAMA_BASE_URL}
+    api_key_env: null
+    timeouts: { connect: 2, first_token: 60, total: 600 }
+  fake:                   # chaos/test provider, never used in prod aliases
+    type: fake
+    failure_rate: 0.3
+    latency_ms: [50, 2000]
+
+# Aliases are what clients send as `model`. Each is an ordered fallback chain.
+aliases:
+  fast:
+    chain:
+      - anthropic/claude-haiku-4-5-20251001
+      - openai/gpt-6-luna
+      - ollama/llama3.2:3b
+  smart:
+    chain:
+      - anthropic/claude-opus-5-5
+      - anthropic/claude-sonnet-5-5
+      - openai/gpt-6-astra
+  balanced:
+    chain:
+      - anthropic/claude-sonnet-5-5
+      - openai/gpt-6.1-sol
+      - ollama/llama3.2:3b
+  local:
+    chain:
+      - ollama/llama3.2:3b
+  chaos:
+    chain:
+      - fake/flaky
+      - ollama/llama3.2:3b
+
+# Allow clients to request `provider/model` directly (bypassing aliases)?
+allow_direct_models: true
+
+retry:
+  max_attempts_per_provider: 2
+  backoff_base_ms: 250
+  backoff_max_ms: 4000
+  retry_on_status: [408, 409, 429, 500, 502, 503, 504, 529]
+
+circuit_breaker:
+  failure_threshold: 5      # failures within window to open
+  window_seconds: 60
+  open_seconds: 30          # then half-open, one probe request

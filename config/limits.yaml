@@ -1,0 +1,12 @@
+# Default limits per API key tier. Individual keys can override in the DB.
+tiers:
+  dev:
+    requests_per_minute: 60
+    tokens_per_minute: 50000
+    monthly_budget_usd: 10
+    allowed_aliases: [fast, local, chaos]
+  standard:
+    requests_per_minute: 300
+    tokens_per_minute: 200000
+    monthly_budget_usd: 100
+    allowed_aliases: [fast, balanced, smart, local]

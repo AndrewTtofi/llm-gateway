@@ -1,0 +1,44 @@
+services:
+  gateway:
+    build: .
+    env_file: .env
+    ports: ["8000:8000"]
+    volumes:
+      - ./config:/app/config:ro      # edit YAML on host, `make reload` picks it up
+      - ./app:/app/app               # live code reload in dev
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    extra_hosts: ["host.docker.internal:host-gateway"]   # reach Ollama on host
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, retries: 10 }
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U gateway"], interval: 5s, retries: 10 }
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes: ["./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes: [grafana:/var/lib/grafana]
+
+volumes:
+  pgdata:
+  grafana:

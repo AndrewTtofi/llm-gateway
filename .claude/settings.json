@@ -1,0 +1,11 @@
+{
+  "model": "sonnet",
+  "permissions": {
+    "allow": [
+      "Bash(make test)", "Bash(make lint)", "Bash(make fmt)", "Bash(pytest:*)",
+      "Bash(git status)", "Bash(git diff:*)", "Bash(git log:*)",
+      "Bash(docker compose ps)", "Bash(docker compose logs:*)"
+    ],
+    "deny": ["Read(.env)", "Bash(cat .env)"]
+  }
+}
