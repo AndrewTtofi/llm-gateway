@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # The chaos provider (type: fake) and every alias using it only load when this is
     # set — the dev compose stack sets it; production must not.
     gateway_enable_fake: bool = False
+    # external = Redis + Postgres (default). memory = everything in-process: tests, or a
+    # quick single-process run without the stack. Keys and limits then die with the process.
+    gateway_stores: Literal["external", "memory"] = "external"
+    db_timeout_seconds: float = 2.0  # pool wait, connect and query timeout on the request path
 
 
 class Alias(BaseModel):
@@ -70,6 +74,40 @@ class Registry(BaseModel):
         raise KeyError(f"Unknown model or alias: {model}")
 
 
+class Estimation(BaseModel):
+    chars_per_token: float = Field(default=4, gt=0)
+    default_completion_tokens: int = Field(default=1024, ge=0)
+
+
+class Tier(BaseModel):
+    requests_per_minute: int = Field(gt=0)
+    tokens_per_minute: int = Field(gt=0)
+    monthly_budget_usd: float = Field(ge=0)
+    allowed_aliases: list[str]
+
+
+class Limits(BaseModel):
+    estimation: Estimation = Field(default_factory=Estimation)
+    tiers: dict[str, Tier]
+
+
+class Price(BaseModel):
+    input: float | None = None  # USD per 1M tokens; None = unknown
+    output: float | None = None
+
+
+class Pricing(BaseModel):
+    currency: str = "USD"
+    models: dict[str, Price] = {}
+
+    def cost(self, target: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+        """USD for one call, or None if the target has no (complete) price."""
+        price = self.models.get(target)
+        if price is None or price.input is None or price.output is None:
+            return None
+        return (prompt_tokens * price.input + completion_tokens * price.output) / 1_000_000
+
+
 _ENV = re.compile(r"\$\{(\w+)\}")
 
 
@@ -97,13 +135,26 @@ def _drop_fake(raw: dict[str, Any]) -> None:
             del raw["aliases"][alias]
 
 
+def load_limits(config_dir: Path) -> Limits:
+    return Limits.model_validate(yaml.safe_load((config_dir / "limits.yaml").read_text()))
+
+
+def load_pricing(config_dir: Path) -> Pricing:
+    return Pricing.model_validate(yaml.safe_load((config_dir / "pricing.yaml").read_text()))
+
+
 settings = Settings()
 registry = load_registry(settings.config_dir, settings.gateway_enable_fake)
+limits = load_limits(settings.config_dir)
+pricing = load_pricing(settings.config_dir)
 
 
 def reload_registry() -> Registry:
-    """Swap in a freshly loaded registry. On a broken file, raise and keep the old one."""
-    global registry
-    new = load_registry(settings.config_dir, settings.gateway_enable_fake)  # raises first
-    registry = new
+    """Reload models, limits and pricing together. If any file is broken, raise and keep
+    all three as they were — never a half-applied config."""
+    global registry, limits, pricing
+    new_registry = load_registry(settings.config_dir, settings.gateway_enable_fake)
+    new_limits = load_limits(settings.config_dir)
+    new_pricing = load_pricing(settings.config_dir)
+    registry, limits, pricing = new_registry, new_limits, new_pricing
     return registry

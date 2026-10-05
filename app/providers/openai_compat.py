@@ -69,6 +69,8 @@ class OpenAICompatAdapter(ProviderAdapter):
 
     async def stream(self, model: str, request: dict[str, Any]) -> AsyncGenerator[dict[str, Any]]:
         body = {**request, "model": model, "stream": True}
+        if self.cfg.get("stream_usage") is False:  # provider rejects stream_options
+            body.pop("stream_options", None)
         try:
             async with self._client.stream(
                 "POST", "/chat/completions", json=body, timeout=self._stream_timeout

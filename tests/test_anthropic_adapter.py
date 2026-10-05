@@ -251,7 +251,7 @@ async def test_closing_stream_closes_the_sdk_response(fake: FakeAnthropic) -> No
 # --- the Phase 2 promise: the same OpenAI client code works against Claude ----
 
 
-async def test_openai_sdk_tool_call_streamed_from_claude(fake: FakeAnthropic) -> None:
+async def test_openai_sdk_tool_call_streamed_from_claude(fake: FakeAnthropic, api_key: str) -> None:
     tool_events = [
         STREAM[0],
         {
@@ -287,7 +287,7 @@ async def test_openai_sdk_tool_call_streamed_from_claude(fake: FakeAnthropic) ->
     )
     transport = httpx2.ASGITransport(app=main.app)
     async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as http:
-        sdk = openai.AsyncOpenAI(base_url="http://gw/v1", api_key="x", http_client=http)
+        sdk = openai.AsyncOpenAI(base_url="http://gw/v1", api_key=api_key, http_client=http)
         stream = await sdk.chat.completions.create(
             model="claude-new",
             messages=[{"role": "user", "content": "weather in Oslo?"}],

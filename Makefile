@@ -1,4 +1,4 @@
-.PHONY: up down logs test test-e2e test-live lint fmt reload shell install lock
+.PHONY: up down logs test test-e2e test-live lint fmt reload shell install lock migrate key
 
 up:
 	docker compose up -d --build
@@ -25,7 +25,7 @@ fmt:
 	ruff format app tests && ruff check --fix app tests
 
 reload:
-	curl -s -X POST localhost:8000/admin/reload -H "Authorization: Bearer $$(grep GATEWAY_ADMIN_KEY .env | cut -d= -f2)"
+	@sed -n 's/^GATEWAY_ADMIN_KEY=/Authorization: Bearer /p' .env | curl -s -X POST localhost:8000/admin/reload -H @-; echo
 
 shell:
 	docker compose exec gateway bash
@@ -38,3 +38,12 @@ PIP_COMPILE = pip-compile --quiet --strip-extras --generate-hashes --allow-unsaf
 lock:
 	$(PIP_COMPILE) $(ARGS) -o requirements.txt requirements.in
 	$(PIP_COMPILE) $(ARGS) -o requirements-dev.txt requirements-dev.in
+
+migrate:
+	docker compose exec gateway alembic upgrade head
+
+# Create a gateway API key:  make key name=my-app tier=dev
+key:
+	@# The admin key goes to curl on stdin (-H @-), never on the command line where `ps` shows it.
+	@sed -n 's/^GATEWAY_ADMIN_KEY=/Authorization: Bearer /p' .env | curl -s -X POST localhost:8000/admin/keys \
+	  -H @- -H 'content-type: application/json' -d '{"name":"$(name)","tier":"$(or $(tier),dev)"}'; echo

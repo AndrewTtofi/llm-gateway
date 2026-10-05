@@ -4,7 +4,6 @@ Needs `make up` and Ollama with the model behind the `local` alias. Free — no 
 Run with `make test-e2e`.
 """
 
-import httpx
 import openai
 import pytest
 
@@ -13,16 +12,8 @@ GATEWAY = "http://localhost:8000"
 pytestmark = pytest.mark.e2e
 
 
-@pytest.fixture(scope="module", autouse=True)
-def stack_is_up() -> None:
-    try:
-        httpx.get(f"{GATEWAY}/healthz", timeout=2).raise_for_status()
-    except httpx.HTTPError:
-        pytest.skip("gateway not running (make up)")
-
-
-def test_sdk_streams_through_gateway() -> None:
-    client = openai.OpenAI(base_url=f"{GATEWAY}/v1", api_key="unused-until-phase-4")
+def test_sdk_streams_through_gateway(gateway_key: str) -> None:
+    client = openai.OpenAI(base_url=f"{GATEWAY}/v1", api_key=gateway_key)
     raw = client.chat.completions.with_raw_response.create(
         model="local",
         messages=[{"role": "user", "content": "Reply with exactly: pong"}],
@@ -40,8 +31,8 @@ def test_sdk_streams_through_gateway() -> None:
     assert usage is not None and usage.completion_tokens > 0
 
 
-def test_sdk_non_streaming_through_gateway() -> None:
-    client = openai.OpenAI(base_url=f"{GATEWAY}/v1", api_key="unused-until-phase-4")
+def test_sdk_non_streaming_through_gateway(gateway_key: str) -> None:
+    client = openai.OpenAI(base_url=f"{GATEWAY}/v1", api_key=gateway_key)
     resp = client.chat.completions.create(
         model="local", messages=[{"role": "user", "content": "Say hi"}], max_tokens=10
     )

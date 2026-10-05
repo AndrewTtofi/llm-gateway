@@ -25,8 +25,8 @@ def chain(client: TestClient, alias: str) -> list[str]:
     return next(m["chain"] for m in models if m["id"] == alias)
 
 
-def test_yaml_edit_plus_reload_swaps_the_model(cfg_dir: Path) -> None:
-    client = TestClient(main.app)
+def test_yaml_edit_plus_reload_swaps_the_model(cfg_dir: Path, auth: dict[str, str]) -> None:
+    client = TestClient(main.app, headers=auth)
     before = chain(client, "local")
     models_yaml = cfg_dir / "models.yaml"
     models_yaml.write_text(
@@ -44,8 +44,8 @@ def test_yaml_edit_plus_reload_swaps_the_model(cfg_dir: Path) -> None:
     assert (upstream_model, target) == ("swapped:1b", "ollama/swapped:1b")
 
 
-def test_broken_yaml_keeps_the_previous_config(cfg_dir: Path) -> None:
-    client = TestClient(main.app)
+def test_broken_yaml_keeps_the_previous_config(cfg_dir: Path, auth: dict[str, str]) -> None:
+    client = TestClient(main.app, headers=auth)
     before = chain(client, "local")
     (cfg_dir / "models.yaml").write_text("aliases: [this is: not valid")
     resp = client.post("/admin/reload", headers=ADMIN)

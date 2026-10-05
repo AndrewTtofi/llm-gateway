@@ -15,19 +15,16 @@ pytestmark = [pytest.mark.live, pytest.mark.e2e]
 
 
 @pytest.fixture(scope="module")
-def sdk() -> openai.OpenAI:
-    try:
-        httpx.get(f"{GATEWAY}/healthz", timeout=2).raise_for_status()
-    except httpx.HTTPError:
-        pytest.skip("gateway not running (make up)")
+def sdk(gateway_key: str) -> openai.OpenAI:
     probe = httpx.post(
         f"{GATEWAY}/v1/chat/completions",
         timeout=60,
+        headers={"Authorization": f"Bearer {gateway_key}"},
         json={"model": "fast", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
     )
     if "is not configured" in probe.text:
         pytest.skip("ANTHROPIC_API_KEY not set in .env")
-    return openai.OpenAI(base_url=f"{GATEWAY}/v1", api_key="unused-until-phase-4")
+    return openai.OpenAI(base_url=f"{GATEWAY}/v1", api_key=gateway_key)
 
 
 @pytest.mark.parametrize("alias", ["fast", "smart", "local"])

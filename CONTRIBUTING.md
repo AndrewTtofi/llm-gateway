@@ -18,8 +18,9 @@ git clone https://github.com/AndrewTtofi/llm-gateway && cd llm-gateway
 python3.14 -m venv .venv && source .venv/bin/activate
 make install                  # dev deps from the hashed lockfile
 cp .env.example .env          # provider keys are optional for development
-make up                       # full stack
-make test && make lint
+make up                       # full stack (migrates the database on start)
+make key name=me              # a gateway API key for local requests
+make test && make lint        # unit tests use in-memory stores; no stack needed
 ```
 
 ## Rules of the codebase

@@ -8,11 +8,12 @@ services:
     volumes:
       - ./config:/app/config:ro      # edit YAML on host, `make reload` picks it up
       - ./app:/app/app               # live code reload in dev
+      - ./migrations:/app/migrations:ro
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
     extra_hosts: ["host.docker.internal:host-gateway"]   # reach Ollama on host
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
   redis:
     image: redis:8.10.2-alpine

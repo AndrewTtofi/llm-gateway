@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from app import main
-from tests.conftest import UPSTREAM
+from tests.conftest import UNLIMITED, UPSTREAM, add_key
 
 
 class HangingStream(httpx.AsyncByteStream):
@@ -39,7 +39,9 @@ def use_transport(handler: Any) -> None:
     )
 
 
-async def call_app(payload: dict[str, Any], hang_up: asyncio.Event) -> list[dict[str, Any]]:
+async def call_app(
+    payload: dict[str, Any], hang_up: asyncio.Event, key: str | None = None
+) -> list[dict[str, Any]]:
     """Run one request through the ASGI app; the client disconnects when `hang_up` is set."""
     sent: list[dict[str, Any]] = []
     inbox = [{"type": "http.request", "body": json.dumps(payload).encode(), "more_body": False}]
@@ -63,7 +65,11 @@ async def call_app(payload: dict[str, Any], hang_up: asyncio.Event) -> list[dict
         "raw_path": b"/v1/chat/completions",
         "query_string": b"",
         "root_path": "",
-        "headers": [(b"content-type", b"application/json"), (b"host", b"test")],
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"host", b"test"),
+            (b"authorization", f"Bearer {key or add_key(**UNLIMITED)}".encode()),
+        ],
         "client": ("127.0.0.1", 1),
         "server": ("test", 80),
     }

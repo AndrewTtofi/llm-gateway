@@ -13,8 +13,8 @@ def test_healthz() -> None:
     assert resp.json() == {"status": "ok"}
 
 
-def test_models_lists_aliases_then_direct_models() -> None:
-    resp = client.get("/v1/models")
+def test_models_lists_aliases_then_direct_models(auth: dict[str, str]) -> None:
+    resp = client.get("/v1/models", headers=auth)
     assert resp.status_code == 200
     data = resp.json()["data"]
     aliases = [m["id"] for m in data if m["owned_by"] == "gateway"]

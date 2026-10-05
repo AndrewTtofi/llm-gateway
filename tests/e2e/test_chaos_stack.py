@@ -13,23 +13,15 @@ GATEWAY = "http://localhost:8000"
 pytestmark = pytest.mark.e2e
 
 
-@pytest.fixture(scope="module", autouse=True)
-def stack_is_up() -> None:
-    try:
-        httpx.get(f"{GATEWAY}/healthz", timeout=2).raise_for_status()
-    except httpx.HTTPError:
-        pytest.skip("gateway not running (make up)")
+def test_primary_down_all_requests_succeed_via_fallback(gateway_key: str) -> None:
+    def call(_: int) -> httpx.Response:
+        return httpx.post(
+            f"{GATEWAY}/v1/chat/completions",
+            timeout=30,
+            headers={"Authorization": f"Bearer {gateway_key}"},
+            json={"model": "chaos-down", "messages": [{"role": "user", "content": "x"}]},
+        )
 
-
-def call(_: int) -> httpx.Response:
-    return httpx.post(
-        f"{GATEWAY}/v1/chat/completions",
-        timeout=30,
-        json={"model": "chaos-down", "messages": [{"role": "user", "content": "x"}]},
-    )
-
-
-def test_primary_down_all_requests_succeed_via_fallback() -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
         responses = list(ex.map(call, range(100)))
     assert [r.status_code for r in responses].count(200) == 100
