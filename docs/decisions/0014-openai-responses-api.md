@@ -53,3 +53,11 @@ values still hold.
 - **No stored responses:** server-side conversation state (`previous_response_id`) isn't
   used. The gateway stays stateless, and clients send the whole conversation, as with
   chat completions.
+- **Reasoning isn't carried across turns.** With `store: false` and reasoning items
+  dropped, the model re-reasons on every tool-call turn. OpenAI recommends
+  `include: ["reasoning.encrypted_content"]` and passing the reasoning items back. Expect
+  somewhat lower quality and more reasoning tokens in agent loops. The fix is the same
+  pattern as Anthropic's thinking blocks: an extension field that only this adapter reads.
+  It's a follow-up.
+- **Dropped parameters:** `stop`, `seed` and `logprobs` have no Responses equivalent and are
+  dropped.

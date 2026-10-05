@@ -90,5 +90,22 @@ async def test_grant_validates_inputs(role: str, password: str) -> None:
         await maintenance.grant_readonly(role, password)
 
 
-def test_literal_escapes_quotes() -> None:
-    assert maintenance._literal("it's") == "'it''s'"
+def test_password_is_sent_as_a_scram_verifier() -> None:
+    v = maintenance.scram_verifier("it's a 'secret' \\ password")
+    assert v.startswith("SCRAM-SHA-256$4096:") and "secret" not in v
+    maintenance._literal(v)  # only safe characters
+    with pytest.raises(ValueError):
+        maintenance._literal("x'; DROP TABLE api_keys; --")
+
+
+def test_identifiers_are_quoted() -> None:
+    assert maintenance._ident("user") == '"user"' and maintenance._ident('a"b') == '"a""b"'
+
+
+def test_bad_batch_sizes_are_rejected() -> None:
+    import asyncio
+
+    with pytest.raises(ValueError):
+        asyncio.run(maintenance.prune(days=1, batch=0))
+    with pytest.raises(SystemExit):
+        maintenance.main(["prune", "--days", "1", "--batch", "0"])

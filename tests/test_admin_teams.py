@@ -179,3 +179,45 @@ def test_chunked_bodies_are_limited_and_replayed(
         "/v1/chat/completions", content=chunks(big), headers={"content-type": "application/json"}
     )
     assert resp.status_code == 413
+
+
+def test_patch_null_falls_back_to_the_tier(admin: TestClient) -> None:
+    with admin as c:
+        key = create(c, tokens_per_minute=1234)
+        c.patch(f"/admin/keys/{key['id']}", headers=ADMIN, json={"tokens_per_minute": None})
+        headers = {"Authorization": f"Bearer {key['key']}"}
+        with respx.mock:
+            respx.post(f"{UPSTREAM}/chat/completions").mock(
+                return_value=httpx.Response(200, json=COMPLETION)
+            )
+            resp = c.post(
+                "/v1/chat/completions", headers=headers, json={"model": "local", "messages": MSGS}
+            )
+        dev = config.limits.tiers["dev"].tokens_per_minute
+        assert resp.headers["x-ratelimit-limit-tokens"] == str(dev)
+
+
+async def test_disconnect_mid_chunked_upload_is_not_a_truncated_body() -> None:
+    from app.main import BodyLimit
+
+    seen: list[dict[str, Any]] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        seen.append(await receive())
+
+    messages = iter(
+        [
+            {"type": "http.request", "body": b'{"model":', "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive() -> dict[str, Any]:
+        return next(messages)
+
+    async def send(message: dict[str, Any]) -> None:
+        pass
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    await BodyLimit(app)(scope, receive, send)
+    assert seen == [{"type": "http.disconnect"}]

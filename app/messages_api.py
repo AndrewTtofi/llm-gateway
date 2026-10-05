@@ -124,9 +124,9 @@ def _system_content(system: Any) -> str | list[dict[str, Any]]:
         isinstance(b, dict) and b.get("cache_control") for b in system
     ):
         return [
-            _cached({"type": "text", "text": b["text"]}, b)
+            _cached({"type": "text", "text": str(b.get("text", ""))}, b)
             for b in system
-            if b.get("type") == "text"
+            if isinstance(b, dict) and b.get("type") == "text"
         ]
     return _system_text(system)
 

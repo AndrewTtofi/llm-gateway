@@ -34,8 +34,9 @@ def _cost(
     cached: int = 0,
     written: int = 0,
     written_1h: int = 0,
+    at: datetime | None = None,
 ) -> float | None:
-    cost = config.pricing.cost(target, prompt, completion, cached, written, written_1h)
+    cost = config.pricing.cost(target, prompt, completion, cached, written, written_1h, at)
     if cost is None and target not in _unpriced_warned:
         _unpriced_warned.add(target)
         log.warning("no price for %s in pricing.yaml; counting it as $0", target)
@@ -88,6 +89,7 @@ class Meter:
         # For the record (ADR 0008):
         self.sink, self.alias, self.streamed = sink, alias, streamed
         self.request_id = obs_log.request_id.get()
+        self.started_at = datetime.now(UTC)  # time-of-day prices apply at the request's start
         # From the request arriving (middleware), so admission counts too.
         self.started = obs_log.request_started.get() or time.perf_counter()
         self.first_chunk_at: float | None = None
@@ -179,6 +181,7 @@ class Meter:
                     cached,
                     written,
                     written_1h,
+                    self.started_at,
                 )
                 used.prompt += prompt
                 used.completion += completion
@@ -196,12 +199,14 @@ class Meter:
             cached = int(details.get("cached_tokens") or 0)
             written = int(details.get("cache_creation_tokens") or 0)  # Anthropic (ADR 0013)
             written_1h = int(details.get("cache_creation_1h_tokens") or 0)
-            usd = _cost(self.target, prompt, completion, cached, written, written_1h)
+            usd = _cost(
+                self.target, prompt, completion, cached, written, written_1h, self.started_at
+            )
             return Used(prompt, completion, cached, usd or 0.0, unpriced=usd is None)
         # No usage reported (disconnect, provider without it): estimate.
         prompt = self.prompt_estimate
         completion = math.ceil(self._chars / config.limits.estimation.chars_per_token)
-        usd = _cost(self.target, prompt, completion)
+        usd = _cost(self.target, prompt, completion, at=self.started_at)
         return Used(prompt, completion, 0, usd or 0.0, unpriced=usd is None, estimated=True)
 
     async def settle(self) -> None:

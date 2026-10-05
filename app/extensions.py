@@ -37,8 +37,37 @@ def _strip_part(part: Any) -> Any:
     return part
 
 
+USAGE_FIELDS = ("cache_creation_tokens", "cache_creation_1h_tokens")
+
+
+def _joined_text(content: list[Any]) -> str | None:
+    """Text-only parts as one string (None if any part isn't text)."""
+    if all(isinstance(p, dict) and p.get("type") == "text" for p in content):
+        return "".join(p.get("text", "") for p in content)
+    return None
+
+
+def without_thinking(request: dict[str, Any]) -> dict[str, Any]:
+    """For OpenAI-format clients: they can't receive thinking blocks back (they're stripped
+    from responses), so they mustn't turn thinking on either, or the next tool-use turn
+    would lack the signed blocks Anthropic requires. cache_control is fine to keep."""
+    if "thinking" not in request and not any(
+        isinstance(m, dict) and "thinking_blocks" in m for m in request.get("messages") or []
+    ):
+        return request
+    out = {k: v for k, v in request.items() if k != "thinking"}
+    out["messages"] = [
+        {k: v for k, v in m.items() if k != "thinking_blocks"} if isinstance(m, dict) else m
+        for m in request.get("messages") or []
+    ]
+    return out
+
+
 def strip_request(request: dict[str, Any]) -> dict[str, Any]:
-    """A copy without extension fields (the caller's request is left alone)."""
+    """A copy without extension fields (the caller's request is left alone). Text-only
+    part lists on system, developer and assistant messages go back to plain strings: they
+    were lists only to carry cache breakpoints, and not every OpenAI-compatible server
+    accepts lists there."""
     if not any(f in request for f in REQUEST_FIELDS) and not _has_extensions(request):
         return request
     out = {k: v for k, v in request.items() if k not in REQUEST_FIELDS}
@@ -50,6 +79,9 @@ def strip_request(request: dict[str, Any]) -> dict[str, Any]:
         m = {k: v for k, v in msg.items() if k not in MESSAGE_FIELDS}
         if isinstance(m.get("content"), list):
             m["content"] = [_strip_part(p) for p in m["content"]]
+            if m.get("role") in ("system", "developer", "assistant"):
+                if (text := _joined_text(m["content"])) is not None:
+                    m["content"] = text
         if isinstance(m.get("tool_calls"), list):
             m["tool_calls"] = [_strip_part(c) for c in m["tool_calls"]]
         messages.append(m)
@@ -77,8 +109,20 @@ def _has_extensions(request: dict[str, Any]) -> bool:
     )
 
 
+def _strip_usage(usage: Any) -> Any:
+    details = usage.get("prompt_tokens_details") if isinstance(usage, dict) else None
+    if not isinstance(details, dict) or not any(f in details for f in USAGE_FIELDS):
+        return usage
+    return {
+        **usage,
+        "prompt_tokens_details": {k: v for k, v in details.items() if k not in USAGE_FIELDS},
+    }
+
+
 def strip_response(result: dict[str, Any]) -> dict[str, Any]:
-    """An OpenAI chat.completion without extension fields."""
+    """An OpenAI chat.completion without extension fields (the meter has read them)."""
+    if "usage" in result:
+        result = {**result, "usage": _strip_usage(result["usage"])}
     choices = result.get("choices")
     if not isinstance(choices, list) or not any(
         isinstance(c, dict) and "thinking_blocks" in (c.get("message") or {}) for c in choices
@@ -99,6 +143,8 @@ def strip_response(result: dict[str, Any]) -> dict[str, Any]:
 
 def strip_chunk(chunk: dict[str, Any]) -> dict[str, Any] | None:
     """An OpenAI chunk without extension fields; None if nothing is left to send."""
+    if "usage" in chunk:
+        chunk = {**chunk, "usage": _strip_usage(chunk["usage"])}
     choices = chunk.get("choices")
     if not isinstance(choices, list) or not any(
         isinstance(c, dict) and "thinking" in (c.get("delta") or {}) for c in choices

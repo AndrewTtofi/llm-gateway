@@ -14,9 +14,9 @@ models:
   openai/gpt-6.1-sol:                  { input: 2.00, output: 10.00, cached_input: 0.10, cache_write: 2.50, tiers: [{ above_prompt_tokens: 272000, input: 4.00, output: 15.00, cached_input: 0.20, cache_write: 5.00 }] }  # >272K input billed higher
   openai/gpt-6-luna:                   { input: 0.10, output: 0.50, cached_input: 0.01, cache_write: 0.125, tiers: [{ above_prompt_tokens: 272000, input: 0.20, output: 0.75, cached_input: 0.02, cache_write: 0.25 }] }
   gemini/gemini-3.1-pro-preview:       { input: 2.00, output: 12.00, cached_input: 0.20, tiers: [{ above_prompt_tokens: 200000, input: 4.00, output: 18.00, cached_input: 0.40 }] }  # >200K prompt: 4.00 / 18.00
-  xai/grok-4.7:                        { input: 2.00, output: 6.00, cached_input: 0.50, tiers: [{ above_prompt_tokens: 200000, input: 4.00, output: 12.00, cached_input: 1.00 }] }  # ≥200K prompt: 4.00 / 12.00
+  xai/grok-4.7:                        { input: 2.00, output: 6.00, cached_input: 0.50, tiers: [{ above_prompt_tokens: 200000, input: 4.00, output: 12.00, cached_input: 1.00 }] }  # above 200K prompt tokens: 4.00 / 12.00
   mistral/mistral-medium-3-5-26-04:    { input: 1.50,  output: 7.50,  cached_input: 0.15 }  # cached: LiteLLM's figure; Mistral publishes only "up to 90%" off
-  deepseek/deepseek-flash:             { input: 0.30,  output: 1.20,  cached_input: 0.006, cache_write: 0.00, off_peak: { multiplier: 0.5, peak_utc: ["01:00-04:00", "06:00-10:00"], peak_days: [mon, tue, wed, thu, fri] } }  # DeepSeek: peak rates; half off-peak (Chinese public holidays not modelled: billed at peak)
+  deepseek/deepseek-flash:             { input: 0.30,  output: 1.20,  cached_input: 0.006, off_peak: { multiplier: 0.5, peak_utc: ["01:00-04:00", "06:00-10:00"], peak_days: [mon, tue, wed, thu, fri] } }  # DeepSeek: peak rates; half off-peak (Chinese public holidays not modelled: billed at peak)
   ollama/llama3.2:3b:                  { input: 0,     output: 0 }
   fake/ok:                             { input: 0,     output: 0 }
   fake/flaky:                          { input: 0,     output: 0 }

@@ -535,6 +535,7 @@ def test_meter_bills_anthropic_cache_writes(registry: Registry) -> None:
     }
     m = Meter.__new__(Meter)
     m.usage, m.target, m.prompt_estimate, m._chars = usage, "claude/old", 0, 0
+    m.started_at = dt.datetime.now(dt.UTC)
     old = Pricing(
         models={
             "claude/old": Price(
@@ -619,3 +620,18 @@ def test_bare_model_ids_from_other_providers_are_ignored(config_dir: Path) -> No
     }
     _, missing = sync_prices.diff(config_dir, litellm, {})
     assert "openai/gpt-y" in missing
+
+
+@pytest.mark.parametrize("window", ["22:00-02:00", "10:00-10:00", "24:59-25:00", "09:00-24:30"])
+def test_invalid_off_peak_windows_are_rejected(window: str) -> None:
+    from app.config import OffPeak
+
+    with pytest.raises(ValueError):
+        OffPeak(multiplier=0.5, peak_utc=[window])
+
+
+def test_off_peak_end_of_day_window() -> None:
+    from app.config import OffPeak
+
+    off = OffPeak(multiplier=0.5, peak_utc=["22:00-24:00"])
+    assert off.is_peak(dt.datetime(2026, 10, 5, 23, 59, tzinfo=dt.UTC))

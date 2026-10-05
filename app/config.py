@@ -133,8 +133,12 @@ class OffPeak(BaseModel):
     @classmethod
     def _windows(cls, value: list[str]) -> list[str]:
         for window in value:
-            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-4]):[0-5]\d", window):
-                raise ValueError(f"peak window {window!r} is not HH:MM-HH:MM")
+            m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)-(([01]\d|2[0-3]):([0-5]\d)|24:00)", window)
+            if not m:
+                raise ValueError(f"peak window {window!r} is not HH:MM-HH:MM (end may be 24:00)")
+            start, end = (int(t[:2]) * 60 + int(t[3:]) for t in window.split("-"))
+            if start >= end:  # a window crossing midnight is two windows: 22:00-24:00, 00:00-02:00
+                raise ValueError(f"peak window {window!r} must end after it starts")
         return value
 
     def is_peak(self, at: datetime) -> bool:

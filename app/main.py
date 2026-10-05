@@ -191,10 +191,12 @@ class BodyLimit:
             await self.inner(scope, receive, send)
             return
         body, size = [], 0
+        disconnected: dict[str, Any] | None = None
         while True:
             message = await receive()
             if message["type"] != "http.request":
-                break  # client went away; let the app see it below
+                disconnected = message  # the client went away mid-upload
+                break
             size += len(message.get("body", b""))
             if size > limit:
                 await self._reject(scope, send, limit)
@@ -206,6 +208,8 @@ class BodyLimit:
 
         async def replay() -> Any:
             nonlocal replayed
+            if disconnected is not None:
+                return disconnected  # never hand the app a truncated body as complete
             if not replayed:
                 replayed = True
                 return {"type": "http.request", "body": b"".join(body), "more_body": False}
@@ -520,6 +524,9 @@ def _catalog_sort_key(row: dict[str, Any], sort: str) -> tuple[Any, ...]:
 async def chat_completions(
     body: ChatCompletionRequest, request: Request, key: Authenticated
 ) -> JSONResponse | StreamingResponse | Response:
+    raw = body.model_dump(exclude_unset=True)
+    if (clean := extensions.without_thinking(raw)) is not raw:
+        body = ChatCompletionRequest.model_validate(clean)
     return await _chat(body, request, key, anthropic_client=False)
 
 
@@ -623,7 +630,7 @@ async def _chat(
         and key.team_spend_id
         and await services.spend.spent(key.team_spend_id) >= team_budget.monthly_budget_usd
     ):
-        metrics.rejected.labels("budget").inc()
+        metrics.rejected.labels("team_budget").inc()
         return error_response(
             429,
             "Monthly budget for this key's team is exhausted.",

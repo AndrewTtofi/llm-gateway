@@ -423,6 +423,7 @@ class StreamTranslator:
                 self._tool_index.clear()
                 self._tool_has_args.clear()
                 self._held.clear()
+                self._thinking.clear()
                 return []
             if block["type"] in ("thinking", "redacted_thinking"):
                 self._thinking.add(event["index"])

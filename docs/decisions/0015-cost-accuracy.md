@@ -29,7 +29,10 @@ are expensive:
   `ephemeral_1h` breakdown) and from OpenAI Responses' `cache_write_tokens`, via the usage
   extension fields (ADR 0013).
 - **Validation:** the gateway rejects negative or non-finite prices, unordered tiers and
-  malformed windows on load.
+  malformed windows on load. Windows must end after they start; one crossing midnight is
+  written as two, ending at `24:00`.
+- **Time of day:** off-peak pricing uses the time the request *started*, so a long
+  stream crossing a boundary is billed at its start rate.
 - **Sync (`make prices`):** proposes cache-write prices (LiteLLM `cache_creation_*`,
   OpenRouter `input_cache_write*`) and tiers (LiteLLM `*_above_<N>k_tokens`, OpenRouter
   `overrides`), cross-checked like base prices.

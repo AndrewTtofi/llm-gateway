@@ -291,3 +291,61 @@ def test_stream_translator_emits_thinking_deltas() -> None:
     }
     assert text[0]["choices"][0]["delta"]["thinking"] == {"index": 0, "thinking": "a"}
     assert sig[0]["choices"][0]["delta"]["thinking"] == {"index": 0, "signature": "s"}
+
+
+# --- review follow-ups ------------------------------------------------------------
+
+
+def test_openai_clients_dont_get_cache_write_usage_fields(
+    client: TestClient, fake: FakeAnthropic
+) -> None:
+    usage = {"input_tokens": 10, "output_tokens": 3, "cache_creation_input_tokens": 200}
+    fake.respond = lambda req: httpx2.Response(200, json={**MESSAGE, "usage": usage})
+    out = client.post(
+        "/v1/chat/completions",
+        json={"model": "claude-old", "messages": [{"role": "user", "content": "q"}]},
+    ).json()
+    assert out["usage"]["prompt_tokens_details"] == {"cached_tokens": 0}
+    assert out["usage"]["prompt_tokens"] == 210  # still counted, and billed by the meter
+
+
+def test_strip_chunk_strips_usage_extensions() -> None:
+    chunk = {
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 1, "cache_creation_tokens": 2},
+        },
+    }
+    assert extensions.strip_chunk(chunk) == {
+        "choices": [],
+        "usage": {"prompt_tokens": 5, "prompt_tokens_details": {"cached_tokens": 1}},
+    }
+
+
+def test_openai_clients_cannot_turn_thinking_on(client: TestClient, fake: FakeAnthropic) -> None:
+    client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "claude-old",
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a", "thinking_blocks": [THINKING]},
+                {"role": "user", "content": "q2"},
+            ],
+        },
+    )
+    assert "thinking" not in fake.body  # they'd never get the signed blocks back
+    assert all(b.get("type") != "thinking" for m in fake.body["messages"] for b in m["content"])
+
+
+@respx.mock
+def test_cached_system_prompt_is_a_plain_string_for_other_providers(client: TestClient) -> None:
+    route = respx.post(f"{UPSTREAM}/chat/completions").mock(
+        return_value=httpx.Response(200, json=COMPLETION)
+    )
+    client.post("/v1/messages", json={**CACHED_REQUEST, "model": "local"})
+    sent = json.loads(route.calls.last.request.content)
+    system = next(m for m in sent["messages"] if m["role"] == "system")
+    assert system["content"] == "Long instructions."  # not a list of parts

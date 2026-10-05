@@ -41,9 +41,17 @@ Option 2, defined in `app/extensions.py`:
 - **Streams:** thinking blocks are streamed as thinking and signature deltas, so the
   Anthropic SDK reassembles them with their signatures.
 - **Isolation:**
-  - `strip_request` runs in the OpenAI-compatible adapter, before any non-Anthropic provider.
-  - `strip_response` and `strip_chunk` run for `/v1/chat/completions` clients. A
+  - `strip_request` runs in the OpenAI-compatible adapter, before any non-Anthropic
+    provider. It also turns text-only part lists on system, developer and assistant
+    messages back into strings, since not every OpenAI-compatible server accepts lists
+    there.
+  - `strip_response` and `strip_chunk` run for `/v1/chat/completions` clients. They remove
+    thinking blocks and the cache-write usage fields (the meter reads usage first). A
     thinking-only chunk is dropped entirely.
+  - `/v1/chat/completions` requests have `thinking` and `thinking_blocks` removed on the
+    way in. Those clients never receive signed thinking blocks back, so they mustn't enable
+    thinking: the next tool-use turn would lack the blocks Anthropic requires.
+    `cache_control` stays: OpenAI-format clients can use prompt caching with Claude.
 
 ## Consequences
 - **Caching works:** Claude Code through the gateway gets prompt caching.
