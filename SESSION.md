@@ -5,21 +5,49 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 11 done (v1.3.0). Next: roadmap v1.4, "run it for real"
-- **Branch:** `main` (all phase PRs merged; tag `v1.3.0`). Remote `github.com/AndrewTtofi/llm-gateway` (public)
+- **Phase:** 12, pre-deploy hardening, done: performance, operations, security, test depth (ADRs 0024–0026). Live provider tests wait until spending is allowed.
+- **Branch:** `main` after PR #19. Remote `github.com/AndrewTtofi/llm-gateway` (public)
 - **Status:**
-  - Security audit done: no Critical findings. The High, Medium and almost all Low findings are fixed, with `tests/test_hardening.py`.
-  - `make test` 588; lint clean; production stack verified locally (docs off, HSTS, env isolation, cache Redis, revocation broadcast).
-  - Dev DB migrated to 0007.
-- **Merged:** #10 → #14 are all on `main` (squash). The wiki is published to the Wiki tab and synced by the `wiki` workflow.
+  - `make test` 635; lint clean.
+  - CI runs: tests with fuzzing, pip-audit, a Trivy image scan, and an end-to-end job on the production compose stack.
+  - A 60-minute soak: 259 511 requests, 100% success, memory flat.
+  - Dev DB migrated to 0008.
+- **Merged:** #10 → #18 are on `main`, and #19 (hardening) merges this session. The wiki is synced by the `wiki` workflow.
 - **Released:** v1.3.0 (phases 8–10, the security audit and two review rounds), then **v1.3.1**, the same code with a release workflow that only uses GitHub-owned actions (v1.3.0's image build was refused by the repo's Actions policy).
-- **Next up:** the roadmap's v1.4 items, starting with picking a deploy target and deploying (`docs/wiki/Roadmap.md`).
+- **Next up:**
+  - Tag a release for the hardening (suggested v1.4.0).
+  - Pick a deploy target and deploy.
+  - When spending is allowed: live provider tests and `tools/record_fixtures.py`.
 - **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` is still empty.
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional
 
 ---
 
 ## Session log
+
+### 2026-10-06 — Session 15 (pre-deploy hardening)
+**Did**
+- **Performance:** profiled with py-spy under load and removed a per-chunk timeout context and avoidable Redis calls.
+  - −9% CPU and −0.8 ms p50 per request, −12% CPU per stream.
+  - Benchmark overhead: +2.79 ms p50, and +54 ms p95 TTFT at 200 streams (was +533).
+- **Operations (ADR 0024):**
+  - Alertmanager, and a runbook per alert;
+  - daily pg_dump, restore.sh and `make restore-drill`;
+  - budget alerts at 50/80/100%.
+  - All verified on a local production stack.
+- **Security (ADR 0025):**
+  - pip-audit and Trivy in CI and in the release workflow. Trivy found 5 HIGH issues (pip's bundled packages, Debian `libpcre2`), fixed by removing pip and applying Debian updates.
+  - Per-operator admin keys, the `admin_audit` log (migration 0008), failed-login limits, and network segmentation.
+- **Test depth (ADR 0026):**
+  - Hypothesis fuzzing found 2 bugs that gave 500s, now fixed.
+  - Golden provider fixtures (from the documented formats) and a recorder for real ones.
+  - `scripts/e2e_prod.sh` as a CI job.
+- **Soak:** 60 minutes, 259 511 requests, 100% success, memory flat.
+
+**Learned**
+- A timeout context around every streamed chunk was ~10% of streaming CPU. One watchdog per stream does the same job.
+- The vulnerabilities in a Python image are often in pip's vendored packages, which the app never uses. Remove pip after install.
+- Fuzzing the HTTP entry points is cheap, and it caught crashes that hand-written tests never would have.
 
 ### 2026-10-06 — Session 14
 **Did**
