@@ -343,19 +343,19 @@ Haiku timing. Runs are paired request by request, so the mock's own randomness c
 
 | | |
 |---|---|
-| Gateway overhead | **+3.6 ms p50 / +4.9 ms p95** per request · **+5.45 ms (1.0%)** on a realistic time to first token |
-| With a 100k-character prompt | **+8.1 ms p50 / +10.3 ms p95** (estimate and injection scan included) |
-| Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **100** streams; the core saturates at **200** |
-| Throughput, 1 → 2 replicas | **365 → 478 req/s** (the test rig tops out at 851) |
+| Gateway overhead | **+2.8 ms p50 / +4.0 ms p95** per request · **+3.9 ms (0.7%)** on a realistic time to first token |
+| With a 100k-character prompt | **+6.8 ms p50 / +8.2 ms p95** (estimate and injection scan included) |
+| Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **100** streams; at **200**, +54 ms at p95 as the core saturates |
+| Throughput, 1 → 2 replicas | **417 → 551 req/s** (the test rig tops out at 899) |
 | Rate-limit accuracy across 2 replicas | **−0.12%** of the configured limit |
 | Budget overshoot, 50 concurrent streams | **+0.9%** (≈0.8 requests) |
 | Provider outage | **3** requests went to the dead provider before the breaker opened · **0** errors reached clients |
 | Provider down/slow, Redis slow/down, Postgres down | **100%** of requests served in each case (while Redis is down, rate limits are off and budgets use the last known spend; while Postgres is down, uncached keys get `503`) |
 | SIGTERM with open streams | **97/97** streams completed |
 
-Measured on v1.3.0's request path (guardrails, cache lookup, atomic budget holds). It costs
-about 1 ms more per request than the v1.0 path, and one core now saturates at about 200
-concurrent streams rather than 400. The rig itself also ran about 10% slower in this run.
+Measured on the full request path: guardrails, cache lookup and atomic budget holds. That
+path is about 0.2 ms heavier than v1.0's, after profiling won back most of what v1.3 had
+added (4 Redis round trips per request, no timer per streamed chunk).
 
 To reproduce:
 

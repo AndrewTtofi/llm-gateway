@@ -48,8 +48,8 @@ it turned out to be most of the work.
 
 ## Numbers (laptop, mock provider with real Claude timing)
 
-- Gateway overhead: **+3.6 ms p50 / +4.9 ms p95**, or **1.0%** of a realistic time to first token (+8 ms with a 100k-character prompt)
-- One replica holds **100** concurrent streams within 10% of a direct connection; 1 → 2 replicas: **365 → 478 req/s**
+- Gateway overhead: **+2.8 ms p50 / +4.0 ms p95**, or **0.7%** of a realistic time to first token (+7 ms with a 100k-character prompt)
+- One replica holds **100** concurrent streams within 10% of a direct connection; 1 → 2 replicas: **417 → 551 req/s**
 - Provider outage: **3** requests went to the dead provider before the breaker opened, and **0** errors reached clients
 - **100%** of requests were served through provider, Redis and Postgres failures. The trade-off: while Redis is down, rate limits are off (budgets keep the last known spend), and while Postgres is down, keys not in the cache get 503. **97/97** streams survived a SIGTERM.
 
@@ -83,7 +83,7 @@ Code, ADRs and full results: https://github.com/AndrewTtofi/llm-gateway
 > 🔹 Most of it is classic reliability work: breakers, fail-open dependencies (choosing what to
 > give up when Redis dies), readiness probes, SLO burn-rate alerts, graceful shutdown.
 >
-> Result: +4.9 ms p95 overhead, and 0 client-visible errors during a provider outage.
+> Result: +4.0 ms p95 overhead, and 0 client-visible errors during a provider outage.
 >
 > Code, design decisions and benchmarks: https://github.com/AndrewTtofi/llm-gateway
 >

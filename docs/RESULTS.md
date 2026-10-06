@@ -10,7 +10,7 @@ python tests/load/report.py         # → this file
 
 ## Key findings
 
-- **Overhead:** +3.60 ms p50 / +4.92 ms p95 per request at 100 req/s (paired); +5.45 ms to a realistic time-to-first-token. Tail under 100 streams/s: +5.51 ms at p95.
+- **Overhead:** +2.79 ms p50 / +4.02 ms p95 per request at 100 req/s (paired); +3.90 ms to a realistic time-to-first-token. Tail under 100 streams/s: +4.22 ms at p95.
 - **Capacity:** one replica (one core) stays within 10% of the direct path up to 100 concurrent streams.
 - **Accuracy:** rate limit across 2 replicas -0.12%; budget overshoot +0.9% with 50 concurrent streams; usage log 1598/1598 rows.
 - **Breaker:** 3 requests paid for the dead primary before it opened; 0 client-visible errors.
@@ -24,23 +24,23 @@ The same requests go once **directly** to the mock provider and once **through t
 
 | Load | Direct p50 / p95 | Gateway p50 / p95 | **Added by the gateway** (paired p50 / p95) | Admission p50 |
 |---|---|---|---|---|
-| non-stream, whole request, 20 req/s | 2.05 ms / 2.75 ms | 6.82 ms / 8.05 ms | **+4.84 ms / +6.13 ms** | 1.99 ms |
-| non-stream, whole request, 100 req/s | 2.00 ms / 2.99 ms | 5.58 ms / 6.55 ms | **+3.60 ms / +4.92 ms** | 1.58 ms |
-| stream, time to first token, 20 req/s | 3.03 ms / 3.77 ms | 7.92 ms / 9.64 ms | **+4.95 ms / +6.45 ms** | 1.90 ms |
-| stream, time to first token, 100 req/s | 2.38 ms / 3.03 ms | 6.49 ms / 7.82 ms | **+4.12 ms / +5.51 ms** | 1.55 ms |
-| non-stream, whole request, **100k-character prompt**, 20 req/s | 2.35 ms / 3.07 ms | 10.4 ms / 12.6 ms | **+8.11 ms / +10.3 ms** | 5.13 ms |
-| stream, time to first token, **100k-character prompt**, 20 req/s | 3.40 ms / 4.29 ms | 12.0 ms / 14.1 ms | **+8.57 ms / +10.5 ms** | 5.19 ms |
+| non-stream, whole request, 20 req/s | 1.69 ms / 2.35 ms | 5.19 ms / 6.13 ms | **+3.53 ms / +4.73 ms** | 1.32 ms |
+| non-stream, whole request, 100 req/s | 2.03 ms / 3.06 ms | 4.89 ms / 5.60 ms | **+2.79 ms / +4.02 ms** | 1.20 ms |
+| stream, time to first token, 20 req/s | 2.59 ms / 3.36 ms | 6.13 ms / 7.64 ms | **+3.54 ms / +5.21 ms** | 1.24 ms |
+| stream, time to first token, 100 req/s | 2.44 ms / 3.04 ms | 5.76 ms / 6.47 ms | **+3.32 ms / +4.22 ms** | 1.16 ms |
+| non-stream, whole request, **100k-character prompt**, 20 req/s | 2.04 ms / 2.71 ms | 8.89 ms / 10.0 ms | **+6.84 ms / +8.18 ms** | 4.59 ms |
+| stream, time to first token, **100k-character prompt**, 20 req/s | 2.98 ms / 3.76 ms | 9.84 ms / 11.1 ms | **+6.86 ms / +8.18 ms** | 4.55 ms |
 
 **With realistic provider timing** — the mock samples TTFT and inter-chunk gaps from 60 real Claude Haiku 4.5 streams (TTFT p50 540 ms, gap p50 24.8 ms), 20 req/s:
 
 | | Direct p50 | Gateway p50 | Added (paired p50 / p95) |
 |---|---|---|---|
-| Time to first token | 538 ms | 545 ms | +5.45 ms / +8.46 ms |
-| Whole stream | 1.7 s | 1.8 s | +5.07 ms / +11.8 ms |
+| Time to first token | 538 ms | 542 ms | +3.90 ms / +5.89 ms |
+| Whole stream | 1.7 s | 1.8 s | +3.80 ms / +9.56 ms |
 
-So against a real model's first token the gateway adds **1.0%** at p50.
+So against a real model's first token the gateway adds **0.7%** at p50.
 
-**Where it goes:** about a third is admission (the `server-timing` header: auth, model check, budget, rate limits); the rest is the extra network hop, routing and relaying. The gateway makes 4 Redis round trips per request (2 more for priced models). Under 100 streams/s the paired p95 is +5.51 ms — the tail is what a production deployment would watch first.
+**Where it goes:** about a third is admission (the `server-timing` header: auth, model check, budget, rate limits); the rest is the extra network hop, routing and relaying. The gateway makes 4 Redis round trips per request (2 more for priced models). Under 100 streams/s the paired p95 is +4.22 ms — the tail is what a production deployment would watch first.
 
 ## 2. Capacity — concurrent streams on one replica
 
@@ -48,23 +48,23 @@ Closed loop: N clients each holding a ~5 s stream (≈300 ms to first token, the
 
 | Streams | TTFT p95 direct → gateway (added) | Chunk gap p95 direct → gateway | Success | Event-loop lag | Gateway CPU peak | Memory |
 |---|---|---|---|---|---|---|
-| 50 | 330 ms → 334 ms (+3.78 ms) | 27.4 ms → 27.4 ms | 100.0% | 0.09 ms | 40% | 125.8MiB |
-| 100 | 329 ms → 339 ms (+9.95 ms) | 27.5 ms → 27.4 ms | 100.0% | 0.21 ms | 74% | 134.2MiB |
-| 200 | 331 ms → 865 ms (+533 ms) | 27.4 ms → 35.4 ms | 100.0% | 10.4 ms | 101% | 150.3MiB |
-| 400 | 491 ms → 5.2 s (+4.7 s) | 34.8 ms → 48.5 ms | 100.0% | 35.9 ms | 101% | 153.3MiB |
-| 800 | 1.2 s → 14.9 s (+13.7 s) | 85.5 ms → 48.8 ms | 100.0% | 38.6 ms | 101% | 153.6MiB |
+| 50 | 328 ms → 335 ms (+6.95 ms) | 27.4 ms → 27.4 ms | 100.0% | 0.04 ms | 33% | 126MiB |
+| 100 | 330 ms → 335 ms (+5.23 ms) | 27.3 ms → 27.3 ms | 100.0% | 0.04 ms | 54% | 133.9MiB |
+| 200 | 332 ms → 386 ms (+54.2 ms) | 27.4 ms → 27.5 ms | 100.0% | 0.72 ms | 96% | 148.3MiB |
+| 400 | 354 ms → 1.7 s (+1.3 s) | 28.5 ms → 45.5 ms | 100.0% | 18.5 ms | 101% | 164.6MiB |
+| 800 | 837 ms → 8.0 s (+7.1 s) | 62.6 ms → 45.1 ms | 100.0% | 22.2 ms | 100% | 168.7MiB |
 
 ```mermaid
 xychart-beta
     title "p95 time to first token vs concurrent streams"
     x-axis [50, 100, 200, 400, 800]
     y-axis "ms"
-    line [334.1, 339.3, 864.6, 5237.6, 14885.9]
-    line [330.3, 329.3, 331.2, 490.6, 1216.9]
+    line [335.3, 335.5, 385.9, 1689.7, 7950.1]
+    line [328.4, 330.3, 331.7, 353.9, 836.8]
 ```
 _line 1: through the gateway (ms) · line 2: direct (ms)_
 
-**Reading it:** Through **100** concurrent streams the gateway stays within 10% of the direct path (TTFT and chunk gaps). At 200 it adds +533 ms to p95 TTFT. At 200 its single core is the bottleneck (CPU 101%, event loop 10.4 ms late). (From 800 up the *direct* path degrades too — part of that step is the rig.) Memory stays modest (125.8MiB → 153.6MiB). Scale out with replicas beyond the first core.
+**Reading it:** Through **100** concurrent streams the gateway stays within 10% of the direct path (TTFT and chunk gaps). At 200 it adds +54.2 ms to p95 TTFT. At 200 its single core is the bottleneck (CPU 96%, event loop 0.72 ms late). Memory stays modest (126MiB → 168.7MiB). Scale out with replicas beyond the first core.
 
 ## 3. Horizontal scaling — 1 vs 2 replicas
 
@@ -72,14 +72,14 @@ Closed loop, 200 clients, non-streaming requests to an instant mock, 5 s warm-up
 
 | Path | Run | Requests/s | p50 | p95 | Success |
 |---|---|---|---|---|---|
-| 1 replica | run 1 | 320.3 | 462 ms | 1.6 s | 100.0% |
-| 1 replica | run 2 | 364.7 | 407 ms | 1.4 s | 100.0% |
-| 2 replicas | run 1 | 397.0 | 307 ms | 1.4 s | 100.0% |
-| 2 replicas | run 2 | 477.9 | 269 ms | 1.1 s | 100.0% |
-| no gateway (rig ceiling) | run 1 | 794.8 | 179 ms | 725 ms | 100.0% |
-| no gateway (rig ceiling) | run 2 | 851.3 | 166 ms | 685 ms | 100.0% |
+| 1 replica | run 1 | 403.9 | 376 ms | 1.2 s | 100.0% |
+| 1 replica | run 2 | 416.8 | 367 ms | 1.2 s | 100.0% |
+| 2 replicas | run 1 | 468.6 | 259 ms | 1.1 s | 100.0% |
+| 2 replicas | run 2 | 550.9 | 221 ms | 927 ms | 100.0% |
+| no gateway (rig ceiling) | run 1 | 898.9 | 154 ms | 639 ms | 100.0% |
+| no gateway (rig ceiling) | run 2 | 893.3 | 156 ms | 648 ms | 100.0% |
 
-Best: **1 replica 365 req/s · 2 replicas 478 req/s · rig ceiling 851 req/s.** Two replicas serve 1.31× one replica's throughput, below the rig's ceiling. What it does show: two replicas sharing Redis and Postgres serve the load without errors, and limits stay exact across them (section 4).
+Best: **1 replica 417 req/s · 2 replicas 551 req/s · rig ceiling 899 req/s.** Two replicas serve 1.32× one replica's throughput, below the rig's ceiling. What it does show: two replicas sharing Redis and Postgres serve the load without errors, and limits stay exact across them (section 4).
 
 ## 4. Accuracy
 
@@ -148,8 +148,8 @@ The page-level fast burn needs both the 5-minute and 1-hour error ratios above 1
 
 ## Environment and limits
 
-- One laptop: Linux 6.6.87.1-microsoft-standard-WSL2 (WSL2), 16 CPUs, Mem:              30           5           3           0          21          24 GB RAM, Docker Desktop. Load generator, 2 gateway replicas, Redis, Postgres, Toxiproxy and the mock share it.
+- One laptop: Linux 6.6.87.1-microsoft-standard-WSL2 (WSL2), 16 CPUs, Mem:              30           5           2           0          22          24 GB RAM, Docker Desktop. Load generator, 2 gateway replicas, Redis, Postgres, Toxiproxy and the mock share it.
 - Gateway: one uvicorn process per replica, no `--reload`; Redis and Postgres reached through Toxiproxy (one extra hop). Load generator inside the Docker network.
 - Realistic timing: 60 real Claude Haiku 4.5 streams (2807 inter-chunk gaps), measured through the gateway (so they include its few ms).
 - Absolute numbers are a floor for this hardware; the comparisons — direct vs gateway, before vs during a fault — are what transfer.
-- Generated 2026-10-06 06:15 UTC by `tests/load/report.py`.
+- Generated 2026-10-06 09:16 UTC by `tests/load/report.py`.

@@ -58,19 +58,22 @@ Each choice avoids a common benchmarking mistake:
 
 | | |
 |---|---|
-| Gateway overhead | **+3.6 ms p50 / +4.9 ms p95** per request; **+5.45 ms (1.0%)** on a realistic TTFT |
-| 100k-character prompt | **+8.1 ms p50 / +10.3 ms p95** |
-| Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **100**; the core saturates at **200** |
-| Throughput, 1 → 2 replicas | **365 → 478 req/s** (rig ceiling 851) |
+| Gateway overhead | **+2.8 ms p50 / +4.0 ms p95** per request; **+3.9 ms (0.7%)** on a realistic TTFT |
+| 100k-character prompt | **+6.8 ms p50 / +8.2 ms p95** |
+| Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **100**; +54 ms p95 at **200** as the core saturates |
+| Throughput, 1 → 2 replicas | **417 → 551 req/s** (rig ceiling 899) |
 | Rate-limit accuracy, 2 replicas | **−0.12%** |
 | Budget overshoot, 50 concurrent streams | **+0.9%** (atomic budget holds, ADR 0023) |
 | Provider outage | **3** requests to the dead provider before the breaker opened; **0** errors reached clients |
 | Provider down/slow, Redis slow/down, Postgres down | **100%** served (rate limits off during a Redis outage; uncached keys get 503 during a Postgres outage) |
 | SIGTERM with open streams | **97/97** completed |
 
-Re-measured on 2026-10-06 for v1.3.0. The request path now includes the injection scan, the
-cache lookup and atomic budget holds. That adds about 1 ms per request, and one core
-saturates at about 200 concurrent streams instead of 400.
+Re-measured on 2026-10-06 after profiling the request path:
+- **Redis:** 4 round trips per request. A success makes no breaker call while nothing is
+  failing, and the budget check is the hold itself.
+- **Streams:** slow clients are detected by one watchdog per stream, not a timer per chunk.
+
+Compared with v1.3.1: −9% CPU per request, −12% per stream, −0.8 ms p50.
 
 ### Reproduce
 
