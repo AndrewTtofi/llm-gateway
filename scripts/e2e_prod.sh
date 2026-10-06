@@ -88,6 +88,6 @@ dc exec -T backup sh /drill.sh > /dev/null || fail "backup restore drill"
 ok "backup taken, restore drill passed"
 sleep 3  # the usage writer flushes in batches
 rows="$(dc exec -T postgres psql -U gateway -tAc 'SELECT count(*) FROM usage_log')"
-[ "$rows" -ge 4 ] || fail "usage rows: $rows"
+[ "$rows" -ge 3 ] || fail "usage rows: $rows (chat, stream, messages)"  # a bad key isn't metered
 ok "usage log written ($rows rows)"
 echo "e2e: all checks passed"
