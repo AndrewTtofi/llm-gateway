@@ -23,6 +23,7 @@ from app.providers import UnsupportedProvider
 from app.providers.base import (
     CLIENT_FAULT_STATUS,
     QUOTA_CODES,
+    NotConfigured,
     ProviderAdapter,
     ProviderError,
     UnsupportedRequest,
@@ -81,7 +82,7 @@ class UnknownModel(LookupError):
     pass
 
 
-SKIPPED = ("skipped:open", "skipped:unsupported", "unsupported_request")
+SKIPPED = ("skipped:open", "skipped:unsupported", "skipped:unconfigured", "unsupported_request")
 
 
 @dataclass
@@ -133,6 +134,7 @@ async def _route[T](
     provider_error: ProviderError | None = None
     other_error: Exception | None = None
     skipped_open = False
+    unconfigured = False
 
     for target in chain:
         provider, _, model = target.partition("/")
@@ -144,6 +146,12 @@ async def _route[T](
         except UnsupportedProvider as exc:
             routed.attempts.append((target, "skipped:unsupported"))
             other_error = other_error or exc
+            continue
+        if not adapter.configured:
+            # No credentials: not a failure of the target, so no call and no breaker
+            # change. It shouldn't open, flap or show as "open" for being unconfigured.
+            routed.attempts.append((target, "skipped:unconfigured"))
+            unconfigured = True
             continue
 
         ticket = await store.decide(target, reg.circuit_breaker)
@@ -168,6 +176,8 @@ async def _route[T](
         raise AllTargetsFailed(routed, provider_error, all_open=False)
     if skipped_open:  # nothing actually failed; healthy-but-open targets will be back
         raise AllTargetsFailed(routed, None, all_open=True)
+    if other_error is None and unconfigured:
+        other_error = NotConfigured(body.model)  # every target lacks credentials
     raise AllTargetsFailed(routed, other_error, all_open=False)
 
 

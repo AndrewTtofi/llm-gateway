@@ -6,7 +6,7 @@ API and back, including streams, usage and errors.
 
 | `type` in `models.yaml` | Adapter | Used for |
 |-------------------------|---------|----------|
-| `openai` | `openai_compat.py` (httpx) | OpenAI, Ollama, vLLM, LM Studio, OpenRouter, Together, any OpenAI-compatible server |
+| `openai` | `openai_compat.py` (httpx) | OpenAI, Google Gemini, xAI, Mistral, DeepSeek, Ollama, vLLM, LM Studio, OpenRouter, any OpenAI-compatible server |
 | `anthropic` | `anthropic.py` + `anthropic_format.py` (official `anthropic` SDK) | Claude |
 | `fake` | `fake.py` | Chaos testing and demos; loaded only with `GATEWAY_ENABLE_FAKE=1` |
 
@@ -23,6 +23,65 @@ ID. Unknown fields pass through, so new OpenAI parameters work without a gateway
 - **Errors:** upstream errors are classified (see [Routing and reliability](Routing-and-Reliability.md)).
   The provider's raw message is shown to the client only for client-caused 400/413/422,
   because other errors can contain key fragments, org IDs or internal hostnames (ADR 0002).
+
+- **Missing key:** a provider whose `api_key_env` isn't set is skipped, like an open breaker:
+  no network call and no breaker effect. `/v1/catalog` shows its models as
+  `configured: false`. Keys are read when the gateway starts, so restart it after adding one.
+
+### Parameter rules
+
+"OpenAI-compatible" APIs disagree about parameters. Some reject fields they don't know (422),
+some reject specific ones (400), and some models can't use tools through chat completions.
+A 400 is treated as the client's fault, so the router won't fall back on it. Each provider
+or model therefore declares what it accepts (ADR 0012):
+
+```yaml
+providers:
+  mistral:
+    stream_usage: false          # don't send stream_options
+    params:
+      allow: [max_tokens, temperature, top_p, stop, tools, tool_choice, …]   # strict API
+      rename: { max_completion_tokens: max_tokens, seed: random_seed }
+  openai:
+    params:
+      rename: { max_tokens: max_completion_tokens }
+    models:
+      gpt-6-astra:
+        tools: false             # tool calling needs the Responses API
+        params:
+          drop: [temperature, top_p, logprobs, top_logprobs]
+          values: { reasoning_effort: [low, medium, high, xhigh, max] }
+```
+
+| Rule | Effect |
+|------|--------|
+| `allow` | Only these fields are sent (plus `model`, `messages`, `stream`, `stream_options`) |
+| `drop` | Never sent |
+| `rename` | Sent under another name; if the client sent both, the new name wins |
+| `values` | Sent only with one of these values; otherwise removed, so the provider uses its default |
+| `tools: false` / `vision: false` | A request with tools or images skips this target and the chain continues. `/v1/catalog` doesn't list the capability |
+
+Model rules overlay provider rules. They apply in the order rename → drop → allow →
+values, so `drop`, `allow` and `values` use the names fields are *sent* under.
+`stream_options` is only ever sent on streams, and not to providers with
+`stream_usage: false`.
+
+Dropped parameters change behaviour silently: xAI's reasoning models don't honour `stop`,
+for example. That's the trade for a chain that keeps working.
+
+`make test-live` runs a chat, a stream and a tool call against each provider whose key is
+set. Run it after adding a key, or when a provider ships a new model.
+
+| Provider | What its rules handle |
+|----------|-----------------------|
+| `openai` | `max_completion_tokens`. GPT-6 Astra and Sol: no tools on chat completions, no sampling parameters, `reasoning_effort` ≠ none |
+| `gemini` | OpenAI-compatibility endpoint (beta); thinking can't be disabled, so `reasoning_effort: none` is removed |
+| `xai` | `presence_penalty`, `frequency_penalty` and `stop` dropped (reasoning models reject them) |
+| `mistral` | An allowlist (unknown fields are a 422); `stream_options` not sent; `reasoning_effort` not sent (it would make `content` a list) |
+| `deepseek` | `max_tokens`; `reasoning_effort` values none/low/high/max |
+
+These rules come from each provider's documentation (checked 2026-10-05). Gemini, xAI,
+Mistral and DeepSeek have not been run live yet.
 
 To add a server, add it in YAML; no code is needed:
 

@@ -13,9 +13,13 @@ back to another provider. Behind the gateway, requests can go to:
 | Provider | How |
 |----------|-----|
 | **Anthropic Claude** (Opus, Sonnet, Haiku) | Native adapter on the official SDK. It translates messages, tools, streaming, usage and errors both ways. Claude is the first choice in most built-in aliases. |
-| **OpenAI** | Passthrough (covered by mocked tests; not yet run against the live API) |
+| **OpenAI** | OpenAI-compatible, with per-model parameter rules |
+| **Google Gemini, xAI Grok, Mistral, DeepSeek** | Their OpenAI-compatible APIs, with the parameter rules each one needs ([ADR 0012](docs/decisions/0012-openai-compatible-provider-rules.md)) |
 | **Ollama** (local models, free) | Ollama's OpenAI-compatible API |
 | **Any OpenAI-compatible API** (vLLM, LM Studio, OpenRouter, Together, …) | Add it in `config/models.yaml`; no code change |
+
+OpenAI, Gemini, xAI, Mistral and DeepSeek are covered by mocked tests but haven't been run
+against their live APIs yet. A provider without an API key is skipped.
 
 ```python
 from openai import OpenAI   # any OpenAI SDK (or LangChain, LlamaIndex, curl, …)
@@ -182,6 +186,7 @@ Clients send an alias as `model`. Each alias maps to a chain of models (from `co
 | `smart` | Claude Opus 5.5 → Claude Sonnet 5.5 → OpenAI |
 | `balanced` | Claude Sonnet 5.5 → OpenAI → Ollama llama3.2 |
 | `local` | Ollama llama3.2 |
+| `frontier` | The top model from each company: Claude Fable 5.1 → Claude Opus 5.5 → GPT-6 Astra → Gemini 3.1 Pro → Grok 4.7 → Mistral Medium 3.5 → DeepSeek V4.1 Flash |
 
 Clients can also call an exact `provider/model` if their tier allows it. `GET /v1/models`
 lists what the key may use.
@@ -264,7 +269,7 @@ a tier from `config/limits.yaml`:
 | Tier | Requests/min | Tokens/min | Budget/month | Aliases |
 |------|-------------|-----------|--------------|---------|
 | `dev` | 60 | 50 000 | $10 | `fast`, `local` |
-| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local` |
+| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local`, `frontier` |
 
 Any field can be overridden per key:
 
@@ -396,6 +401,7 @@ Each non-obvious choice has an ADR in [docs/decisions/](docs/decisions/):
 | [0009](docs/decisions/0009-benchmarking.md) | How the gateway is benchmarked |
 | [0010](docs/decisions/0010-anthropic-messages-inbound.md) | Inbound Anthropic Messages API, translated at the edge |
 | [0011](docs/decisions/0011-model-catalog-and-pricing-sync.md) | Model catalog, and price sync with review |
+| [0012](docs/decisions/0012-openai-compatible-provider-rules.md) | Per-provider parameter rules for OpenAI-compatible APIs, and the `frontier` alias |
 
 ## Development
 

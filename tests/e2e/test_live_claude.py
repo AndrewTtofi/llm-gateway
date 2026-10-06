@@ -22,8 +22,8 @@ def sdk(gateway_key: str) -> openai.OpenAI:
         headers={"Authorization": f"Bearer {gateway_key}"},
         json={"model": "fast", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
     )
-    if "is not configured" in probe.text:
-        pytest.skip("ANTHROPIC_API_KEY not set in .env")
+    if probe.status_code == 503 and "all_providers_unavailable" in probe.text:
+        pytest.skip("ANTHROPIC_API_KEY not set in .env (the provider is skipped)")
     return openai.OpenAI(base_url=f"{GATEWAY}/v1", api_key=gateway_key)
 
 

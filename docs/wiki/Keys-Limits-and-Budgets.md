@@ -53,7 +53,7 @@ Defined in `config/limits.yaml`. Every key has a tier, and any field can be over
 | Tier | Requests/min | Tokens/min | Budget/month | Aliases |
 |------|-------------|-----------|--------------|---------|
 | `dev` | 60 | 50 000 | $10 | `fast`, `local` |
-| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local` |
+| `standard` | 300 | 200 000 | $100 | `fast`, `balanced`, `smart`, `local`, `frontier` |
 | `chaos` | 600 | 1 000 000 | $1 | chaos aliases (dev only) |
 
 `allowed_aliases` can also list exact `provider/model` names, or `"*"` for everything.

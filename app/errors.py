@@ -7,7 +7,13 @@ from collections.abc import Mapping
 from fastapi.responses import JSONResponse
 
 from app.providers import UnsupportedProvider
-from app.providers.base import CLIENT_FAULT_STATUS, QUOTA_CODES, ProviderError, UnsupportedRequest
+from app.providers.base import (
+    CLIENT_FAULT_STATUS,
+    QUOTA_CODES,
+    NotConfigured,
+    ProviderError,
+    UnsupportedRequest,
+)
 from app.routing.router import AllTargetsFailed
 
 
@@ -61,6 +67,15 @@ def routing_error_response(exc: AllTargetsFailed) -> JSONResponse:
     last = exc.last
     if isinstance(last, UnsupportedRequest):
         return error_response(400, str(last), code="unsupported_parameter", headers=headers)
+    if isinstance(last, NotConfigured):
+        # Operator problem (missing API keys). Generic: don't tell clients env var names.
+        return error_response(
+            503,
+            "no provider for this model is currently available",
+            "api_error",
+            "all_providers_unavailable",
+            headers=headers,
+        )
     if isinstance(last, UnsupportedProvider):
         return error_response(
             501, str(last), "api_error", "provider_not_supported", headers=headers

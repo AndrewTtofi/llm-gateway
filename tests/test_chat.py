@@ -6,6 +6,9 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from app import providers
+from app.config import Registry
+from app.providers import AdapterPool
 from tests.conftest import UPSTREAM
 
 URL = f"{UPSTREAM}/chat/completions"
@@ -77,8 +80,15 @@ def test_api_key_from_env_is_sent(client: TestClient, monkeypatch: pytest.Monkey
 
 
 @respx.mock
-def test_no_auth_header_without_key(client: TestClient) -> None:
+def test_auth_header_only_for_providers_with_a_key(
+    client: TestClient, registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
     route = respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS})
+    assert route.calls.last.request.headers["authorization"] == "Bearer mock-test-key"
+    # api_key_env: null (e.g. Ollama): no auth at all
+    monkeypatch.setitem(registry.providers["mock"], "api_key_env", None)
+    monkeypatch.setattr(providers, "pool", AdapterPool())
     client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS})
     assert "authorization" not in route.calls.last.request.headers
 
@@ -271,3 +281,16 @@ def test_stream_without_done_is_reported_as_truncated(client: TestClient) -> Non
     assert status == 200
     assert "ended early" in json.loads(lines[-1][6:])["error"]["message"]
     assert "data: [DONE]" not in lines
+
+
+@respx.mock
+def test_provider_without_its_key_falls_back_without_a_call(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MOCK_API_KEY")
+    route = respx.post(f"{UPSTREAM}/chat/completions").mock(
+        return_value=httpx.Response(200, json=COMPLETION)
+    )
+    resp = client.post("/v1/chat/completions", json={"model": "mock-then-ok", "messages": MSGS})
+    assert resp.status_code == 200 and resp.headers["x-gateway-provider"] == "chaos/ok"
+    assert not route.called  # no request sent with missing credentials

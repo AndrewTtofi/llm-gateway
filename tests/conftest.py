@@ -117,6 +117,7 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> Registry:
         }
     )
     monkeypatch.setenv("TEST_ANTHROPIC_KEY", "sk-ant-test")
+    monkeypatch.setenv("MOCK_API_KEY", "mock-test-key")
     monkeypatch.setattr(config, "registry", reg)
     monkeypatch.setattr(providers, "pool", AdapterPool())  # fresh HTTP clients per test
     monkeypatch.setattr(router, "store", MemoryBreakerStore())  # fresh breakers per test
