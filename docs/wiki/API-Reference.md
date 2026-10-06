@@ -18,6 +18,7 @@ The interactive OpenAPI docs are at `http://localhost:8000/docs`.
 | POST | `/v1/messages` | Anthropic Messages API, streaming or not |
 | POST | `/v1/messages/count_tokens` | The gateway's input-token estimate (counts as one request against the key's limit) |
 | GET | `/v1/models` | Aliases (with their chains) and direct models this key may use |
+| GET | `/v1/catalog` | Price, capabilities, quality, breaker state and live stats per model this key may use; `?capability=`, `?min_context=`, `?sort=price\|quality\|ttft\|latency` ([Choosing models](Choosing-Models.md)); counts as one request |
 | GET | `/healthz` | Liveness: the process answers |
 | GET | `/readyz` | Readiness: 503 until startup completes; then 200 `ready` / `degraded`, with dependency status |
 | POST | `/admin/keys` | Create a key: `{name, tier, requests_per_minute?, tokens_per_minute?, monthly_budget_usd?, allowed_aliases?}` |

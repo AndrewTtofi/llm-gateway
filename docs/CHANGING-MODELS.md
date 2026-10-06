@@ -51,7 +51,10 @@ stays live.
 
 ### Always also
 1. Check the model ID in the provider's current docs.
-2. Add the model's price to `config/pricing.yaml` (or `null` until you know it).
+2. Add the model's price to `config/pricing.yaml` (or `null` until you know it), and an
+   entry to `config/catalog.yaml` with your `quality` score. Then run `make prices`: it fills
+   in context window and capabilities and checks the price against public catalogs. Run
+   `make prices ARGS=--write` and review the diff.
 3. `make test` — config tests catch typos and unknown providers.
 4. `make reload`, then send one test request.
 5. CHANGELOG entry under **Changed**.

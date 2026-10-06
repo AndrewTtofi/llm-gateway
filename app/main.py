@@ -18,10 +18,10 @@ import signal
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
@@ -31,8 +31,8 @@ from app import config, messages_api, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
+from app.observability import live, metrics
 from app.observability import logging as obs_log
-from app.observability import metrics
 from app.providers.base import ProviderAdapter
 from app.ratelimit import estimate_prompt_tokens
 from app.routing import router
@@ -304,13 +304,117 @@ async def list_models(key: Authenticated) -> dict[str, object]:
         if lim.allows(name)
     ]
     if reg.allow_direct_models:
-        direct = dict.fromkeys(m for a in reg.aliases.values() for m in a.chain)
+        direct = sorted(reg.known_targets())  # what `resolve` accepts, like /v1/catalog
         data += [
             {"id": m, "object": "model", "created": 0, "owned_by": m.split("/", 1)[0]}
             for m in direct
             if lim.allows(m)
         ]
     return {"object": "list", "data": data}
+
+
+# Blended price for sorting: a typical 3:1 mix of input to output tokens.
+BLEND_INPUT, BLEND_OUTPUT = 3, 1
+SortBy = Literal["name", "price", "quality", "ttft", "latency"]
+
+
+@app.get("/v1/catalog", response_model=None)
+async def model_catalog(
+    key: Authenticated,
+    capability: Annotated[list[config.Capability], Query()] = [],  # noqa: B006 — FastAPI copies it
+    min_context: int = 0,
+    sort: SortBy = "name",
+) -> dict[str, Any] | JSONResponse:
+    """What this key can use, with price, capabilities, quality and live performance, so
+    apps can choose a model for their use case (ADR 0011). Live stats are this replica's
+    view of the last 15 minutes."""
+    lim = key_limits(key)
+    verdict = await services.limiter.take(key.id, lim.requests_per_minute, lim.tokens_per_minute, 0)
+    if not verdict.allowed:
+        metrics.rejected.labels("rate_limit").inc()
+        return error_response(
+            429,
+            "Rate limit reached for this key.",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            headers=verdict.headers(),
+        )
+    # One snapshot of the config: a reload during the awaits below mustn't mix versions.
+    reg, pricing, catalog = config.registry, config.pricing, config.catalog
+    prices, cat = pricing.models, catalog.models
+    aliases = {n: a.chain for n, a in reg.aliases.items() if lim.allows(n)}
+    targets = dict.fromkeys(t for chain in aliases.values() for t in chain)
+    if reg.allow_direct_models:
+        targets |= dict.fromkeys(t for t in sorted(reg.known_targets()) if lim.allows(t))
+
+    rows: list[dict[str, Any]] = []
+    for t in targets:
+        facts = cat.get(t) or config.CatalogEntry()
+        if any(c not in facts.capabilities for c in capability):
+            continue
+        if min_context and (facts.context_window or 0) < min_context:
+            continue
+        price = prices.get(t)
+        row_price = None
+        if price is not None and price.input is not None and price.output is not None:
+            blended = (BLEND_INPUT * price.input + BLEND_OUTPUT * price.output) / (
+                BLEND_INPUT + BLEND_OUTPUT
+            )
+            row_price = {
+                "input": price.input,
+                "output": price.output,
+                "cached_input": price.cached_input,
+                "blended": round(blended, 6),
+                "unit": f"{pricing.currency} per 1M tokens",
+            }
+        rows.append(
+            {
+                "id": t,
+                "provider": t.partition("/")[0],
+                "callable_directly": reg.allow_direct_models and lim.allows(t),
+                "in_aliases": [n for n, chain in aliases.items() if t in chain],
+                "pricing": row_price,
+                **facts.model_dump(),
+                "circuit": "unknown",  # filled in below, all targets at once
+                "live": live.snapshot(t),
+            }
+        )
+    for row, circuit in zip(rows, await _circuits([r["id"] for r in rows]), strict=True):
+        row["circuit"] = circuit
+    rows.sort(key=lambda r: _catalog_sort_key(r, sort))
+    return {
+        "object": "catalog",
+        "prices_checked": pricing.checked,
+        "catalog_checked": catalog.checked,
+        "blend": f"{BLEND_INPUT}:{BLEND_OUTPUT} input:output tokens",
+        "aliases": [{"id": n, "chain": chain} for n, chain in aliases.items()],
+        "data": rows,
+    }
+
+
+async def _circuits(targets: list[str]) -> list[str]:
+    """Breaker state per target, read concurrently. "unknown" while the breaker store is
+    failing open, because its "closed" would then be a guess."""
+    store = router.store
+    if getattr(store, "degraded", False):
+        return ["unknown"] * len(targets)
+    states = await asyncio.gather(*(store.state(t) for t in targets), return_exceptions=True)
+    return ["unknown" if isinstance(s, BaseException) else str(s) for s in states]
+
+
+def _catalog_sort_key(row: dict[str, Any], sort: str) -> tuple[Any, ...]:
+    """Unknown values sort last; ties break by id."""
+    big = float("inf")
+    if sort == "price":
+        value: float = row["pricing"]["blended"] if row["pricing"] else big
+    elif sort == "quality":
+        value = -row["quality"] if row["quality"] is not None else big
+    elif sort in ("ttft", "latency"):
+        stat = row["live"][f"{sort}_ms"]
+        value = stat["p50"] if stat else big
+    else:
+        value = 0
+    return (value, row["id"])
 
 
 @app.post("/v1/chat/completions", response_model=None)

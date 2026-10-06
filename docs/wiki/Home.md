@@ -34,6 +34,7 @@ readers who are new to them.
 | Understand failover and circuit breakers | [Routing and reliability](Routing-and-Reliability.md) |
 | Issue keys and control spend | [Keys, limits and budgets](Keys-Limits-and-Budgets.md) |
 | Monitor it | [Observability](Observability.md) |
+| Let apps pick models by price, capability, quality and live speed; keep prices current | [Choosing models](Choosing-Models.md) |
 | Change models, prices or limits | [Configuration reference](Configuration-Reference.md) |
 | Integrate a client | [API reference](API-Reference.md) |
 | Run it in production | [Operations and deployment](Operations-and-Deployment.md) |

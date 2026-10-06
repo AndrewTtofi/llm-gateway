@@ -11,6 +11,7 @@
 - [Routing and reliability](Routing-and-Reliability.md)
 - [Keys, limits and budgets](Keys-Limits-and-Budgets.md)
 - [Observability](Observability.md)
+- [Choosing models and prices](Choosing-Models.md)
 
 **Reference**
 - [Configuration](Configuration-Reference.md)

@@ -144,6 +144,11 @@ class RedisBreakerStore:
     def _available(self) -> bool:
         return self._now() >= self._down_until
 
+    @property
+    def degraded(self) -> bool:
+        """Redis is failing: state() answers "closed" (fail open), which may not be true."""
+        return self._outage
+
     def _broken(self, what: str) -> None:
         if not self._outage:  # log when the outage starts, not on every retry
             log.warning("circuit-breaker Redis unavailable (%s); failing open", what)

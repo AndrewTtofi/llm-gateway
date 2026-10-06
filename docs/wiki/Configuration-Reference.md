@@ -95,8 +95,21 @@ models:
   ollama/llama3.2:3b:          { input: 0,    output: 0 }
 ```
 
-Keys are targets (`provider/model`). Prices change, so check the providers' pricing pages
-when you add or swap a model. A target missing here logs a warning and counts as $0.
+Keys are targets (`provider/model`). Prices change: `make prices` compares them with public
+catalogs and proposes updates for review ([Choosing models](Choosing-Models.md#keeping-prices-current)).
+A target missing here logs a warning and counts as $0.
+
+## `config/catalog.yaml`
+
+```yaml
+checked: 2026-10-05
+models:
+  anthropic/claude-sonnet-5-5: { context_window: 1000000, max_output_tokens: 128000, capabilities: [json_schema, reasoning, tools, vision], quality: 4 }
+```
+
+Facts for `GET /v1/catalog`. `make prices` keeps `context_window`, `max_output_tokens` and
+`capabilities` in sync. `quality` (1–5) is yours. The file is optional; without it the catalog
+shows prices only. See [Choosing models](Choosing-Models.md).
 
 ## `config/limits.yaml`
 
@@ -116,7 +129,7 @@ Per-key overrides (`POST /admin/keys`) take precedence over the tier.
 
 ## Reloading
 
-`models.yaml`, `pricing.yaml` and `limits.yaml` reload together without a restart, in any of
+`models.yaml`, `pricing.yaml`, `catalog.yaml` and `limits.yaml` reload together without a restart, in any of
 three ways:
 
 - `make reload`, which calls `POST /admin/reload`;

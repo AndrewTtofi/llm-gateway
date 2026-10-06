@@ -44,7 +44,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: "3.14", cache: pip, cache-dependency-path: requirements-dev.txt }
       - run: pip install --require-hashes -r requirements-dev.txt
-      - run: ruff check app tests && mypy app
+      - run: ruff check app tests tools && mypy app tools
       - run: make test
       - name: lockfiles match requirements
         run: make lock && git diff --exit-code -- requirements.txt requirements-dev.txt

@@ -1,0 +1,67 @@
+name: prices
+# Weekly check of config/pricing.yaml + catalog.yaml against public catalogs (ADR 0011).
+# It never edits config. If anything drifted, it opens (or updates) one labelled issue with
+# the diff, for a human to review and apply with `make prices ARGS=--write`; when the drift
+# is gone, it closes that issue.
+on:
+  schedule: [{ cron: "17 6 * * 1" }]   # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # only to open/update/close the drift issue
+
+env:
+  LABEL: price-drift
+  TITLE: Model prices or catalog out of date
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: "3.14", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install --require-hashes -r requirements-dev.txt
+      - name: compare
+        id: diff
+        run: |
+          set +e
+          python -m tools.sync_prices > diff.txt
+          rc=$?
+          set -e
+          cat diff.txt
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # 0 up to date, 1 drift; anything else (fetch failed, internal error) fails the run
+          [ "$rc" -le 1 ]
+      - name: find the bot's open drift issue
+        id: issue
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          # Only an issue this workflow opened (label + bot author), never someone else's.
+          number=$(gh issue list --state open --label "$LABEL" --author "app/github-actions" \
+            --json number -q '.[0].number // empty')
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+      - name: open or update it
+        if: steps.diff.outputs.rc == '1'
+        env: { GH_TOKEN: "${{ github.token }}", NUMBER: "${{ steps.issue.outputs.number }}" }
+        run: |
+          {
+            echo "Public price catalogs differ from \`config/\` (checked $(date -u +%F))."
+            echo
+            # ~~~~ fence: the diff can't close it; @ is defused so nothing can mention anyone
+            echo '~~~~'; sed 's/~~~~/~ ~ ~ ~/g; s/@/@\xe2\x80\x8b/g' diff.txt; echo '~~~~'
+            echo
+            echo 'Review, then run `make prices ARGS=--write` (disputed/unchecked prices need'
+            echo '`--force`), check `git diff config/` against the providers'"'"' pricing pages,'
+            echo 'and open a PR.'
+          } > body.md
+          gh label create "$LABEL" --color FBCA04 --description "Pricing config drift" 2>/dev/null || true
+          if [ -n "$NUMBER" ]; then gh issue edit "$NUMBER" --body-file body.md
+          else gh issue create --title "$TITLE" --label "$LABEL" --body-file body.md; fi
+      - name: close it when there's no drift
+        if: steps.diff.outputs.rc == '0' && steps.issue.outputs.number != ''
+        env: { GH_TOKEN: "${{ github.token }}", NUMBER: "${{ steps.issue.outputs.number }}" }
+        run: gh issue close "$NUMBER" --comment "Prices and catalog match the public catalogs again."
