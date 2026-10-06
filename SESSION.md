@@ -11,10 +11,9 @@ Keep "Current state" short and always true.
   - Security audit done: no Critical findings. The High, Medium and almost all Low findings are fixed, with `tests/test_hardening.py`.
   - `make test` 588; lint clean; production stack verified locally (docs off, HSTS, env isolation, cache Redis, revocation broadcast).
   - Dev DB migrated to 0007.
-- **Next up:**
-  - Merge #11 → #14. After #10's squash merge, #11 conflicts with `main`; it needs `main` merged into `phase-8-cost-catalog` (keep the branch side) or a rebase. Each later PR needs the same after its base merges.
-  - Then tag releases.
-- **Blockers:** the owner must approve the branch-update strategy for the stacked PRs. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` is still empty.
+- **Merged:** #10 → #14 are all on `main` (squash). The wiki is published to the Wiki tab and synced by the `wiki` workflow.
+- **Next up:** tag a release for `[Unreleased]` (suggested v1.3.0), which publishes the GHCR image.
+- **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` is still empty.
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional
 
 ---
@@ -32,12 +31,14 @@ Keep "Current state" short and always true.
   - a bad key with a 32 MB body costs 0.01 s (was 0.25 s);
   - a 950k-message body is rejected in 0.38 s (was 4.55 s).
 - Docs: Security (audit summary), Keys/limits, Routing, Cache, Quality and safety, Production, Configuration, Providers, Observability, API reference, FAQ, Glossary, README.
-- Merged #10. #12's CI had been cancelled by the Actions outage; re-run requested.
+- Merged #10 → #14 in order. Each squash merge made the next PR conflict. Merging `main` into the branch with `-X ours` re-added definitions the branch had moved (duplicates in `app/config.py`, `app/main.py`), so each branch was restored to its reviewed tree before merging. `main` equals the final phase 10 tree.
+- Published the wiki to the Wiki tab; added the `wiki` sync workflow.
 
 **Learned**
 - A shared, fleet-wide circuit breaker must only count failures the provider caused. Pool waits and request-length timeouts are caused by clients.
 - A request with no usage must be billed on time as well as on bytes relayed: providers bill reasoning they never stream.
-- Squash-merging the bottom of a stacked PR chain makes the next PR conflict; plan for a merge-from-main or rebase per level.
+- Squash-merging the bottom of a stacked PR chain makes the next PR conflict. `merge -X ours` can still duplicate moved code: always diff the result against the branch's reviewed tree.
+- The GitHub Wiki is a separate git repo, created only when the first page is made in the web UI.
 
 ### 2026-10-06 — Session 13 (continued)
 **Did**

@@ -1,0 +1,29 @@
+name: wiki
+# Publish docs/wiki/ (the source of truth, reviewed in PRs) to the GitHub Wiki tab after
+# every merge to main that changes it. scripts/publish_wiki.sh does the work.
+on:
+  push:
+    branches: [main]
+    paths: ["docs/wiki/**", "scripts/publish_wiki.sh"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # the wiki is a git repo; this lets the workflow's token push to it
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Publish
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WIKI_REMOTE="https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" \
+            bash scripts/publish_wiki.sh

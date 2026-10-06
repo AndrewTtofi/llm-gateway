@@ -9,6 +9,9 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Added (docs)
+- The wiki is published to the GitHub Wiki tab. The `wiki` workflow re-publishes `docs/wiki/` after every merge to `main` that changes it; `scripts/publish_wiki.sh` rewrites links for the Wiki and commits as the author
+
 ### Security (audit of the gateway, ADR 0023)
 A full audit found no auth bypass, injection, SSRF, secret leak or vulnerable dependency.
 Its findings, all fixed with regression tests in `tests/test_hardening.py`:
