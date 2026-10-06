@@ -93,6 +93,7 @@ On `/v1/messages*`, errors use Anthropic's shape:
 | 403 | `team_unknown` | The key's team was removed from `limits.yaml` (fails closed) | No; operator fix |
 | 404 | `model_not_found` | Unknown alias or model | No |
 | 429 | `rate_limit_exceeded` | Over requests/min or tokens/min | Yes, after `retry-after` |
+| 429 | `admin_login_limited` | (admin API) too many failed admin logins from this source in a minute | After a minute |
 | 429 | `concurrency_limit_exceeded` | The key already has its tier's `concurrent_requests` in flight on this replica | Yes, when one finishes |
 | 413 | `request_too_large` | Body over `MAX_BODY_BYTES` | No |
 | 429 | `insufficient_quota` | The key's or its team's monthly budget is used up | No; wait for next month or raise the budget |

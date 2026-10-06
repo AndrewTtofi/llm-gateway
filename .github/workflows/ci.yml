@@ -45,6 +45,8 @@ jobs:
         with: { python-version: "3.14", cache: pip, cache-dependency-path: requirements-dev.txt }
       - run: pip install --require-hashes -r requirements-dev.txt
       - run: ruff check app tests tools && mypy app tools
+      - name: known vulnerabilities in the locked dependencies
+        run: pip-audit -r requirements.txt --no-deps --disable-pip --progress-spinner off
       - run: make test
       - name: lockfiles match requirements
         run: make lock && git diff --exit-code -- requirements.txt requirements-dev.txt
@@ -55,3 +57,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - run: docker build -t llm-gateway .
+      # Trivy reads a saved image: no access to the runner's Docker daemon. Fails on fixable
+      # HIGH/CRITICAL findings in OS or Python packages. Pinned by digest (an image, not a
+      # third-party action: the repo allows only GitHub-owned actions).
+      - name: scan the image
+        run: |
+          docker save llm-gateway -o "$RUNNER_TEMP/image.tar"
+          docker run --rm -v "$RUNNER_TEMP:/work" aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --input /work/image.tar --severity CRITICAL,HIGH --ignore-unfixed \
+            --exit-code 1 --no-progress

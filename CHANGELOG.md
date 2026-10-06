@@ -9,6 +9,14 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Security (ADR 0025)
+- **Scanning:** `pip-audit` and a Trivy image scan run in CI. The release workflow scans before it pushes.
+- **Image:** pip is removed after install (its bundled `urllib3`, `msgpack` and `setuptools` had HIGH findings), and Debian security updates are applied at build. The image now scans clean.
+- **Operator credentials:** one admin key per operator (`ADMIN_KEYS_FILE`, hashes only; `make admin-key name=…`). `GATEWAY_ADMIN_KEY` still works as `admin`.
+- **Admin audit log:** `admin_audit` table (migration 0008), `gateway.audit` log lines and `GET /admin/audit`, recording who created, edited or revoked a key or reloaded config.
+- **Failed admin logins:** limited to 10 a minute per source (`429 admin_login_limited`).
+- **Networks:** the production compose separates `edge`, `data` (internal, no route out) and `metrics`. Only the gateway can reach Caddy.
+
 ### Added (operations, ADR 0024)
 - **Budget alerts:** at 50 / 80 / 100% of a key's or team's monthly budget (`budget_alerts` in `limits.yaml`), sent through the alert webhook, plus a log line and `gateway_budget_alerts_total`. Once per level per month, fleet-wide; no extra Redis call per request.
 - **Alertmanager** in the production monitoring profile: routes Prometheus alerts to `ALERTMANAGER_SLACK_URL`. Every alert links its runbook.

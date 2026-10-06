@@ -26,6 +26,7 @@ Configuration has two layers:
 | `CLIENT_WRITE_TIMEOUT_SECONDS` | 30 | A streaming client that doesn't take a chunk this long is disconnected; 0 = no limit |
 | `DOCS_ENABLED` | `true` | `/docs`, `/redoc`, `/openapi.json`. Set `false` in production: the schema lists the admin API |
 | `CACHE_REDIS_URL` | — | A separate Redis for the response cache (production: capped, LRU). Unset = `REDIS_URL` |
+| `ADMIN_KEYS_FILE` | — | One operator per line: `name sha256-hex-of-key` (`make admin-key name=…`). Re-read when it changes |
 | `ALERTMANAGER_SLACK_URL` | — | (production compose) Where Alertmanager posts Prometheus alerts |
 | `BACKUP_KEEP_DAYS` | 14 | (production compose) How long daily `pg_dump` backups are kept |
 | `ALERT_WEBHOOK_URL` | — | Slack-compatible webhook for breaker alerts ([Self-healing](Self-Healing.md)); the variable name is set by `self_healing.alert_webhook_env` |

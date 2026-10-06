@@ -14,7 +14,8 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`:
 - it attaches an **SBOM** and **build provenance**, and signs an attestation with GitHub's
   OIDC identity.
 
-The workflow runs only GitHub-owned actions, because the repository allows no third-party
+Before pushing, the workflow scans the amd64 build with Trivy (HIGH and CRITICAL, fixable).
+If the scan fails, nothing is published. The workflow runs only GitHub-owned actions, because the repository allows no third-party
 ones. Docker steps use the `docker` CLI and `buildx` on the runner. v1.3.0 has no image:
 its release run was refused for using third-party actions. Use 1.3.1 or later.
 
@@ -56,6 +57,15 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod --profile monitor
 Grafana's passwords; `migrate` and `prune-usage` never see provider keys or the admin key.
 Use hex secrets, because they go into connection URLs as-is. The read-only role's password
 must be ASCII.
+
+**Networks:** three networks:
+- `edge`: Caddy and the gateway.
+- `data`: Postgres, both Redis instances and the jobs that use them. It's `internal`, with
+  no route out.
+- `metrics`: Prometheus, Alertmanager and Grafana.
+
+Only the gateway shares a network with Caddy, so no other container can reach the
+operator listener.
 
 **Images:** third-party images are pinned by tag *and* digest (`redis:8.10.2-alpine@sha256:…`),
 so a re-pushed tag can't change what runs. Dependabot updates both, a week after a release.

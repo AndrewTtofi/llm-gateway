@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     cache_redis_url: str = ""
     database_url: str = "postgresql+asyncpg://gateway:gateway@localhost:5432/gateway"
     gateway_admin_key: str = ""
+    # More operators, one key each: lines of `name sha256-hex-of-key` (ADR 0025).
+    admin_keys_file: str = ""
     log_level: str = "INFO"
     config_dir: Path = Path("config")
     # The chaos provider (type: fake) and every alias using it only load when this is

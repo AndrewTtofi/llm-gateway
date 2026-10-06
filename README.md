@@ -448,6 +448,7 @@ Each non-obvious choice has an ADR in [docs/decisions/](docs/decisions/):
 | [0022](docs/decisions/0022-llm-as-judge.md) | LLM-as-judge sampling |
 | [0023](docs/decisions/0023-security-hardening.md) | Security hardening after the audit: billing, shared breakers, bounded requests |
 | [0024](docs/decisions/0024-operational-readiness.md) | Operational readiness: alert routing, runbooks, backups, budget alerts |
+| [0025](docs/decisions/0025-security-finish.md) | Pre-deploy security: image and dependency scanning, operator keys, audit log, networks |
 
 ## Development
 

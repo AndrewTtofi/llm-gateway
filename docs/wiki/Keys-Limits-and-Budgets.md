@@ -48,7 +48,19 @@ curl -X PATCH localhost:8000/admin/keys/<id> -H "Authorization: Bearer $GATEWAY_
 curl -X DELETE localhost:8000/admin/keys/<id> -H "Authorization: Bearer $GATEWAY_ADMIN_KEY"
 ```
 
-Shortcut: `make key name=… tier=…`. Unknown fields are rejected on create and edit, so a
+Shortcut: `make key name=… tier=…`.
+
+**Operators.** Each person who runs the gateway should have their own admin key, so changes
+can be traced to them:
+- Create one with `make admin-key name=alice`. It prints the key, for Alice, and a line,
+  for `ADMIN_KEYS_FILE`.
+- The file holds only hashes and is re-read when it changes. Delete the line to remove
+  someone.
+- Every create, edit, revoke and reload is recorded with the operator's name:
+
+```bash
+curl localhost:8000/admin/audit -H "Authorization: Bearer $ALICES_KEY"   # newest first
+``` Unknown fields are rejected on create and edit, so a
 typo like `monthly_budget` can't silently create a key without a budget.
 
 - **Editing:** name, tier, team, limits and allowed aliases can be changed. Name and tier

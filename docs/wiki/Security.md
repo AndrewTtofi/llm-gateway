@@ -18,7 +18,8 @@ The gateway holds the organisation's provider API keys and sees every prompt. Th
 | One tenant degrading others | A per-key limit on requests in flight; a stalled reader is disconnected after 30 s; gateway-side failures (full pool, a long request past its own time limit) never count against the shared circuit breakers (ADR 0023) |
 | Unauthorised model use | Per-tier `allowed_aliases`; direct `provider/model` access only to known targets |
 | Resource exhaustion | Format check before any key lookup; the key is checked before the body is parsed; a miss cache for unknown keys; bounded metric labels; at most 10 000 messages per request; connection pools per provider; upstream calls cancelled on disconnect |
-| Admin takeover | `/admin/*` disabled unless `GATEWAY_ADMIN_KEY` is set; constant-time comparison; restrict it at the network level too |
+| Admin takeover | `/admin/*` disabled unless an admin key is configured; one key per operator (`ADMIN_KEYS_FILE`, hashes only), constant-time comparison; failed logins limited; every change audited with its operator (`GET /admin/audit`); in production only reachable from the localhost operator listener, which only the gateway's network can reach (ADR 0025) |
+| Vulnerable dependencies | `pip-audit` on the lockfile and Trivy on the image in CI; the release workflow scans before it pushes; pip is removed from the image, Debian security updates applied at build |
 | Injected config | Config is local YAML, not user input. Clients can't make the gateway call arbitrary URLs: only configured providers are called |
 | Prompt injection | A heuristic filter (plus an optional classifier) over user messages and tool results, logging, flagging or blocking per tier ([Quality and safety](Quality-and-Safety.md)) |
 | Huge requests | Bodies over `MAX_BODY_BYTES` get a 413 before parsing; Caddy caps them at the edge too |
@@ -32,8 +33,10 @@ The gateway holds the organisation's provider API keys and sees every prompt. Th
 - **Network:** keep `/admin/*`, `:9100` and ideally `/readyz` off the public internet.
 - **Keys:** one per app or team, never shared. Revoke on offboarding. Revocation reaches
   every replica at once through Redis, or within 30 s if Redis is down.
-- **Admin key:** at least 32 random characters (`openssl rand -hex 32`); the gateway warns at
-  startup about a shorter one.
+- **Admin keys:** one per operator, in `ADMIN_KEYS_FILE` (`make admin-key name=…` prints the
+  key and its line; the file holds only hashes). Remove a line to remove an operator.
+  `GATEWAY_ADMIN_KEY` still works as the operator `admin`; make it at least 32 random
+  characters. Review `GET /admin/audit` now and then.
 - **Provider keys:** rotate them in your secret store. The gateway only reads env vars at
   startup, so restart replicas after a rotation.
 - **Monitoring:** alert on `upstream_quota_exhausted` and on fallback-rate spikes. Fallback
@@ -46,7 +49,9 @@ The gateway holds the organisation's provider API keys and sees every prompt. Th
   - the Redis password stays out of process arguments;
   - the response cache has its own capped Redis, so it can't crowd out limits and budgets;
   - API docs off, HSTS and slow-client timeouts at Caddy;
-  - third-party images pinned by digest.
+  - third-party images pinned by digest;
+  - separate networks: only the gateway can reach Caddy, and Postgres and Redis have no
+    route to the internet.
 
   See [Production deployment](Production-Deployment.md).
 - **Image provenance:** release images carry an SBOM and signed provenance. Verify them with
@@ -80,5 +85,6 @@ The repo is public:
 - Dependabot (with a 7-day cooldown on new releases), and pinned, hashed dependencies
   (`requirements*.txt`);
 - a `.dockerignore`, so `.env` files never enter the image build context;
+- `pip-audit` and a Trivy image scan on every PR, and before every release is pushed;
 - no secrets in CI;
 - the dev stack binds ports to `127.0.0.1` only.

@@ -1,4 +1,4 @@
-.PHONY: up down logs test test-e2e test-live lint fmt reload shell install lock migrate key prices prune-usage restore-drill
+.PHONY: up down logs test test-e2e test-live lint fmt reload shell install lock migrate key prices prune-usage restore-drill admin-key
 
 up:
 	docker compose up -d --build
@@ -61,3 +61,7 @@ prune-usage:
 PROD = docker compose -f docker-compose.prod.yml --env-file .env.prod
 restore-drill:
 	$(PROD) exec backup sh /drill.sh
+
+# A key for a new operator, and its ADMIN_KEYS_FILE line (ADR 0025): make admin-key name=alice
+admin-key:
+	@python -m app.admin_auth $(name)
