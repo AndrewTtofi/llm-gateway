@@ -12,7 +12,7 @@ Keep "Current state" short and always true.
   - `make test` 588; lint clean; production stack verified locally (docs off, HSTS, env isolation, cache Redis, revocation broadcast).
   - Dev DB migrated to 0007.
 - **Merged:** #10 → #14 are all on `main` (squash). The wiki is published to the Wiki tab and synced by the `wiki` workflow.
-- **Released:** v1.3.0 (phases 8–10 and the security audit). The GHCR image is built by the release workflow.
+- **Released:** v1.3.0 (phases 8–10, the security audit and two review rounds), then **v1.3.1**, the same code with a release workflow that only uses GitHub-owned actions (v1.3.0's image build was refused by the repo's Actions policy).
 - **Next up:** the roadmap's v1.4 items, starting with picking a deploy target and deploying (`docs/wiki/Roadmap.md`).
 - **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` is still empty.
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional

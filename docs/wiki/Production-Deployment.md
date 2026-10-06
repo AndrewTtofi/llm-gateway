@@ -9,15 +9,19 @@ every piece working together.
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`:
 - it builds the gateway for **amd64 and arm64**;
-- it pushes the image to `ghcr.io/andrewttofi/llm-gateway` with tags `1.3.0`, `1.3` and the
+- it pushes the image to `ghcr.io/andrewttofi/llm-gateway` with tags `1.3.1`, `1.3` and the
   commit SHA;
 - it attaches an **SBOM** and **build provenance**, and signs an attestation with GitHub's
   OIDC identity.
 
+The workflow runs only GitHub-owned actions, because the repository allows no third-party
+ones. Docker steps use the `docker` CLI and `buildx` on the runner. v1.3.0 has no image:
+its release run was refused for using third-party actions. Use 1.3.1 or later.
+
 Verify an image before running it:
 
 ```bash
-gh attestation verify oci://ghcr.io/andrewttofi/llm-gateway:1.3.0 --owner AndrewTtofi
+gh attestation verify oci://ghcr.io/andrewttofi/llm-gateway:1.3.1 --owner AndrewTtofi
 ```
 
 ## `docker-compose.prod.yml`

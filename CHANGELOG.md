@@ -9,6 +9,11 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-06
+
+### Fixed
+- The release workflow uses only GitHub-owned actions and the `docker` CLI. The repository's Actions policy refused the third-party Docker actions, so v1.3.0's run failed at startup and **v1.3.0 has no image on GHCR**. 1.3.1 is the same code as 1.3.0, with images.
+
 ## [1.3.0] - 2026-10-06 (Phases 8–10 and the security audit)
 
 1.2.0 was never tagged: the catalog and frontier-model work planned for it shipped here,
