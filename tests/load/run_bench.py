@@ -757,15 +757,103 @@ def slo() -> None:
     )
 
 
+def _mib(mem: str) -> float | None:
+    """'153.6MiB' / '1.2GiB' → MiB."""
+    for unit, factor in (("GiB", 1024.0), ("MiB", 1.0), ("KiB", 1 / 1024)):
+        if mem.endswith(unit):
+            return float(mem[: -len(unit)]) * factor
+    return None
+
+
+def soak() -> None:
+    """Hours of mixed load (not in the default run: `run_bench.py soak`, length from
+    SOAK_MINUTES, default 60). Both replicas, three keys, non-streamed requests, short
+    and long streams, and a config reload every 5 minutes. Watches what short runs can't
+    show: memory that keeps growing, success rates that decay, usage rows that go missing."""
+    minutes = int(os.environ.get("SOAK_MINUTES", "60"))
+    seconds = minutes * 60
+    keys = [new_key(f"bench-soak-{i}")[0] for i in range(3)]
+    rows_before = int(psql("SELECT count(*) FROM usage_log") or 0)
+    runs: dict[str, Any] = {}
+    plan = [
+        ("soak-json", dict(model="bench-fast", rate=40), keys[0]),
+        (
+            "soak-stream",
+            dict(model="bench-realistic", stream=True, concurrency=40, ramp=10),
+            keys[1],
+        ),
+        ("soak-long", dict(model="bench-long", stream=True, concurrency=15, ramp=10), keys[2]),
+    ]
+
+    def run(name: str, opts: dict[str, Any], key: str) -> None:
+        runs[name] = load(
+            name,
+            urls=[IN_NET["gw"], IN_NET["gw2"]],
+            key=key,
+            duration=seconds,
+            warmup=0,
+            timeout=300,
+            **opts,
+        )
+
+    threads = [in_background(lambda n=n, o=o, k=k: run(n, o, k)) for n, o, k in plan]
+    samples: list[dict[str, Any]] = []
+    reloads = {"ok": 0, "failed": 0}
+    start = time.monotonic()
+    next_reload = start + 300
+    while any(t.is_alive() for t in threads):
+        now = time.monotonic()
+        if now >= next_reload:
+            r = httpx.post(f"{GW}/admin/reload", headers=admin(), timeout=10)
+            reloads["ok" if r.status_code == 200 else "failed"] += 1
+            next_reload = now + 300
+        redis_mem = sh("exec", "-T", "redis", "redis-cli", "info", "memory")
+        used = next(
+            (
+                int(ln.split(":")[1])
+                for ln in redis_mem.splitlines()
+                if ln.startswith("used_memory:")
+            ),
+            0,
+        )
+        samples.append(
+            {
+                "minute": round((now - start) / 60, 1),
+                "gateway_mib": _mib(docker_stats("gateway")["mem"]),
+                "gateway2_mib": _mib(docker_stats("gateway2")["mem"]),
+                "redis_mib": round(used / 2**20, 1),
+            }
+        )
+        print(f"  soak t+{samples[-1]['minute']} min: {samples[-1]}", flush=True)
+        time.sleep(60)
+    for t in threads:
+        t.join()
+    requests = sum(r["summary"]["requests"] for r in runs.values())
+    time.sleep(5)  # the usage writer flushes in batches
+    rows = int(psql("SELECT count(*) FROM usage_log") or 0) - rows_before
+    save(
+        "soak",
+        {
+            "minutes": minutes,
+            "runs": {n: r["summary"] for n, r in runs.items()},
+            "samples": samples,
+            "reloads": reloads,
+            "requests": requests,
+            "usage_rows": rows,
+        },
+    )
+
+
 SCENARIOS = {
     f.__name__: f for f in (overhead, capacity, scaling, accuracy, breaker, chaos, lifecycle, slo)
 }
+EXTRA = {"soak": soak}  # long: only when named
 
 if __name__ == "__main__":
     try:
         for name in sys.argv[1:] or SCENARIOS:
             print(f"== {name}", flush=True)
             restart_gateways()
-            SCENARIOS[name]()
+            (SCENARIOS | EXTRA)[name]()
     finally:
         revoke_all()
