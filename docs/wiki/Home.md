@@ -58,5 +58,7 @@ Each wiki page links to the ADRs behind it.
 
 The wiki's source lives in the main repo under
 [`docs/wiki/`](https://github.com/AndrewTtofi/llm-gateway/tree/main/docs/wiki), so it is
-reviewed in the same pull requests as the code it describes. `scripts/publish_wiki.sh`
-copies it to the GitHub Wiki tab. Edit the files in `docs/wiki/`, not the Wiki tab.
+reviewed in the same pull requests as the code it describes. After every merge to `main`
+that changes it, the `wiki` workflow publishes it to the GitHub Wiki tab
+(`scripts/publish_wiki.sh`). Edit the files in `docs/wiki/`, not the Wiki tab: edits made
+there are overwritten by the next sync.
