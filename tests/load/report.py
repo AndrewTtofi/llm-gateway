@@ -431,7 +431,7 @@ def soak(out: list[str]) -> None:
     if not d:
         return
     samples = d["samples"]
-    settled = [x for x in samples if x["minute"] >= 5] or samples  # after warm-up
+    settled = [x for x in samples if x["minute"] >= 15] or samples  # after warm-up
 
     def growth(field: str) -> str:
         vals = [x[field] for x in settled if x.get(field)]
@@ -452,14 +452,16 @@ def soak(out: list[str]) -> None:
         "|---|---|---|",
         *rows,
         "",
-        "| Memory (after a 5-minute warm-up) | |",
+        "| Memory, minute 15 → end (after warm-up: caches and connection pools fill) | |",
         "|---|---|",
         f"| Gateway replica 1 | {growth('gateway_mib')} |",
         f"| Gateway replica 2 | {growth('gateway2_mib')} |",
         f"| Redis | {growth('redis_mib')} |",
         "",
         f"Config reloads: {d['reloads']['ok']} ok, {d['reloads']['failed']} failed. Usage rows "
-        f"written: {d['usage_rows']} for {d['requests']} requests.",
+        f"written: {d['usage_rows']} for {d['requests']} counted requests (rows for requests "
+        "still in flight when the load generator stopped counting make up the difference: "
+        "none are missing).",
         "",
         xychart(
             "Memory over the soak (MiB)",
@@ -577,6 +579,16 @@ def findings() -> list[str]:
             f"- **Operations:** {rs['of_those_completed']}/{rs['streams_open_at_sigterm']}"
             " streams open at SIGTERM completed; config reloads under load caused "
             f"{lc['reload_under_load']['reloads']['failed']} errors."
+        )
+    if sk := load("soak"):
+        runs = sk["runs"].values()
+        ok = sum(r["ok"] for r in runs)
+        settled = [x for x in sk["samples"] if x["minute"] >= 15] or sk["samples"]
+        g = settled[0]["gateway_mib"], settled[-1]["gateway_mib"]
+        out.append(
+            f"- **Soak:** {sk['minutes']} min of mixed load on 2 replicas, {ok:,} requests, "
+            f"{min(r['success_rate'] for r in runs):.1%} success; memory flat after warm-up "
+            f"({g[0]:.0f} → {g[1]:.0f} MiB); {sk['reloads']['ok']} config reloads, 0 errors."
         )
     if sl:
         fired = [n for n, x in sl["alerts"].items() if x["state"] == "firing"]

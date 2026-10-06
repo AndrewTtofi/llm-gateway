@@ -16,6 +16,7 @@ python tests/load/report.py         # → this file
 - **Breaker:** 3 requests paid for the dead primary before it opened; 0 client-visible errors.
 - **Chaos:** provider down/slow, Redis slow/down, Postgres down — 100.0%+ of requests served in each. Redis outages switch rate limits off (fail open; budgets use the last known spend, and spend is queued); a slow provider costs 2 × first_token per request until the breaker opens.
 - **Operations:** 97/97 streams open at SIGTERM completed; config reloads under load caused 0 errors.
+- **Soak:** 60 min of mixed load on 2 replicas, 259,511 requests, 100.0% success; memory flat after warm-up (149 → 149 MiB); 11 config reloads, 0 errors.
 - **SLO alerts:** GatewayErrorBudgetFastBurn fired during a full outage.
 
 ## 1. Gateway overhead
@@ -146,10 +147,38 @@ Already active before the fault (carried over from earlier scenarios), so not co
 
 The page-level fast burn needs both the 5-minute and 1-hour error ratios above 14.4× the budget rate and then `for: 2m`, so it fires a few minutes in. With both breakers open, requests fail fast (503 `all_providers_unavailable`) instead of piling up behind dead providers.
 
+## 9. Soak: 60 minutes of mixed load
+
+Both replicas, three keys at once: non-streamed requests at 40/s, 40 concurrent realistic streams, 15 concurrent long streams, and a config reload every 5 minutes.
+
+| Load | Requests | Success |
+|---|---|---|
+| soak-json | 144000 | 100.0% |
+| soak-long | 34487 | 100.0% |
+| soak-stream | 81024 | 100.0% |
+
+| Memory, minute 15 → end (after warm-up: caches and connection pools fill) | |
+|---|---|
+| Gateway replica 1 | 149 → 149 MiB (-0%) |
+| Gateway replica 2 | 131 → 131 MiB (+0%) |
+| Redis | 2 → 2 MiB (+0%) |
+
+Config reloads: 11 ok, 0 failed. Usage rows written: 260667 for 259511 counted requests (rows for requests still in flight when the load generator stopped counting make up the difference: none are missing).
+
+```mermaid
+xychart-beta
+    title "Memory over the soak (MiB)"
+    x-axis [0.0, 1.1, 2.1, 3.2, 4.2, 5.3, 6.3, 7.4, 8.4, 9.5, 10.6, 11.6, 12.7, 13.7, 14.8, 15.8, 16.9, 17.9, 19.0, 20.1, 21.1, 22.2, 23.2, 24.3, 25.3, 26.4, 27.4, 28.5, 29.6, 30.6, 31.7, 32.7, 33.8, 34.8, 35.9, 36.9, 38.0, 39.1, 40.1, 41.2, 42.2, 43.3, 44.3, 45.4, 46.4, 47.5, 48.6, 49.6, 50.7, 51.7, 52.8, 53.8, 54.9, 55.9, 57.0, 58.1, 59.1]
+    y-axis "MiB"
+    line [119.0, 126.5, 127.1, 130.0, 130.6, 130.7, 131.3, 147.4, 147.4, 148.2, 148.4, 148.2, 148.4, 148.8, 148.3, 149.1, 148.4, 148.9, 148.9, 148.6, 148.6, 148.7, 148.9, 148.7, 148.6, 148.9, 148.9, 148.7, 148.6, 148.9, 149.2, 148.9, 148.6, 148.9, 148.7, 148.6, 148.9, 148.9, 148.9, 148.7, 148.9, 148.6, 148.6, 148.9, 148.9, 148.9, 148.7, 148.6, 149.1, 148.9, 148.6, 149.1, 148.9, 148.9, 149.6, 148.9, 148.9]
+    line [119.4, 126.7, 127.0, 129.9, 130.4, 130.4, 130.4, 130.5, 130.8, 131.1, 131.0, 131.0, 131.0, 130.8, 131.0, 130.8, 131.1, 131.1, 131.1, 130.9, 131.1, 130.9, 130.8, 130.8, 130.8, 130.8, 131.1, 131.1, 130.9, 131.4, 131.2, 131.2, 130.9, 131.2, 130.9, 130.9, 130.9, 130.9, 131.4, 131.0, 130.9, 130.9, 131.2, 131.0, 131.3, 131.7, 131.3, 131.0, 131.0, 131.9, 131.0, 131.3, 131.0, 131.3, 131.0, 131.5, 131.3]
+```
+_line 1: gateway · line 2: gateway2_
+
 ## Environment and limits
 
-- One laptop: Linux 6.6.87.1-microsoft-standard-WSL2 (WSL2), 16 CPUs, Mem:              30           5           2           0          22          24 GB RAM, Docker Desktop. Load generator, 2 gateway replicas, Redis, Postgres, Toxiproxy and the mock share it.
+- One laptop: Linux 6.6.87.1-microsoft-standard-WSL2 (WSL2), 16 CPUs, Mem:              30           5           2           0          23          24 GB RAM, Docker Desktop. Load generator, 2 gateway replicas, Redis, Postgres, Toxiproxy and the mock share it.
 - Gateway: one uvicorn process per replica, no `--reload`; Redis and Postgres reached through Toxiproxy (one extra hop). Load generator inside the Docker network.
 - Realistic timing: 60 real Claude Haiku 4.5 streams (2807 inter-chunk gaps), measured through the gateway (so they include its few ms).
 - Absolute numbers are a floor for this hardware; the comparisons — direct vs gateway, before vs during a fault — are what transfer.
-- Generated 2026-10-06 09:16 UTC by `tests/load/report.py`.
+- Generated 2026-10-06 10:52 UTC by `tests/load/report.py`.

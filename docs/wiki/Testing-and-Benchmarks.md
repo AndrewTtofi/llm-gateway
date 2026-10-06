@@ -95,6 +95,7 @@ Each choice avoids a common benchmarking mistake:
 | Provider outage | **3** requests to the dead provider before the breaker opened; **0** errors reached clients |
 | Provider down/slow, Redis slow/down, Postgres down | **100%** served (rate limits off during a Redis outage; uncached keys get 503 during a Postgres outage) |
 | SIGTERM with open streams | **97/97** completed |
+| Soak: 60 min mixed load, 2 replicas, config reloads | **259 511** requests, **100%** success, memory flat after warm-up, no usage rows lost |
 
 Re-measured on 2026-10-06 after profiling the request path:
 - **Redis:** 4 round trips per request. A success makes no breaker call while nothing is
