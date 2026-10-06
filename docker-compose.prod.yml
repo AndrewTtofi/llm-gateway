@@ -10,7 +10,7 @@
 # from .env.prod; the API docs are off. For managed Redis/Postgres, drop those services and
 # point the URLs at them. Third-party images are pinned by digest as well as tag.
 x-gateway: &gateway
-  image: ghcr.io/andrewttofi/llm-gateway:${GATEWAY_VERSION:?set GATEWAY_VERSION, e.g. 1.3.0}
+  image: ghcr.io/andrewttofi/llm-gateway:${GATEWAY_VERSION:?set GATEWAY_VERSION, e.g. 1.3.1}
   restart: unless-stopped
   # Only what the gateway needs; other secrets in .env.prod (Grafana's, the read-only
   # role's) never reach these containers.
