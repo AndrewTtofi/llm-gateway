@@ -74,11 +74,22 @@ def request_hash(alias: str, request: dict[str, Any]) -> str:
     )
 
 
+def _split(messages: list[Any]) -> tuple[list[Any], Any]:
+    """(everything before the last user message, the last user message)."""
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], dict) and messages[i].get("role") == "user":
+            return messages[:i], messages[i]
+    return messages, None
+
+
 def semantic_partition(request: dict[str, Any], embedding: str) -> str:
-    """Semantic matches only compare conversations whose *other* settings are identical
-    (tools, response format, sampling, limits) and that used the same embedding model."""
+    """Semantic matches only compare requests whose *other* settings are identical (tools,
+    response format, sampling, limits, embedding model) **and whose conversation before
+    the last user message is identical**. Only that last question is compared by meaning:
+    two long chats differing in one late "yes, delete it" / "no, keep it" never match."""
     rest = {k: v for k, v in request.items() if k not in IGNORED_FIELDS and k != "messages"}
-    return _digest({"embedding": embedding, **rest})[:16]
+    history, _ = _split(request.get("messages") or [])
+    return _digest({"embedding": embedding, "history": history, **rest})[:16]
 
 
 def cacheable(request: dict[str, Any]) -> bool:
@@ -97,19 +108,15 @@ def multimodal(request: dict[str, Any]) -> bool:
 
 
 def text_for_embedding(request: dict[str, Any]) -> str:
-    """The conversation as text, role-tagged, for semantic lookups."""
-    lines = []
-    for msg in request.get("messages") or []:
-        content = msg.get("content") if isinstance(msg, dict) else None
-        if isinstance(content, list):
-            content = " ".join(
-                p.get("text", "")
-                for p in content
-                if isinstance(p, dict) and p.get("type") == "text"
-            )
-        if content:
-            lines.append(f"{msg.get('role')}: {content}")
-    return "\n".join(lines)
+    """The last user message's text: what's compared by meaning. The history before it
+    is part of the partition (exact), see semantic_partition."""
+    _, last = _split(request.get("messages") or [])
+    content = last.get("content") if isinstance(last, dict) else None
+    if isinstance(content, list):
+        content = " ".join(
+            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return content if isinstance(content, str) else ""
 
 
 def storable(result: dict[str, Any]) -> bool:
@@ -394,7 +401,7 @@ class Lookup:
             return False
 
 
-async def _embed(target: str, text: str) -> list[float] | None:
+async def _embed(target: str, text: str, key: ApiKey | None = None) -> list[float] | None:
     provider, _, model = target.partition("/")
     cfg = config.registry.providers.get(provider)
     if cfg is None:
@@ -406,7 +413,14 @@ async def _embed(target: str, text: str) -> list[float] | None:
         if embed is None:
             log.warning("provider %s can't make embeddings; semantic cache off", provider)
             return None
-        vectors = await asyncio.wait_for(embed(model, [text]), EMBED_TIMEOUT_SECONDS)
+        from app import metering  # late: metering imports this module's callers
+
+        started = time.perf_counter()
+
+        async def meter(usage: dict[str, Any] | None) -> None:
+            await metering.record_internal("embedding", target, usage, key=key, started=started)
+
+        vectors = await asyncio.wait_for(embed(model, [text], meter), EMBED_TIMEOUT_SECONDS)
         return list(vectors[0])
     except Exception as exc:
         log.warning("cache embedding failed: %s", type(exc).__name__)
@@ -432,7 +446,7 @@ async def lookup(
     vector = None
     semantic = cfg.mode == "semantic" and cfg.embedding and not multimodal(request)
     if semantic and cfg.embedding and (text := text_for_embedding(request)):
-        vector = await _embed(cfg.embedding, text)
+        vector = await _embed(cfg.embedding, text, key)
     ctx = Lookup(cfg, store, scope, key_hash, index, vector, write=True)
     if mode == "refresh":
         metrics.cache.labels(cfg.mode, "refresh").inc()

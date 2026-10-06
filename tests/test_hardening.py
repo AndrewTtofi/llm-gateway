@@ -73,6 +73,7 @@ async def test_a_cut_stream_is_billed_for_the_time_the_provider_worked() -> None
     m = meter(estimate=50 + 4000)
     m.attempt_started = time.perf_counter() - 10  # streaming for 10 s, nothing visible yet
     assert 1000 <= m._actual().completion <= 1002  # 10 s x 100 tokens/s
+    m.output_cap = 4000
     m.attempt_started = time.perf_counter() - 3600
     assert m._actual().completion == 4000  # never more than the request's max_tokens
 
@@ -530,6 +531,16 @@ class FlakyRedis:
         self.up = False
         self.values: dict[str, float] = {}
 
+    def register_script(self, script: str) -> Any:
+        async def reserve(keys: list[str], args: list[Any]) -> int:
+            self._check()
+            if self.values.get(keys[0], 0.0) >= float(args[1]):
+                return 0
+            self.values[keys[0]] = self.values.get(keys[0], 0.0) + float(args[0])
+            return 1
+
+        return reserve
+
     async def get(self, key: str) -> Any:
         self._check()
         return self.values.get(key)
@@ -802,3 +813,207 @@ def test_unscanned_text_alone_doesnt_ask_the_classifier(monkeypatch: pytest.Monk
     long = [{"role": "user", "content": "x" * RULES.max_chars_per_message}] * 12
     verdict = asyncio.run(guardrails.check(long, "log"))
     assert verdict is not None and verdict.unscanned > 0 and not asked
+
+
+# --- second review (budgets, streams, output limits, scan) ---------------------------------
+
+ROLE = {
+    "id": "c",
+    "object": "chat.completion.chunk",
+    "created": 1,
+    "model": "m",
+    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}],
+}
+
+
+@respx.mock
+def test_n_answers_are_estimated_and_reserved(registry: Registry, client: TestClient) -> None:
+    respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    client.post(
+        "/v1/chat/completions", json={"model": "local", "messages": MSGS, "max_tokens": 100, "n": 4}
+    )
+    rec = records()[-1]
+    assert (rec.estimated_tokens or 0) >= 400  # 4 answers of up to 100 tokens
+
+
+@respx.mock
+def test_a_failure_after_an_empty_opening_chunk_still_falls_back(
+    registry: Registry, client: TestClient
+) -> None:
+    sse = f"data: {json.dumps(ROLE)}\n\n" + 'data: {"error": {"message": "overloaded"}}\n\n'
+    respx.post(URL).mock(
+        return_value=httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+    )
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "mock-then-ok", "messages": MSGS, "stream": True},
+    ) as r:
+        body = "".join(r.iter_lines())
+        assert r.headers["x-gateway-provider"] == "chaos/ok"  # fell back: nothing was said yet
+    assert "data: [DONE]" in body or "[DONE]" in body
+
+
+def test_opening_chunks_aren_t_output() -> None:
+    from app.routing.router import has_output
+
+    assert not has_output(ROLE)
+    assert has_output({"choices": [{"delta": {"content": "Hi"}}]})
+    assert has_output({"choices": [{"delta": {"thinking": {"thinking": "hm"}}}]})
+    assert has_output({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    assert has_output({"choices": [], "usage": {"prompt_tokens": 1}})
+
+
+@respx.mock
+def test_a_configured_default_output_limit_is_sent(registry: Registry, client: TestClient) -> None:
+    route = respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS})
+    assert "max_tokens" not in json.loads(route.calls.last.request.content)  # none configured
+    registry.providers["mock"]["default_max_tokens"] = 2048
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS})
+    assert json.loads(route.calls.last.request.content)["max_tokens"] == 2048
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS, "max_tokens": 9})
+    assert json.loads(route.calls.last.request.content)["max_tokens"] == 9  # the client's wins
+
+
+async def test_without_a_limit_a_cut_off_request_isnt_capped_at_the_default() -> None:
+    m = meter(estimate=50 + 1024)  # the estimate's default, but no limit was sent
+    m.attempt_started = time.perf_counter() - 60
+    assert m._actual().completion >= 6000  # 60 s at 100 tokens/s, not 1024
+    m.answers = 2
+    assert m._actual().completion >= 12_000  # n answers, each generating
+
+
+async def test_big_prompts_are_scanned_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    used = []
+    real = asyncio.to_thread
+
+    async def spy(fn: Any, *a: Any) -> Any:
+        used.append(fn.__name__)
+        return await real(fn, *a)
+
+    monkeypatch.setattr(guardrails.asyncio, "to_thread", spy)
+    monkeypatch.setattr(config, "guardrails", RULES)
+    await guardrails.check([{"role": "user", "content": "hi"}], "log")
+    assert used == []
+    await guardrails.check([{"role": "user", "content": "x" * 50_000}], "log")
+    assert used == ["scan"]
+
+
+# --- third review (reloads, breaker, probes, months, alerts, internal calls, cache) -------
+
+
+def test_requests_from_before_a_reload_reuse_the_old_adapter(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import providers as prov
+
+    pool = prov.AdapterPool()
+    old = dict(registry.providers["mock"])
+    a = pool.get("mock", old)
+    new = {**old, "limits": {"max_connections": 7}}
+    monkeypatch.setitem(registry.providers, "mock", new)  # the reload
+    b = pool.get("mock", new)
+    assert b is not a
+    for _ in range(5):  # in-flight requests still pass the old config
+        assert pool.get("mock", old) is a
+        assert pool.get("mock", new) is b  # the live adapter doesn't flip back
+
+
+async def test_a_cancelled_probe_hands_its_slot_back(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.routing import selfheal
+    from app.routing.breaker import Decision, MemoryBreakerStore
+
+    store = MemoryBreakerStore()
+    monkeypatch.setattr(router, "store", store)
+    cb = registry.circuit_breaker
+    for _ in range(cb.failure_threshold):
+        await store.record_failure("mock/tiny", cb, router.Ticket(Decision.ALLOW))
+    store._open_until["mock/tiny"] = 0  # open period over: half-open
+
+    class Hang:
+        configured = True
+        cfg: dict[str, Any] = {}
+
+        async def chat(self, *a: Any) -> Any:
+            await asyncio.sleep(60)
+
+    monkeypatch.setattr(selfheal.providers.pool, "get", lambda *a: Hang())
+    task = asyncio.create_task(selfheal.probe_once("mock/tiny"))
+    await asyncio.sleep(0.05)
+    task.cancel()  # a deploy stops the replica mid-probe
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (await store.decide("mock/tiny", cb)).decision is Decision.PROBE  # free again
+
+
+async def test_a_request_settles_in_the_month_it_started() -> None:
+    m = meter(streamed=False)
+    spend = m.spend
+    m.period = "2026-09"  # reserved on 30 September…
+    await spend.add(m.key.id, 5.0, m.period)
+    m.reserved_usd = 5.0
+    m.target = None  # …and refunded after midnight UTC on 1 October
+    await m.settle()
+    assert spend._spent.get((m.key.id, "2026-09")) == 0.0  # type: ignore[attr-defined]
+    assert (m.key.id, "2026-10") not in spend._spent  # type: ignore[attr-defined]
+
+
+def test_null_n_is_one_answer() -> None:
+    from app.providers.anthropic_format import to_anthropic
+
+    out = to_anthropic({"messages": MSGS, "n": None, "max_tokens": 5}, "m", {}, 100)
+    assert out["max_tokens"] == 5
+    assert openai_responses.to_responses({"messages": MSGS, "n": None}, "m")["store"] is False
+
+
+def test_semantic_matching_needs_the_same_history() -> None:
+    long = [
+        {"role": "user", "content": "Plan the migration " * 300},
+        {"role": "assistant", "content": "Here is the plan " * 300},
+    ]
+    yes = {"messages": [*long, {"role": "user", "content": "yes, delete it"}]}
+    no = {"messages": [*long, {"role": "user", "content": "no, keep it"}]}
+    other = {
+        "messages": [
+            {"role": "user", "content": "x"},
+            {"role": "user", "content": "yes, delete it"},
+        ]
+    }
+    assert cache.text_for_embedding(yes) == "yes, delete it"  # only the last question
+    assert cache.text_for_embedding(no) == "no, keep it"
+    # same history → same index, so only the short last questions are compared;
+    # a different history → a different index, never compared at all
+    assert cache.semantic_partition(yes, "e/m") == cache.semantic_partition(no, "e/m")
+    assert cache.semantic_partition(yes, "e/m") != cache.semantic_partition(other, "e/m")
+
+
+@respx.mock
+def test_classifier_calls_are_metered_and_charged_to_the_key(
+    registry: Registry, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.config import Classifier
+
+    priced(monkeypatch)
+    respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    rules = RULES.model_copy(update={"classifier": Classifier(alias="local", when="always")})
+    monkeypatch.setattr(config, "guardrails", rules)
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS})
+    internal = [r for r in records() if r.alias == "_classifier"]
+    assert internal and internal[0].target == "mock/tiny" and internal[0].cost_usd
+    assert internal[0].key_prefix != "_internal"  # it was charged to the caller's key
+
+
+async def test_judge_calls_are_recorded_as_internal(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import metering
+
+    priced(monkeypatch)
+    await metering.record_internal(
+        "judge", "mock/tiny", {"prompt_tokens": 100, "completion_tokens": 20}
+    )
+    rec = records()[-1]
+    assert rec.alias == "_judge" and rec.key_prefix == "_internal" and rec.cost_usd

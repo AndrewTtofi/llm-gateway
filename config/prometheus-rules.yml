@@ -12,18 +12,20 @@ groups:
     rules:
       - record: gateway:requests:rate5m
         expr: sum(rate(gateway_requests_total[5m]))
-      # Errors = gateway/upstream failures: 5xx, and 200 streams that failed in-band
-      # ("200:<code>"). Client errors (4xx, 499 hang-ups) don't burn the budget.
+      # Errors = gateway/upstream failures: 5xx, 200 streams that failed in-band
+      # ("200:<code>"), and 429s passed on from a provider ("429:upstream_rate_limited":
+      # the client was within its own limits). Client errors (other 4xx, 499 hang-ups)
+      # don't burn the budget.
       - record: gateway:errors:rate5m
-        expr: sum(rate(gateway_requests_total{status=~"5.*|200:.*"}[5m])) or vector(0)
+        expr: sum(rate(gateway_requests_total{status=~"5.*|200:.*|429:upstream.*"}[5m])) or vector(0)
       - record: gateway:error_ratio:rate5m
         expr: gateway:errors:rate5m / gateway:requests:rate5m
       - record: gateway:error_ratio:rate30m
-        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*"}[30m])) or vector(0)) / sum(rate(gateway_requests_total[30m]))
+        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*|429:upstream.*"}[30m])) or vector(0)) / sum(rate(gateway_requests_total[30m]))
       - record: gateway:error_ratio:rate1h
-        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*"}[1h])) or vector(0)) / sum(rate(gateway_requests_total[1h]))
+        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*|429:upstream.*"}[1h])) or vector(0)) / sum(rate(gateway_requests_total[1h]))
       - record: gateway:error_ratio:rate6h
-        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*"}[6h])) or vector(0)) / sum(rate(gateway_requests_total[6h]))
+        expr: (sum(rate(gateway_requests_total{status=~"5.*|200:.*|429:upstream.*"}[6h])) or vector(0)) / sum(rate(gateway_requests_total[6h]))
       - record: gateway:ttft_seconds:p95_10m
         # What clients see (incl. failed attempts and fallback), not the serving attempt.
         expr: histogram_quantile(0.95, sum by (le) (rate(gateway_ttft_e2e_seconds_bucket[10m])))

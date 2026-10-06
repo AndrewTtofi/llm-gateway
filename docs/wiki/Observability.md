@@ -90,6 +90,15 @@ One row per **admitted** request in `usage_log`:
 | `estimated_tokens` | The pre-call estimate, to check estimation quality |
 | `cost_usd` | `null` for an unpriced model; 0 for cache hits (`target` = `cache/exact` or `cache/semantic`) |
 | `team`, `variant` | The key's team and the A/B arm, at request time |
+
+The gateway's own calls get rows too, so spend in the usage log matches the provider's
+invoice (ADR 0023):
+
+| `alias` | Call | Charged to |
+|---------|------|------------|
+| `_classifier` | Prompt-injection classifier | The key whose request was checked (its spend and budget) |
+| `_embedding` | Semantic-cache embedding | The key whose request was looked up |
+| `_judge` | LLM-as-judge grading | The operator (`key_prefix` `_internal`), joinable by `request_id` |
 | `latency_ms`, `ttft_ms` | `ttft_ms` for streams |
 
 Rows are written by a **background batch writer**. `submit()` never blocks or raises: if
@@ -127,7 +136,7 @@ Structured JSON lines (structlog) on stdout, which suits Loki, CloudWatch or any
 
 | SLO (30 days) | Target |
 |---------------|--------|
-| Availability | 99.9% of admitted requests succeed. Gateway and upstream failures count, including streams that failed mid-way; client errors and hang-ups don't |
+| Availability | 99.9% of admitted requests succeed. Gateway and upstream failures count, including streams that failed mid-way and 429s passed on from a provider (`429:upstream_rate_limited`: a quota outage pages). Client errors, including the key's own limits, and hang-ups don't |
 | Time to first token | p95 ≤ 1.5 s for streams (end to end, as clients see it) |
 
 Alerts:

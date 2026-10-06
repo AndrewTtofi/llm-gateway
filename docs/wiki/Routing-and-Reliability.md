@@ -81,19 +81,25 @@ per model (529), and a busy Opus shouldn't push Haiku traffic away.
 ```mermaid
 stateDiagram-v2
     [*] --> closed
-    closed --> open: failure_threshold failures within window_seconds
+    closed --> open: failure_threshold failures and failure_rate of attempts, within window_seconds
     open --> half_open: after open_seconds
     half_open --> closed: the probe succeeds
     half_open --> open: the probe fails
 ```
 
-- **Closed:** traffic flows, and failures are counted in a sliding window.
+- **Closed:** traffic flows, and failures are counted in a window that starts at the first
+  failure. It opens when **both** hold: at least `failure_threshold` failures (default 5),
+  and failures are at least `failure_rate` (default 50%) of the attempts in that window.
+  The rate matters at high traffic: 5 stray errors among thousands of fleet-wide successes
+  aren't an outage. A request counts **once** per target, whatever its retries (ADR 0023).
 - **Open:** the target is skipped and costs no time.
 - **Half-open:** exactly one **probe** request is let through, using an atomic `SET NX` with
   a unique token.
   - Only the probe's result changes the state. Requests that started before the trip can't
     close or extend it.
-  - A probe that ends without a verdict (the client hung up) releases its slot.
+  - A probe that ends without a verdict (the client hung up, or the replica is being
+    stopped by a deploy) releases its slot at once, rather than holding it for
+    `probe_timeout_seconds`.
   - A client-fault answer counts as success, because the provider did respond.
   - `probe_timeout_seconds` must exceed the slowest possible call. Otherwise a slow but
     healthy probe lets a second probe through.
@@ -115,6 +121,7 @@ Configured per provider in `models.yaml`. LLM calls need more than one timeout:
 |---------|----------------|
 | `connect` | An unreachable host |
 | `first_token` | A provider that accepts the request but never starts answering. Long prompts take time to process, so don't set it too low |
+| `first_output` | A stream that opens but never produces output: only role-only opening chunks (default: `first_token`). Until real output arrives the request can still fall back. Raise it for reasoning models that think silently (OpenAI's is 300 s) |
 | `stream_idle` | Silence between stream events. Reasoning models can pause for a long time, so Anthropic uses 300 s |
 | `stream_total` | A stream that never ends, such as a provider sending keep-alives forever |
 | `total` | A non-streaming call, where the whole answer arrives at once |
@@ -129,9 +136,12 @@ Keys also have a limit on requests in flight
 
 This is the central rule for streams (ADR 0005):
 
-- **Before the first chunk:** everything can be retried or fall back. The gateway pulls the
-  first chunk from the provider *before* sending `200 OK` to the client, so a provider that
-  fails immediately is invisible to the client.
+- **Before the first output:** everything can be retried or fall back. The gateway reads
+  from the provider *before* sending `200 OK`, until a chunk carries real output (text, a
+  tool call, reasoning, or the end of the answer). Opening chunks that say nothing, such as
+  Anthropic's `message_start`, the Responses API's `response.created` and OpenAI's role-only
+  first delta, are held back and sent with it. So an overload error right after the stream
+  opens still falls back, invisibly to the client.
 - **After the first chunk:** the gateway is committed to that target. A failure is sent
   in-band and the stream ends **without** its end marker:
   - **OpenAI format:** `data: {"error": {...}}`, then no `data: [DONE]`. The OpenAI SDK

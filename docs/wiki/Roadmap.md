@@ -41,7 +41,7 @@ The gateway is built, tested and hardened, but it hasn't served real traffic yet
 | **Redis Cluster / Sentinel, and multi-region** | Limits fail open when Redis is down; high availability makes that rare |
 | **An admin UI and self-service keys**, with SSO for operators | Today keys, teams and budgets are managed with curl and the admin key |
 | **Per-team routing defaults** (policy, allowed models, guardrail level per team) | Teams have budgets; they should be able to have their own rules too |
-| **Bill classifier and judge calls to the key** that caused them | They're the operator's cost today (ADR 0023) |
+| **Judge cost per team** (a judge budget, or charging samples to the alias's owners) | Judge calls are recorded (`_judge`) but are the operator's cost |
 
 ## Ideas: quality and safety
 

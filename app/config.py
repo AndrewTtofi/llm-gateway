@@ -152,6 +152,9 @@ class RetryConfig(BaseModel):
 class BreakerConfig(BaseModel):
     store: Literal["redis", "memory"] = "redis"
     failure_threshold: int = Field(default=5, ge=1)
+    # ...and failures must be at least this share of the attempts since the first one in
+    # the window, so a busy, healthy target doesn't open on a few stray errors.
+    failure_rate: float = Field(default=0.5, gt=0, le=1)
     window_seconds: float = Field(default=60, gt=0)
     open_seconds: float = Field(default=30, gt=0)
     probe_timeout_seconds: float = Field(default=330, gt=0)

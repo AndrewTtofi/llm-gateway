@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -111,6 +112,21 @@ def _texts(messages: list[Any], tools: Any = None) -> list[tuple[str, str]]:
     return out
 
 
+THREAD_ABOVE_CHARS = 20_000  # smaller prompts scan in well under a millisecond
+
+
+def _size(messages: list[Any]) -> int:
+    """Characters of message text, cheaply (no copies), to decide where to scan."""
+    n = 0
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, str):
+            n += len(content)
+        elif isinstance(content, list):
+            n += sum(len(p.get("text") or "") for p in content if isinstance(p, dict))
+    return n
+
+
 def _ends(text: str, limit: int) -> tuple[str, int]:
     """At most `limit` characters of `text` (all of it, or its start and its end) and how
     many that is. A payload at the start of a long message is caught like one at the end."""
@@ -140,8 +156,10 @@ def scan(messages: list[Any], rules: Guardrails, tools: Any = None) -> Verdict:
     return verdict
 
 
-async def classify(messages: list[Any], rules: Guardrails) -> str:
-    """Ask the configured classifier alias. → "injection" | "safe" | "error"."""
+async def classify(messages: list[Any], rules: Guardrails, key: Any = None) -> str:
+    """Ask the configured classifier alias. → "injection" | "safe" | "error". The call is
+    metered and charged to `key`, whose request it checks (ADR 0023)."""
+    from app import metering
     from app.routing import router  # late: the router imports a lot
     from app.schemas import ChatCompletionRequest
 
@@ -160,8 +178,12 @@ async def classify(messages: list[Any], rules: Guardrails) -> str:
             ],
         }
     )
+    started = time.perf_counter()
     try:
-        result, _ = await asyncio.wait_for(router.route_chat(body), clf.timeout_seconds)
+        result, routed = await asyncio.wait_for(router.route_chat(body), clf.timeout_seconds)
+        await metering.record_internal(
+            "classifier", routed.target, result.get("usage"), key=key, started=started
+        )
         answer = str(((result.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
     except Exception as exc:
         log.warning("injection classifier failed: %s", type(exc).__name__)
@@ -176,13 +198,20 @@ async def classify(messages: list[Any], rules: Guardrails) -> str:
     )
 
 
-async def check(messages: list[Any], action: str, tools: Any = None) -> Verdict | None:
+async def check(
+    messages: list[Any], action: str, tools: Any = None, key: Any = None
+) -> Verdict | None:
     """Scan a request (None when the tier's action is `off`). Logs and counts detections;
     the caller applies `flag` / `block`."""
     if action == "off":
         return None
     rules = config.guardrails
-    verdict = scan(messages, rules, tools)
+    if _size(messages) > THREAD_ABOVE_CHARS:
+        # Tens of ms of regex work: in a thread, the event loop keeps serving other
+        # streams meanwhile (the GIL switches every few ms instead of blocking for all).
+        verdict = await asyncio.to_thread(scan, messages, rules, tools)
+    else:
+        verdict = scan(messages, rules, tools)
     if verdict.unscanned and rules.unscanned != "allow":
         metrics.guardrail.labels("unscanned", action).inc()
     clf = rules.classifier
@@ -191,7 +220,7 @@ async def check(messages: list[Any], action: str, tools: Any = None) -> Verdict 
         # conversation, which the rules already scanned.
         borderline = 0 < verdict.score < rules.threshold
         if clf.when == "always" or borderline:
-            verdict.classifier = await classify(messages, rules)
+            verdict.classifier = await classify(messages, rules, key)
     if verdict.detected(rules.threshold):
         for rule in verdict.rules:
             metrics.guardrail.labels(rule, action).inc()

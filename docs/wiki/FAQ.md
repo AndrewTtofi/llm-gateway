@@ -15,7 +15,7 @@ and gateway aliases as models. Prompt caching and extended thinking pass through
 See [Providers and translation](Providers-and-Translation.md#using-it-with-claude-code).
 
 **How much latency does it add?**
-About +2.6 ms p50 and +3.8 ms p95 per request, measured. Time to first token, which users
+About +3.6 ms p50 and +4.9 ms p95 per request, measured (+8 ms with a 100k-character prompt). Time to first token, which users
 notice, is dominated by the provider. See [Testing and benchmarks](Testing-and-Benchmarks.md).
 
 **What happens if Redis goes down?**

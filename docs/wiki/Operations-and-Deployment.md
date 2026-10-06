@@ -15,8 +15,8 @@ deployment needs.
 ```
 
 - **Gateway:** the `Dockerfile` image. It's stateless, so scale horizontally. One replica
-  (one core) handled about 200 concurrent streams within 10% of a direct connection, and 2
-  replicas reached 614 req/s on a laptop. Plan from your own load test, not these numbers.
+  (one core) handled about 100 concurrent streams within 10% of a direct connection, and 2
+  replicas reached 478 req/s on a laptop. Plan from your own load test, not these numbers.
 - **Redis:** must be shared by all replicas, because buckets, spend and breakers live there.
   Run it highly available if you need strict limit enforcement. Without it, limits fail open.
 - **Postgres:** keys and the usage log. The usage log grows by one row per request, so plan
@@ -73,7 +73,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30  
 On `SIGTERM`, uvicorn stops accepting connections and waits up to
 `--timeout-graceful-shutdown` (30 s in the image) for in-flight requests and streams. The
 gateway then flushes queued usage rows and closes its pools. Set the orchestrator's grace
-period above that (Kubernetes: `terminationGracePeriodSeconds: 45`). In testing, 90/90 open
+period above that (Kubernetes: `terminationGracePeriodSeconds: 45`). In testing, 97/97 open
 streams completed through a SIGTERM.
 
 Streams longer than the grace period are cut. For very long generations, roll out slowly,

@@ -22,6 +22,7 @@ import os
 import socket
 from typing import Any
 
+import anyio
 import httpx
 
 from app import config, providers
@@ -74,8 +75,11 @@ async def probe_once(target: str) -> str:
         if reason := router._quarantine_reason(exc, reg):
             await router.store.quarantine(target, cb, sh.quarantine_seconds, reason)
         return "failed"
-    except Exception:  # timeout, cancellation, bug: no verdict
-        await router.store.release(target, ticket)
+    except BaseException:  # cancelled (a deploy), or a bug: no verdict
+        # Hand the probe slot back now, even while being cancelled; otherwise the target
+        # would wait out probe_timeout_seconds (minutes) before anyone may probe it.
+        with anyio.CancelScope(shield=True):
+            await router.store.release(target, ticket)
         raise
     await router.store.record_success(target, cb, ticket)
     return "recovered"

@@ -155,6 +155,47 @@ Billing option 3 and breaker option 2, plus a fix for each other finding.
     `.dockerignore`.
 - **Alerts:** Redis failing open, stale auth, injection spikes, concurrency rejections.
 
+## Follow-up review (before v1.3.0)
+A second review of the request path found five more problems, fixed before the release:
+- **`n` wasn't in the estimate.** The output part is now multiplied by `n`, for the
+  reservation and for interrupted billing.
+- **Check, then reserve, could be outrun.** With real store latency, a burst of 6 requests
+  all passed a budget meant for about 2. The reservation is now the check: one Lua script
+  per counter (key, then team; the team's hold is undone if the key's is refused).
+- **Streams committed on an empty opening chunk** (`message_start`, `response.created`,
+  OpenAI's role-only first delta). An overload error right after it couldn't fall back,
+  and a stalled stream passed the first-token timeout. The router now holds chunks back
+  until one carries output, bounded by `first_output` (default `first_token`).
+- **The interrupted-billing cap assumed a limit that was never sent.** Without a client or
+  configured `default_max_tokens`, the cap is the model's catalog `max_output_tokens`.
+  OpenAI-compatible providers can now send `default_max_tokens`; it's opt-in, because a
+  default limit cuts off long answers.
+- **Large guardrail scans blocked the event loop** (tens of ms). Prompts over 20 000
+  characters are scanned in a worker thread.
+
+## Third review (before v1.3.0)
+Nine more, all fixed:
+- **Config reloads:** a request from before a reload made the adapter pool rebuild the
+  provider's client, flipping the live one back and forth and multiplying open
+  connections. Old configs now reuse their retired adapter.
+- **Breaker:** it opened on 5 failures fleet-wide, retries included, however much
+  traffic succeeded. It now needs `failure_rate` (50%) of attempts too, and a request
+  counts once per target.
+- **Probes:** a probe cancelled by a deploy held its slot for `probe_timeout_seconds`. It's
+  released at once, shielded from the cancellation.
+- **Months:** a refund at midnight on the 1st went into the new month. Spend is now kept in
+  the month the request started.
+- **Alerts:** upstream 429s didn't burn the error budget, so a provider quota outage never
+  paged. They now count.
+- **Internal calls:** judge, classifier and embedding calls are metered and get usage rows
+  (`_judge`, `_classifier`, `_embedding`). Classifier and embedding costs are charged to
+  the key whose request caused them, which also settles the earlier "billed to no one".
+- **Semantic cache:** it embedded whole conversations, so two long chats that differed
+  only in the last turn looked alike. Now only the last user message is embedded, and the
+  history before it must match exactly.
+- **Grafana:** the read-only role can read `judge_scores`.
+- **`n`:** `"n": null` is one answer, not "n > 1".
+
 ## Consequences
 - **Bills go up for interrupted requests.** A stream cut off after 10 s is billed at
   least 1 000 output tokens if its limit allows. Operators who meter differently can
@@ -171,6 +212,6 @@ Billing option 3 and breaker option 2, plus a fix for each other finding.
 - **Request ids:** clients that relied on their `x-request-id` coming back as the
   gateway's id now get it in `x-client-request-id`.
 - **Still bounded only by config, not removed:**
-  - classifier and judge calls are billed to the operator, not the key (bounded by rpm
-    and the sample rate);
+  - judge calls are the operator's cost, not a key's (bounded by the sample rate). They're
+    recorded in the usage log as `_judge`; classifier calls are charged to the key;
   - `/v1/catalog` shows tenants which providers are configured.

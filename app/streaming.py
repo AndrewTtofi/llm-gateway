@@ -154,7 +154,7 @@ class OpenAIStream:
 
 
 async def relay_sse(
-    first: dict[str, Any] | None,
+    first: dict[str, Any] | list[dict[str, Any]] | None,
     chunks: AsyncIterator[dict[str, Any]],
     meter: ChunkFilter | None = None,
     fmt: StreamFormat | None = None,
@@ -173,9 +173,10 @@ async def relay_sse(
         seen = meter.observe(chunk) if meter is not None else chunk
         return out.encode(seen) if seen is not None else []
 
+    held = first if isinstance(first, list) else [first] if first is not None else []
     try:
-        if first is not None:
-            for line in emit(first):
+        for chunk in held:  # chunks read before committing to the target
+            for line in emit(chunk):
                 yield line
         async for chunk in chunks:
             for line in emit(chunk):

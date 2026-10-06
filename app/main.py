@@ -769,10 +769,12 @@ async def _admit(
     extra = body.model_extra or {}
     tools = extra.get("tools") or extra.get("functions")
     prompt_estimate = estimate_prompt_tokens(messages, est.chars_per_token, tools)
-    completion_cap = (
-        body.max_completion_tokens or body.max_tokens or _default_completion(body.model)
-    )
-    estimate = prompt_estimate + int(completion_cap)
+    # The output limit the provider applies: the client's, else the provider's default
+    # (None when nothing is sent and the model decides).
+    sent_cap = body.max_completion_tokens or body.max_tokens or _provider_default(body.model)
+    completion_cap = sent_cap or est.default_completion_tokens
+    answers = body.n or 1  # n answers are generated, and billed, from one prompt
+    estimate = prompt_estimate + int(completion_cap) * answers
     verdict = await services.limiter.take(
         key.id, lim.requests_per_minute, lim.tokens_per_minute, estimate
     )
@@ -808,22 +810,22 @@ async def _admit(
         if body.model in reg.aliases or body.model in reg.known_targets()
         else "_unknown",
     )
+    meter.output_cap, meter.answers = sent_cap, answers
     return meter, messages, tools, rl_headers
 
 
-def _default_completion(model: str) -> int:
-    """The output limit the provider applies when the client sends none: the first
-    target's configured default (Anthropic requires one), else the estimation default."""
-    fallback = config.limits.estimation.default_completion_tokens
+def _provider_default(model: str) -> int | None:
+    """The output limit sent when the client sends none: the first target's configured
+    `default_max_tokens` (Anthropic always sends one). None: no limit is sent."""
     reg = config.registry
     try:
         first = reg.resolve(model)[0]
     except KeyError, IndexError:
-        return fallback
+        return None
     cfg = reg.providers.get(first.partition("/")[0]) or {}
     if cfg.get("type") == "anthropic":
-        return int(cfg.get("default_max_tokens", DEFAULT_MAX_TOKENS))
-    return int(cfg.get("default_max_tokens") or fallback)
+        return int(cfg.get("default_max_tokens") or DEFAULT_MAX_TOKENS)
+    return int(cfg["default_max_tokens"]) if cfg.get("default_max_tokens") else None
 
 
 async def _serve(
@@ -841,7 +843,7 @@ async def _serve(
     prompt_estimate = meter.prompt_estimate
     # Prompt-injection filter (ADR 0021), per the key's tier.
     action = config.limits.tiers[key.tier].injection if key.tier in config.limits.tiers else "log"
-    guard = await guardrails.check(messages, action, tools)
+    guard = await guardrails.check(messages, action, tools, key)
     rules = config.guardrails
     # Over the scan budget (ADR 0023): reported, and refused only where configured.
     unscanned = guard is not None and guard.unscanned > 0 and rules.unscanned != "allow"
@@ -943,7 +945,19 @@ async def _serve(
         meter.alias_label = "_unknown"
         await meter.settle()
         return _unknown(body)
-    await meter.reserve(first)
+    team_budget = config.limits.teams.get(key.team) if key.team else None
+    refused = await meter.reserve(first, team_budget.monthly_budget_usd if team_budget else None)
+    if refused:
+        metrics.rejected.labels(refused).inc()
+        meter.status, meter.error_code = 429, "insufficient_quota"
+        await meter.settle()
+        whose = "this key's team" if refused == "team_budget" else "this key"
+        return error_response(
+            429,
+            f"Monthly budget for {whose} is exhausted.",
+            "insufficient_quota",
+            "insufficient_quota",
+        )
     if body.stream:
         # Always ask the provider for usage so streams can be metered (ADR 0007); the
         # meter drops the usage chunk again if the client didn't ask for it. Keep any

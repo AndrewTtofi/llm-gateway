@@ -238,3 +238,47 @@ def test_typo_in_new_key_fields_is_rejected(monkeypatch: pytest.MonkeyPatch) -> 
         json={"name": "x", "tier": "dev", "monthly_budget": 5},
     )
     assert resp.status_code == 400
+
+
+class SlowSpend(MemorySpend):
+    """Spend with Redis-like latency on every call. Reads and adds yield to other
+    requests; only `reserve` is atomic, as the Lua script is in Redis."""
+
+    async def spent(self, key_id: str) -> float:
+        await asyncio.sleep(0.02)
+        return await super().spent(key_id)
+
+    async def add(self, key_id: str, usd: float, period: str | None = None) -> None:
+        await asyncio.sleep(0.02)
+        await super().add(key_id, usd, period)
+
+    async def reserve(
+        self, key_id: str, usd: float, budget: float, period: str | None = None
+    ) -> bool:
+        await asyncio.sleep(0.02)
+        return await super().reserve(key_id, usd, budget, period)
+
+
+@pytest.mark.usefixtures("registry", "priced")
+async def test_a_burst_cant_overspend_with_a_slow_store(
+    auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review (ADR 0023): with real store latency, check-then-reserve let a whole burst
+    pass the same stale check. The reservation is now the check."""
+    monkeypatch.setattr(services, "spend", SlowSpend())
+    key = add_key(allowed_aliases=["*"], monthly_budget_usd=2500)  # ~2 calls' estimates
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gw", headers={"Authorization": f"Bearer {key}"}
+    ) as gw:
+        responses = await asyncio.gather(
+            *(
+                gw.post(
+                    "/v1/chat/completions",
+                    json={"model": "chaos/slow", "messages": MSGS, "max_tokens": 1000},
+                )
+                for _ in range(6)
+            )
+        )
+    statuses = sorted(r.status_code for r in responses)
+    assert statuses.count(200) <= 3 and 429 in statuses

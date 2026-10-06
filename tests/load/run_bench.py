@@ -101,6 +101,7 @@ def load(
     timeline: bool = False,
     max_tokens: int = 128,
     timeout: float = 120,
+    prompt_chars: int = 0,
 ) -> dict[str, Any]:
     args = [
         "run",
@@ -127,6 +128,7 @@ def load(
     args += ["--stream"] if stream else []
     args += ["--paired"] if paired else []
     args += ["--timeline"] if timeline else []
+    args += ["--prompt-chars", str(prompt_chars)] if prompt_chars else []
     args += (
         ["--rate", str(rate)] if rate else ["--concurrency", str(concurrency), "--ramp", str(ramp)]
     )
@@ -265,36 +267,41 @@ def overhead() -> None:
     provider timing, so the difference is the gateway alone."""
     key, _ = new_key("bench-overhead")
     out: dict[str, Any] = {}
-    for stream in (False, True):
-        for rate in (20, 100):
-            tag = f"{'stream' if stream else 'json'}-{rate}rps"
-            via = load(
-                f"overhead-gw-{tag}",
-                urls=[IN_NET["gw"]],
-                key=key,
-                model="bench-fast",
-                stream=stream,
-                rate=rate,
-                duration=20,
-                paired=True,
-                timeline=True,
-            )
-            direct = load(
-                f"overhead-direct-{tag}",
-                urls=[IN_NET["mock"]],
-                model="fast",
-                stream=stream,
-                rate=rate,
-                duration=20,
-                paired=True,
-                timeline=True,
-            )
-            metric = "ttft" if stream else "total"
-            out[tag] = {
-                "gateway": via["summary"],
-                "direct": direct["summary"],
-                "paired_added_ms": paired_deltas(via["requests"], direct["requests"], metric),
-            }
+    # Small prompts at two rates, then a 100k-character prompt (~25k tokens, like a long
+    # chat or a coding agent resending its context): estimate and guardrail scan included.
+    runs_spec = [(s, r, 0) for s in (False, True) for r in (20, 100)]
+    runs_spec += [(False, 20, 100_000), (True, 20, 100_000)]
+    for stream, rate, chars in runs_spec:
+        tag = f"{'stream' if stream else 'json'}-{rate}rps" + ("-100k" if chars else "")
+        via = load(
+            f"overhead-gw-{tag}",
+            urls=[IN_NET["gw"]],
+            key=key,
+            model="bench-fast",
+            stream=stream,
+            rate=rate,
+            duration=20,
+            paired=True,
+            timeline=True,
+            prompt_chars=chars,
+        )
+        direct = load(
+            f"overhead-direct-{tag}",
+            urls=[IN_NET["mock"]],
+            model="fast",
+            stream=stream,
+            rate=rate,
+            duration=20,
+            paired=True,
+            timeline=True,
+            prompt_chars=chars,
+        )
+        metric = "ttft" if stream else "total"
+        out[tag] = {
+            "gateway": via["summary"],
+            "direct": direct["summary"],
+            "paired_added_ms": paired_deltas(via["requests"], direct["requests"], metric),
+        }
     runs = {}
     for target, urls, model, k in (
         ("gateway", [IN_NET["gw"]], "bench-realistic", key),

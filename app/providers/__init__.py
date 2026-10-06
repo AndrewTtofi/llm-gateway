@@ -32,24 +32,40 @@ class AdapterPool:
     On config reload a provider whose config changed gets a fresh adapter. The old one
     may still be serving in-flight requests, so it is closed only after a grace period
     longer than the slowest request it could be serving.
+
+    Requests that started before a reload still pass the old config. They get the retired
+    adapter for it, never a new one: rebuilding on every such call would flip the live
+    adapter back and forth and multiply open connections (each adapter has its own pool).
     """
 
     def __init__(self) -> None:
         self._live: dict[str, tuple[str, ProviderAdapter]] = {}
         self._retired: set[ProviderAdapter] = set()
+        self._by_config: dict[tuple[str, str], ProviderAdapter] = {}  # retired, still open
         self._tasks: set[asyncio.Task[None]] = set()
 
+    @staticmethod
+    def _fingerprint(cfg: dict[str, Any]) -> str:
+        return json.dumps(cfg, sort_keys=True, default=str)
+
     def get(self, name: str, cfg: dict[str, Any]) -> ProviderAdapter:
-        fingerprint = json.dumps(cfg, sort_keys=True, default=str)
+        fingerprint = self._fingerprint(cfg)
         hit = self._live.get(name)
         if hit and hit[0] == fingerprint:
             return hit[1]
+        if old := self._by_config.get((name, fingerprint)):
+            return old  # a request from before the reload
         cls = ADAPTER_TYPES.get(str(cfg.get("type")))
         if cls is None:
             raise UnsupportedProvider(f"provider type {cfg.get('type')!r} ({name}) not supported")
         adapter = cls(name, cfg)
+        current = config.registry.providers.get(name)
+        if hit and current is not None and self._fingerprint(current) != fingerprint:
+            # A stale config whose adapter is already gone: serve this call, don't go live.
+            self._retire(adapter, fingerprint)
+            return adapter
         if hit:
-            self._retire(hit[1])
+            self._retire(hit[1], hit[0])
         self._live[name] = (fingerprint, adapter)
         return adapter
 
@@ -63,8 +79,9 @@ class AdapterPool:
         longest = max(float(t.get("total", 300)), float(t.get("stream_total", 900)))
         return retry.max_attempts_per_provider * per_attempt + longest + 60
 
-    def _retire(self, old: ProviderAdapter) -> None:
+    def _retire(self, old: ProviderAdapter, fingerprint: str) -> None:
         self._retired.add(old)
+        self._by_config[(old.name, fingerprint)] = old
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -74,6 +91,8 @@ class AdapterPool:
             await asyncio.sleep(self.grace_seconds(old.cfg))
             if old in self._retired:
                 self._retired.discard(old)
+                if self._by_config.get((old.name, fingerprint)) is old:
+                    del self._by_config[(old.name, fingerprint)]
                 await old.aclose()
 
         task = loop.create_task(close_later())
@@ -92,6 +111,7 @@ class AdapterPool:
                 log.exception("closing adapter %s failed", adapter.name)
         self._live.clear()
         self._retired.clear()
+        self._by_config.clear()
 
 
 pool = AdapterPool()

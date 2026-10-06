@@ -38,7 +38,7 @@ def to_responses(
     request: dict[str, Any], model: str, reasoning_mode: str | None = None
 ) -> dict[str, Any]:
     """An (already shaped) chat-completions request → a Responses API request body."""
-    if request.get("n", 1) != 1:
+    if (request.get("n") or 1) != 1:  # null means 1
         raise UnsupportedRequest("n > 1 is not supported by the Responses API")
     out: dict[str, Any] = {
         "model": model,

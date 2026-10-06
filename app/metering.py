@@ -27,7 +27,7 @@ from app.auth import ApiKey, EffectiveLimits
 from app.observability import live, metrics
 from app.observability import logging as obs_log
 from app.observability.usage import UsageRecord, UsageSink
-from app.ratelimit import Limiter, SpendTracker
+from app.ratelimit import Limiter, SpendTracker, month
 
 log = logging.getLogger(__name__)
 _unpriced_warned: set[str] = set()
@@ -125,6 +125,7 @@ class Meter:
         self.request_id = obs_log.request_id.get()
         self.client_request_id = obs_log.client_request_id.get()
         self.started_at = datetime.now(UTC)  # time-of-day prices apply at the request's start
+        self.period = month(self.started_at)  # and spend counts in the month it started
         # From the request arriving (middleware), so admission counts too.
         self.started = obs_log.request_started.get() or time.perf_counter()
         self.first_chunk_at: float | None = None
@@ -135,6 +136,9 @@ class Meter:
         self.attempt_started: float | None = None  # start of the attempt that served
         self.timed_out: list[tuple[str, float]] = []  # other attempts the provider billed
         self.release: Callable[[], None] | None = None  # frees the key's concurrency slot
+        # The output limit sent upstream (None: none, the model decides) and answers (n).
+        self.output_cap: int | None = None
+        self.answers = 1
         self.stream_done = False
         # Response cache (ADR 0018): where to store the answer, and what was served from it.
         self.cache: Any = None  # app.cache.Lookup
@@ -146,18 +150,35 @@ class Meter:
         self.judge_cfg: Any = None
         self.judge_conversation = ""
 
-    async def reserve(self, likely_target: str) -> None:
-        """Hold the estimated cost against the budget until the real cost is known."""
-        self.reserved_usd = (
-            _cost(likely_target, self.prompt_estimate, self.estimate - self.prompt_estimate) or 0.0
-        )
-        await self._add_spend(self.reserved_usd)
+    async def reserve(self, likely_target: str, team_budget: float | None = None) -> str | None:
+        """Hold the estimated cost against the budget until the real cost is known. The
+        check and the hold are one atomic step per counter, so a burst of requests can't
+        all pass the same stale check. → None, or "budget" / "team_budget" when the
+        budget is already used up (nothing is held then)."""
+        usd = _cost(likely_target, self.prompt_estimate, self.estimate - self.prompt_estimate)
+        usd = usd or 0.0
+        team = self.key.team_spend_id
+        if (
+            team
+            and team_budget is not None
+            and not await self.spend.reserve(team, usd, team_budget, self.period)
+        ):
+            return "team_budget"
+        budget = self.limits.monthly_budget_usd
+        if not await self.spend.reserve(self.key.id, usd, budget, self.period):
+            if team and team_budget is not None:
+                await self.spend.add(team, -usd, self.period)  # undo the team's hold
+            return "budget"
+        if team and team_budget is None:
+            await self.spend.add(team, usd, self.period)  # tracked, no team budget to enforce
+        self.reserved_usd = usd
+        return None
 
     async def _add_spend(self, usd: float) -> None:
         """Month-to-date spend for the key and, if it has one, its team."""
-        await self.spend.add(self.key.id, usd)
+        await self.spend.add(self.key.id, usd, self.period)  # the month it started
         if team := self.key.team_spend_id:
-            await self.spend.add(team, usd)
+            await self.spend.add(team, usd, self.period)
 
     def failed(self, code: str) -> None:
         """The stream ended with an in-band error (after the 200 went out)."""
@@ -250,7 +271,7 @@ class Meter:
         completion = math.ceil(self._chars / config.limits.estimation.chars_per_token)
         if self._interrupted():
             ran = time.perf_counter() - (self.attempt_started or self.started)
-            completion = max(completion, self._generated_in(ran))
+            completion = max(completion, self._generated_in(ran, self.target))
         return self._estimated(self.target, completion)
 
     def _interrupted(self) -> bool:
@@ -260,11 +281,17 @@ class Meter:
             return True
         return self.streamed and self.status == 200 and not self.error_code and not self.stream_done
 
-    def _generated_in(self, seconds: float) -> int:
-        """Output tokens a provider could have generated in `seconds`, at most the cap."""
+    def _generated_in(self, seconds: float, target: str | None = None) -> int:
+        """Output tokens a provider could have generated in `seconds` (for each of `n`
+        answers), at most the output limit: the one sent upstream, else the model's own
+        (catalog), else just the time. Not the estimate's default: with no limit sent, a
+        model can write far more than that."""
         est = config.limits.estimation
-        cap = max(0, self.estimate - self.prompt_estimate)
-        return min(cap, math.ceil(seconds * est.output_tokens_per_second))
+        tokens = math.ceil(seconds * est.output_tokens_per_second) * self.answers
+        cap = self.output_cap
+        if cap is None and target and (facts := config.catalog.models.get(target)):
+            cap = facts.max_output_tokens
+        return tokens if cap is None else min(cap * self.answers, tokens)
 
     def _estimated(self, target: str, completion: int) -> Used:
         prompt = self.prompt_estimate
@@ -288,7 +315,7 @@ class Meter:
             if self.target is not None:
                 used = self._actual()
             # A timed-out attempt was still processed, and billed, by its provider.
-            extra = [(t, self._estimated(t, self._generated_in(s))) for t, s in self.timed_out]
+            extra = [(t, self._estimated(t, self._generated_in(s, t))) for t, s in self.timed_out]
             total = Used()
             for u in (used, *(u for _, u in extra)):
                 total.add(u)
@@ -463,3 +490,66 @@ class Meter:
             latency_ms=record.latency_ms,
             ttft_ms=record.ttft_ms,
         )
+
+
+async def record_internal(
+    purpose: str,
+    target: str | None,
+    usage: dict[str, Any] | None,
+    key: ApiKey | None = None,
+    started: float | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Calls the gateway makes for itself (ADR 0023): `classifier`, `embedding`, `judge`.
+
+    They're recorded like requests, so spend in metrics and the usage log matches the
+    provider's invoice: a usage row with alias `_<purpose>`, and tokens and cost per
+    target. With `key` (the request that caused the call: the classifier, a cache
+    embedding), the cost is also added to that key's and team's spend. Judge samples are
+    the operator's choice and aren't charged to a key. Never raises.
+    """
+    from app import services
+
+    try:
+        if not target:
+            return
+        u = usage if isinstance(usage, dict) else {}
+        prompt = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
+        completion = int(u.get("completion_tokens") or u.get("output_tokens") or 0)
+        details = u.get("prompt_tokens_details")
+        cached = int((details or {}).get("cached_tokens") or 0) if isinstance(details, dict) else 0
+        usd = _cost(target, prompt, completion, cached)
+        metrics.tokens.labels(target, "prompt").inc(prompt)
+        metrics.tokens.labels(target, "completion").inc(completion)
+        if usd:
+            metrics.cost.labels(target).inc(usd)
+            if key is not None:
+                await services.spend.add(key.id, usd)
+                if team := key.team_spend_id:
+                    await services.spend.add(team, usd)
+        latency = time.perf_counter() - started if started else 0.0
+        services.usage.submit(
+            UsageRecord(
+                created_at=datetime.now(UTC),
+                request_id=request_id or obs_log.request_id.get(),
+                key_id=key.id if key else "",
+                key_prefix=key.prefix if key else "_internal",
+                team=key.team if key else None,
+                alias=f"_{purpose}",
+                target=target,
+                status=200,
+                error_code=None,
+                streamed=False,
+                fallback=False,
+                attempts=1,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                cached_tokens=cached,
+                usage_estimated=not u,
+                cost_usd=usd,
+                latency_ms=round(latency * 1000),
+                ttft_ms=None,
+            )
+        )
+    except Exception:
+        log.exception("recording an internal %s call failed", purpose)

@@ -71,6 +71,7 @@ async def test_readonly_role_cannot_read_key_hashes(db: None) -> None:
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT count(*) FROM usage_log"))
+            await conn.execute(text("SELECT count(*) FROM judge_scores"))  # the quality panel
             await conn.execute(text("SELECT id, name, team FROM api_keys"))
         with pytest.raises(Exception, match="permission denied"):
             async with engine.connect() as conn:

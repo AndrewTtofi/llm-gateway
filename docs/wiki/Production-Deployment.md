@@ -44,7 +44,7 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod --profile monitor
 | `postgres` | Keys, usage log, judge scores |
 | `prune-usage` | Deletes `usage_log` rows older than `USAGE_RETENTION_DAYS` (default 90) every day. Gets only the database URL |
 | `prometheus` *(monitoring)* | Scrapes every replica's `:9100` by DNS discovery; loads the SLO and alert rules |
-| `grafana` *(monitoring)* | On `127.0.0.1:3000` only, sign-up off. It reads Postgres as `grafana_ro`, which can read `usage_log` and every `api_keys` column **except `key_hash`** |
+| `grafana` *(monitoring)* | On `127.0.0.1:3000` only, sign-up off. It reads Postgres as `grafana_ro`, which can read `usage_log`, `judge_scores` and every `api_keys` column **except `key_hash`** |
 
 **Secrets:** each container gets only the variables it needs. The gateway never sees
 Grafana's passwords; `migrate` and `prune-usage` never see provider keys or the admin key.

@@ -76,8 +76,17 @@ class Limiter(Protocol):
 
 
 class SpendTracker(Protocol):
+    """`period` (YYYY-MM): which month's counter. A request reserves and settles in the
+    month it started, so a refund at midnight on the 1st doesn't land in the new month."""
+
     async def spent(self, key_id: str) -> float: ...
-    async def add(self, key_id: str, usd: float) -> None: ...
+    async def add(self, key_id: str, usd: float, period: str | None = None) -> None: ...
+    async def reserve(
+        self, key_id: str, usd: float, budget: float, period: str | None = None
+    ) -> bool:
+        """Add `usd` only if spend is still under `budget`, in one atomic step, so
+        concurrent requests can't all pass the same stale check (ADR 0023)."""
+        ...
 
 
 def month(now: datetime | None = None) -> str:
@@ -198,6 +207,16 @@ class RedisLimiter:
             self._guard.broken(exc)
 
 
+# Check and add in one step. KEYS: spend counter · ARGV: usd, budget, ttl
+_RESERVE = """
+local spent = tonumber(redis.call('GET', KEYS[1]) or '0')
+if spent >= tonumber(ARGV[2]) then return 0 end
+redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return 1
+"""
+
+
 class RedisSpend:
     TTL = 62 * 24 * 3600  # a month-to-date counter outlives its month, then goes
     MAX_TRACKED = 10_000  # keys whose pending or last known spend this replica remembers
@@ -209,10 +228,11 @@ class RedisSpend:
         self._pending: dict[str, float] = {}
         self._known: dict[str, float] = {}  # last spend read per Redis key
         self._dropping = False  # logged that the queue is full
+        self._reserve = redis.register_script(_RESERVE)
 
     @staticmethod
-    def _key(key_id: str) -> str:
-        return f"spend:{{{key_id}}}:{month()}"
+    def _key(key_id: str, period: str | None = None) -> str:
+        return f"spend:{{{key_id}}}:{period or month()}"
 
     def _remember(self, key: str, value: float) -> None:
         self._known.pop(key, None)
@@ -265,10 +285,33 @@ class RedisSpend:
         self._remember(key, spent)
         return spent + self._pending.get(key, 0.0)
 
-    async def add(self, key_id: str, usd: float) -> None:
+    async def reserve(
+        self, key_id: str, usd: float, budget: float, period: str | None = None
+    ) -> bool:
+        key = self._key(key_id, period)
+        if not self._guard.up:  # fail open, but not past what this replica knows
+            if self._local(key) >= budget:
+                return False
+            self._defer(key, usd)
+            return True
+        await self._flush()
+        try:
+            ok = bool(int(await self._reserve(keys=[key], args=[usd, budget, self.TTL])))
+        except RedisError as exc:
+            self._guard.broken(exc)
+            if self._local(key) >= budget:
+                return False
+            self._defer(key, usd)
+            return True
+        self._guard.ok()
+        if ok and key in self._known:
+            self._known[key] += usd
+        return ok
+
+    async def add(self, key_id: str, usd: float, period: str | None = None) -> None:
         if usd == 0:  # negative = a reconciliation refund
             return
-        key = self._key(key_id)
+        key = self._key(key_id, period)
         if not self._guard.up:
             self._defer(key, usd)
             return
@@ -367,10 +410,19 @@ class MemorySpend:
     async def spent(self, key_id: str) -> float:
         return self._spent.get((key_id, month()), 0.0)
 
-    async def add(self, key_id: str, usd: float) -> None:
+    async def add(self, key_id: str, usd: float, period: str | None = None) -> None:
         if usd != 0:
-            k = (key_id, month())
+            k = (key_id, period or month())
             self._spent[k] = self._spent.get(k, 0.0) + usd
+
+    async def reserve(
+        self, key_id: str, usd: float, budget: float, period: str | None = None
+    ) -> bool:
+        k = (key_id, period or month())  # no await between the check and the add: atomic
+        if self._spent.get(k, 0.0) >= budget:
+            return False
+        self._spent[k] = self._spent.get(k, 0.0) + usd
+        return True
 
 
 # --- estimation ------------------------------------------------------------

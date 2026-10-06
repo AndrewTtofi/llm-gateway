@@ -148,6 +148,8 @@ Tokens aren't known until the provider answers, so:
      requires one: 4096 unless configured), else `default_completion_tokens`.
    - **Both limits sent:** `max_tokens` is dropped and `max_completion_tokens` used, so the
      estimate and what the provider gets always agree.
+   - **`n` answers:** the output part is multiplied by `n`. The provider generates, and
+     bills, every answer.
 2. **After the call**, correct it with the provider's real `usage`: refund an over-estimate,
    or charge the difference. A bucket may go **negative**, which delays the key's next
    request. The debt isn't forgiven by key expiry.
@@ -169,7 +171,10 @@ estimates, in a way that hanging up early can't game (ADR 0023):
 - **Counted output:** everything relayed so far, which is text, tool-call arguments and
   reasoning (thinking blocks, `reasoning_content`).
 - **Time floor:** at least `estimation.output_tokens_per_second` (default 100) for every
-  second the provider worked on it, up to the request's `max_tokens`. Providers keep
+  second the provider worked on it (times `n`). It's capped by the output limit that was
+  *sent* (the client's `max_tokens`, or the provider's `default_max_tokens`). When none
+  was sent, it's capped by the model's `max_output_tokens` from the catalog, not the
+  estimate's 1 024 default: an unlimited model can write far more than that. Providers keep
   generating, and billing, reasoning they never stream, so counting only what arrived
   would make "hang up just before the answer" nearly free.
 - **Timeouts:** each attempt that timed out after reaching its provider is billed the same
@@ -196,12 +201,17 @@ Set `output_tokens_per_second: 0` to bill only what was relayed.
   `429 insufficient_quota`, the error OpenAI uses for an empty account. On `/v1/messages` it
   is `billing_error`.
 - **Reservation:** the estimated cost, priced at the chain's first target, is added to spend
-  immediately, so 50 concurrent requests can't all spend the last dollar.
+  immediately, so 50 concurrent requests can't all spend the last dollar. The check ("is
+  spend still under the budget?") and the hold are **one atomic step** per counter (a Lua
+  script in Redis): a burst can't all pass the same stale check while the store is slow
+  (ADR 0023). A request whose hold is refused gets `429 insufficient_quota`.
+- **Month:** a request reserves and settles in the month it **started** (UTC). A request
+  running across midnight on the 1st doesn't refund into the new month.
 - **Settlement:** the reservation is replaced by the **real** cost, priced from
   `config/pricing.yaml` for the target that **actually served**. A fallback may be cheaper or
   more expensive than the first choice.
-- **Measured overshoot:** with 50 concurrent streams racing for the last dollar, +3.4%
-  (about 2.8 requests).
+- **Measured overshoot:** with 50 concurrent streams racing for the last dollar, +0.9%
+  (about 0.8 requests). It was +3.4% before holds became atomic.
 
 ### How cost is calculated
 

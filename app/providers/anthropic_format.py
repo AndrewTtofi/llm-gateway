@@ -71,7 +71,7 @@ def to_anthropic(
 def _to_anthropic(
     request: dict[str, Any], model: str, caps: dict[str, Any], default_max_tokens: int
 ) -> dict[str, Any]:
-    if request.get("n", 1) != 1:
+    if (request.get("n") or 1) != 1:  # null means 1
         raise TranslationError("n > 1 is not supported for this model")
 
     # System prompt as blocks, so cache breakpoints survive (ADR 0013); sent as one
