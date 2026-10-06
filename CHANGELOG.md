@@ -9,7 +9,15 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-06 (Phases 8–10 and the security audit)
+
+1.2.0 was never tagged: the catalog and frontier-model work planned for it shipped here,
+together with phases 9 and 10. **Upgrade notes:** run migrations (0004–0007). 0007 rewrites
+`usage_log` under an exclusive lock, so on a large table run it in a quiet period. See
+*Changed (ADR 0023)* for client-visible behaviour changes.
+
 ### Added (docs)
+- Roadmap (`docs/wiki/Roadmap.md`): what comes after v1.3.0, and why
 - The wiki is published to the GitHub Wiki tab. The `wiki` workflow re-publishes `docs/wiki/` after every merge to `main` that changes it; `scripts/publish_wiki.sh` rewrites links for the Wiki and commits as the author
 
 ### Security (audit of the gateway, ADR 0023)

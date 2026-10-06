@@ -172,10 +172,13 @@ Things that limit real use today. Each item gets tests; non-obvious ones get an 
 - [x] **LLM-as-judge sampling** (ADR 0022): a sampled share of responses is scored asynchronously by a judge alias against a rubric.
   - Scores stored (no content) in `judge_scores`, plus a metric and a dashboard panel.
 
-### Phase 11 — Ship it again
-- [ ] Wiki and README for phases 9–10.
-- [ ] Full security audit of the gateway; fix findings.
-- [ ] Merge the stacked PRs (#10 → #11 → #12 → phase 9 → phase 10) once CI runs; tag releases.
+### Phase 11 — Ship it again (done)
+- [x] Wiki and README for phases 9–10; wiki published to the Wiki tab and kept in sync.
+- [x] Full security audit of the gateway; fix findings (ADR 0023).
+- [x] Merge the stacked PRs (#10 → #14); release v1.3.0.
+
+### What's next
+See the [roadmap](docs/wiki/Roadmap.md).
 
 ---
 

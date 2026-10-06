@@ -5,14 +5,15 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 10 done, plus the security audit fixes (ADR 0023) on `phase-10-extensions`
-- **Branch:** `phase-10-extensions`. Stacked PRs: #11 (catalog) → #12 (frontier) → #13 (phase 9) → #14 (phase 10). #10 (wiki) merged to `main` (squash). Remote `github.com/AndrewTtofi/llm-gateway` (public)
+- **Phase:** 11 done (v1.3.0). Next: roadmap v1.4, "run it for real"
+- **Branch:** `main` (all phase PRs merged; tag `v1.3.0`). Remote `github.com/AndrewTtofi/llm-gateway` (public)
 - **Status:**
   - Security audit done: no Critical findings. The High, Medium and almost all Low findings are fixed, with `tests/test_hardening.py`.
   - `make test` 588; lint clean; production stack verified locally (docs off, HSTS, env isolation, cache Redis, revocation broadcast).
   - Dev DB migrated to 0007.
 - **Merged:** #10 → #14 are all on `main` (squash). The wiki is published to the Wiki tab and synced by the `wiki` workflow.
-- **Next up:** tag a release for `[Unreleased]` (suggested v1.3.0), which publishes the GHCR image.
+- **Released:** v1.3.0 (phases 8–10 and the security audit). The GHCR image is built by the release workflow.
+- **Next up:** the roadmap's v1.4 items, starting with picking a deploy target and deploying (`docs/wiki/Roadmap.md`).
 - **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` is still empty.
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional
 
@@ -33,6 +34,7 @@ Keep "Current state" short and always true.
 - Docs: Security (audit summary), Keys/limits, Routing, Cache, Quality and safety, Production, Configuration, Providers, Observability, API reference, FAQ, Glossary, README.
 - Merged #10 → #14 in order. Each squash merge made the next PR conflict. Merging `main` into the branch with `-X ours` re-added definitions the branch had moved (duplicates in `app/config.py`, `app/main.py`), so each branch was restored to its reviewed tree before merging. `main` equals the final phase 10 tree.
 - Published the wiki to the Wiki tab; added the `wiki` sync workflow.
+- Released v1.3.0 (1.2.0 skipped: its work shipped in 1.3.0). Added the roadmap.
 
 **Learned**
 - A shared, fleet-wide circuit breaker must only count failures the provider caused. Pool waits and request-length timeouts are caused by clients.

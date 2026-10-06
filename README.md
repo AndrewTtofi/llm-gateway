@@ -78,6 +78,8 @@ The **[wiki](docs/wiki/Home.md)** explains every part in depth:
 - [a multi-app walkthrough](docs/wiki/Use-Case-Multi-App.md);
 - [subscriptions and provider terms](docs/wiki/Subscriptions-and-Terms.md).
 
+What's next is in the **[roadmap](docs/wiki/Roadmap.md)**.
+
 ## Use cases
 
 | Situation | What the gateway does |
