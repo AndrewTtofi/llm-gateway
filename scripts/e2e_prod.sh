@@ -45,7 +45,9 @@ for _ in $(seq 1 90); do
 done
 curl -s http://127.0.0.1:8081/readyz | grep -q '"ready"' || fail "gateway never became ready"
 ok "migrations ran, replicas ready"
-[ "$(dc ps gateway --format '{{.Status}}' | grep -c healthy)" = 2 ] || fail "expected 2 healthy replicas"
+healthy() { dc ps gateway --format '{{.Status}}' | grep -c '(healthy)' || true; }
+for _ in $(seq 1 60); do [ "$(healthy)" = 2 ] && break; sleep 1; done  # Docker checks every 10 s
+[ "$(healthy)" = 2 ] || fail "expected 2 healthy replicas, got $(healthy)"
 ok "2 healthy replicas"
 
 pub="https://localhost"
