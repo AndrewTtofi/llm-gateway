@@ -1,5 +1,7 @@
 # Model registry — the ONLY place models are named.
 # Timeouts (seconds): connect · first_token = wait for the first stream event ·
+# first_output = wait for the first chunk of real output (default first_token; until then
+# the request can still fall back) ·
 # stream_idle = max silence between stream events (thinking models pause long) ·
 # stream_total = hard cap on a whole stream · total = non-streaming read (the whole
 # answer arrives at once) · pool = wait for a free connection when all are busy.
@@ -33,7 +35,8 @@ providers:
     type: openai
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
-    timeouts: { connect: 5, first_token: 30, stream_idle: 120, stream_total: 900, total: 300, pool: 5 }
+    # first_output: the GPT-6 reasoning models think silently before any output.
+    timeouts: { connect: 5, first_token: 30, first_output: 300, stream_idle: 120, stream_total: 900, total: 300, pool: 5 }
     limits: { max_connections: 100, max_keepalive: 20 }
     # What each "OpenAI-compatible" API accepts differs; see ADR 0012 and openai_compat.py.
     params:

@@ -20,7 +20,8 @@ every prompt, so it checks them.
   undone.
 - **Bounded work:** each message is scanned up to `max_chars_per_message` (20 000)
   characters, newest messages first, up to `max_chars_total` (200 000) per request, so huge
-  prompts can't stall the gateway. A longer message is scanned at **both ends**, half the
+  prompts can't stall the gateway. Requests over 20 000 characters are scanned in a worker
+  thread, so the event loop keeps serving other streams. A longer message is scanned at **both ends**, half the
   budget each, so a payload can't hide by being followed (or preceded) by filler.
 - **Roles:** by default the rules apply to **user messages and tool results**. Tool results
   are where *indirect* injection hides. **Tool definitions** are scanned as tool text too:

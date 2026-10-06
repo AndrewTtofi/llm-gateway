@@ -155,6 +155,24 @@ Billing option 3 and breaker option 2, plus a fix for each other finding.
     `.dockerignore`.
 - **Alerts:** Redis failing open, stale auth, injection spikes, concurrency rejections.
 
+## Follow-up review (before v1.3.0)
+A second review of the request path found five more problems, fixed before the release:
+- **`n` wasn't in the estimate.** The output part is now multiplied by `n`, for the
+  reservation and for interrupted billing.
+- **Check, then reserve, could be outrun.** With real store latency, a burst of 6 requests
+  all passed a budget meant for about 2. The reservation is now the check: one Lua script
+  per counter (key, then team; the team's hold is undone if the key's is refused).
+- **Streams committed on an empty opening chunk** (`message_start`, `response.created`,
+  OpenAI's role-only first delta). An overload error right after it couldn't fall back,
+  and a stalled stream passed the first-token timeout. The router now holds chunks back
+  until one carries output, bounded by `first_output` (default `first_token`).
+- **The interrupted-billing cap assumed a limit that was never sent.** Without a client or
+  configured `default_max_tokens`, the cap is the model's catalog `max_output_tokens`.
+  OpenAI-compatible providers can now send `default_max_tokens`; it's opt-in, because a
+  default limit cuts off long answers.
+- **Large guardrail scans blocked the event loop** (tens of ms). Prompts over 20 000
+  characters are scanned in a worker thread.
+
 ## Consequences
 - **Bills go up for interrupted requests.** A stream cut off after 10 s is billed at
   least 1 000 output tokens if its limit allows. Operators who meter differently can

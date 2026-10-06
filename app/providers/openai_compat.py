@@ -108,6 +108,11 @@ def shape_request(
     body = dict(strip_request(request))  # Anthropic-only extension fields (ADR 0013)
     for field in HELD_BACK - rules["pass"]:
         body.pop(field, None)
+    if cfg.get("default_max_tokens") and not (
+        body.get("max_tokens") or body.get("max_completion_tokens")
+    ):
+        # A configured default output limit (ADR 0023), renamed below like the client's.
+        body["max_tokens"] = int(cfg["default_max_tokens"])
     if body.get("user"):
         body["user"] = hashed_user(body["user"])  # often an email: never sent as-is
     if not rules["tools"]:

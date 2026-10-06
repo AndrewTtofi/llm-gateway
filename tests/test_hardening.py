@@ -73,6 +73,7 @@ async def test_a_cut_stream_is_billed_for_the_time_the_provider_worked() -> None
     m = meter(estimate=50 + 4000)
     m.attempt_started = time.perf_counter() - 10  # streaming for 10 s, nothing visible yet
     assert 1000 <= m._actual().completion <= 1002  # 10 s x 100 tokens/s
+    m.output_cap = 4000
     m.attempt_started = time.perf_counter() - 3600
     assert m._actual().completion == 4000  # never more than the request's max_tokens
 
@@ -530,6 +531,16 @@ class FlakyRedis:
         self.up = False
         self.values: dict[str, float] = {}
 
+    def register_script(self, script: str) -> Any:
+        async def reserve(keys: list[str], args: list[Any]) -> int:
+            self._check()
+            if self.values.get(keys[0], 0.0) >= float(args[1]):
+                return 0
+            self.values[keys[0]] = self.values.get(keys[0], 0.0) + float(args[0])
+            return 1
+
+        return reserve
+
     async def get(self, key: str) -> Any:
         self._check()
         return self.values.get(key)
@@ -802,3 +813,88 @@ def test_unscanned_text_alone_doesnt_ask_the_classifier(monkeypatch: pytest.Monk
     long = [{"role": "user", "content": "x" * RULES.max_chars_per_message}] * 12
     verdict = asyncio.run(guardrails.check(long, "log"))
     assert verdict is not None and verdict.unscanned > 0 and not asked
+
+
+# --- second review (budgets, streams, output limits, scan) ---------------------------------
+
+ROLE = {
+    "id": "c",
+    "object": "chat.completion.chunk",
+    "created": 1,
+    "model": "m",
+    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}],
+}
+
+
+@respx.mock
+def test_n_answers_are_estimated_and_reserved(registry: Registry, client: TestClient) -> None:
+    respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    client.post(
+        "/v1/chat/completions", json={"model": "local", "messages": MSGS, "max_tokens": 100, "n": 4}
+    )
+    rec = records()[-1]
+    assert (rec.estimated_tokens or 0) >= 400  # 4 answers of up to 100 tokens
+
+
+@respx.mock
+def test_a_failure_after_an_empty_opening_chunk_still_falls_back(
+    registry: Registry, client: TestClient
+) -> None:
+    sse = f"data: {json.dumps(ROLE)}\n\n" + 'data: {"error": {"message": "overloaded"}}\n\n'
+    respx.post(URL).mock(
+        return_value=httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+    )
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "mock-then-ok", "messages": MSGS, "stream": True},
+    ) as r:
+        body = "".join(r.iter_lines())
+        assert r.headers["x-gateway-provider"] == "chaos/ok"  # fell back: nothing was said yet
+    assert "data: [DONE]" in body or "[DONE]" in body
+
+
+def test_opening_chunks_aren_t_output() -> None:
+    from app.routing.router import has_output
+
+    assert not has_output(ROLE)
+    assert has_output({"choices": [{"delta": {"content": "Hi"}}]})
+    assert has_output({"choices": [{"delta": {"thinking": {"thinking": "hm"}}}]})
+    assert has_output({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    assert has_output({"choices": [], "usage": {"prompt_tokens": 1}})
+
+
+@respx.mock
+def test_a_configured_default_output_limit_is_sent(registry: Registry, client: TestClient) -> None:
+    route = respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS})
+    assert "max_tokens" not in json.loads(route.calls.last.request.content)  # none configured
+    registry.providers["mock"]["default_max_tokens"] = 2048
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS})
+    assert json.loads(route.calls.last.request.content)["max_tokens"] == 2048
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS, "max_tokens": 9})
+    assert json.loads(route.calls.last.request.content)["max_tokens"] == 9  # the client's wins
+
+
+async def test_without_a_limit_a_cut_off_request_isnt_capped_at_the_default() -> None:
+    m = meter(estimate=50 + 1024)  # the estimate's default, but no limit was sent
+    m.attempt_started = time.perf_counter() - 60
+    assert m._actual().completion >= 6000  # 60 s at 100 tokens/s, not 1024
+    m.answers = 2
+    assert m._actual().completion >= 12_000  # n answers, each generating
+
+
+async def test_big_prompts_are_scanned_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    used = []
+    real = asyncio.to_thread
+
+    async def spy(fn: Any, *a: Any) -> Any:
+        used.append(fn.__name__)
+        return await real(fn, *a)
+
+    monkeypatch.setattr(guardrails.asyncio, "to_thread", spy)
+    monkeypatch.setattr(config, "guardrails", RULES)
+    await guardrails.check([{"role": "user", "content": "hi"}], "log")
+    assert used == []
+    await guardrails.check([{"role": "user", "content": "x" * 50_000}], "log")
+    assert used == ["scan"]

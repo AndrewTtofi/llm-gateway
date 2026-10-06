@@ -78,6 +78,10 @@ class Limiter(Protocol):
 class SpendTracker(Protocol):
     async def spent(self, key_id: str) -> float: ...
     async def add(self, key_id: str, usd: float) -> None: ...
+    async def reserve(self, key_id: str, usd: float, budget: float) -> bool:
+        """Add `usd` only if spend is still under `budget`, in one atomic step, so
+        concurrent requests can't all pass the same stale check (ADR 0023)."""
+        ...
 
 
 def month(now: datetime | None = None) -> str:
@@ -198,6 +202,16 @@ class RedisLimiter:
             self._guard.broken(exc)
 
 
+# Check and add in one step. KEYS: spend counter · ARGV: usd, budget, ttl
+_RESERVE = """
+local spent = tonumber(redis.call('GET', KEYS[1]) or '0')
+if spent >= tonumber(ARGV[2]) then return 0 end
+redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return 1
+"""
+
+
 class RedisSpend:
     TTL = 62 * 24 * 3600  # a month-to-date counter outlives its month, then goes
     MAX_TRACKED = 10_000  # keys whose pending or last known spend this replica remembers
@@ -209,6 +223,7 @@ class RedisSpend:
         self._pending: dict[str, float] = {}
         self._known: dict[str, float] = {}  # last spend read per Redis key
         self._dropping = False  # logged that the queue is full
+        self._reserve = redis.register_script(_RESERVE)
 
     @staticmethod
     def _key(key_id: str) -> str:
@@ -264,6 +279,27 @@ class RedisSpend:
         spent = float(value) if value else 0.0
         self._remember(key, spent)
         return spent + self._pending.get(key, 0.0)
+
+    async def reserve(self, key_id: str, usd: float, budget: float) -> bool:
+        key = self._key(key_id)
+        if not self._guard.up:  # fail open, but not past what this replica knows
+            if self._local(key) >= budget:
+                return False
+            self._defer(key, usd)
+            return True
+        await self._flush()
+        try:
+            ok = bool(int(await self._reserve(keys=[key], args=[usd, budget, self.TTL])))
+        except RedisError as exc:
+            self._guard.broken(exc)
+            if self._local(key) >= budget:
+                return False
+            self._defer(key, usd)
+            return True
+        self._guard.ok()
+        if ok and key in self._known:
+            self._known[key] += usd
+        return ok
 
     async def add(self, key_id: str, usd: float) -> None:
         if usd == 0:  # negative = a reconciliation refund
@@ -371,6 +407,13 @@ class MemorySpend:
         if usd != 0:
             k = (key_id, month())
             self._spent[k] = self._spent.get(k, 0.0) + usd
+
+    async def reserve(self, key_id: str, usd: float, budget: float) -> bool:
+        k = (key_id, month())  # no await between the check and the add: atomic here
+        if self._spent.get(k, 0.0) >= budget:
+            return False
+        self._spent[k] = self._spent.get(k, 0.0) + usd
+        return True
 
 
 # --- estimation ------------------------------------------------------------

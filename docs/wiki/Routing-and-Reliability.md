@@ -115,6 +115,7 @@ Configured per provider in `models.yaml`. LLM calls need more than one timeout:
 |---------|----------------|
 | `connect` | An unreachable host |
 | `first_token` | A provider that accepts the request but never starts answering. Long prompts take time to process, so don't set it too low |
+| `first_output` | A stream that opens but never produces output: only role-only opening chunks (default: `first_token`). Until real output arrives the request can still fall back. Raise it for reasoning models that think silently (OpenAI's is 300 s) |
 | `stream_idle` | Silence between stream events. Reasoning models can pause for a long time, so Anthropic uses 300 s |
 | `stream_total` | A stream that never ends, such as a provider sending keep-alives forever |
 | `total` | A non-streaming call, where the whole answer arrives at once |
@@ -129,9 +130,12 @@ Keys also have a limit on requests in flight
 
 This is the central rule for streams (ADR 0005):
 
-- **Before the first chunk:** everything can be retried or fall back. The gateway pulls the
-  first chunk from the provider *before* sending `200 OK` to the client, so a provider that
-  fails immediately is invisible to the client.
+- **Before the first output:** everything can be retried or fall back. The gateway reads
+  from the provider *before* sending `200 OK`, until a chunk carries real output (text, a
+  tool call, reasoning, or the end of the answer). Opening chunks that say nothing, such as
+  Anthropic's `message_start`, the Responses API's `response.created` and OpenAI's role-only
+  first delta, are held back and sent with it. So an overload error right after the stream
+  opens still falls back, invisibly to the client.
 - **After the first chunk:** the gateway is committed to that target. A failure is sent
   in-band and the stream ends **without** its end marker:
   - **OpenAI format:** `data: {"error": {...}}`, then no `data: [DONE]`. The OpenAI SDK

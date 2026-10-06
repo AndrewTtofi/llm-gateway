@@ -135,6 +135,9 @@ class Meter:
         self.attempt_started: float | None = None  # start of the attempt that served
         self.timed_out: list[tuple[str, float]] = []  # other attempts the provider billed
         self.release: Callable[[], None] | None = None  # frees the key's concurrency slot
+        # The output limit sent upstream (None: none, the model decides) and answers (n).
+        self.output_cap: int | None = None
+        self.answers = 1
         self.stream_done = False
         # Response cache (ADR 0018): where to store the answer, and what was served from it.
         self.cache: Any = None  # app.cache.Lookup
@@ -146,12 +149,28 @@ class Meter:
         self.judge_cfg: Any = None
         self.judge_conversation = ""
 
-    async def reserve(self, likely_target: str) -> None:
-        """Hold the estimated cost against the budget until the real cost is known."""
-        self.reserved_usd = (
-            _cost(likely_target, self.prompt_estimate, self.estimate - self.prompt_estimate) or 0.0
-        )
-        await self._add_spend(self.reserved_usd)
+    async def reserve(self, likely_target: str, team_budget: float | None = None) -> str | None:
+        """Hold the estimated cost against the budget until the real cost is known. The
+        check and the hold are one atomic step per counter, so a burst of requests can't
+        all pass the same stale check. → None, or "budget" / "team_budget" when the
+        budget is already used up (nothing is held then)."""
+        usd = _cost(likely_target, self.prompt_estimate, self.estimate - self.prompt_estimate)
+        usd = usd or 0.0
+        team = self.key.team_spend_id
+        if (
+            team
+            and team_budget is not None
+            and not await self.spend.reserve(team, usd, team_budget)
+        ):
+            return "team_budget"
+        if not await self.spend.reserve(self.key.id, usd, self.limits.monthly_budget_usd):
+            if team and team_budget is not None:
+                await self.spend.add(team, -usd)  # undo the team's hold
+            return "budget"
+        if team and team_budget is None:
+            await self.spend.add(team, usd)  # tracked, no team budget to enforce
+        self.reserved_usd = usd
+        return None
 
     async def _add_spend(self, usd: float) -> None:
         """Month-to-date spend for the key and, if it has one, its team."""
@@ -250,7 +269,7 @@ class Meter:
         completion = math.ceil(self._chars / config.limits.estimation.chars_per_token)
         if self._interrupted():
             ran = time.perf_counter() - (self.attempt_started or self.started)
-            completion = max(completion, self._generated_in(ran))
+            completion = max(completion, self._generated_in(ran, self.target))
         return self._estimated(self.target, completion)
 
     def _interrupted(self) -> bool:
@@ -260,11 +279,17 @@ class Meter:
             return True
         return self.streamed and self.status == 200 and not self.error_code and not self.stream_done
 
-    def _generated_in(self, seconds: float) -> int:
-        """Output tokens a provider could have generated in `seconds`, at most the cap."""
+    def _generated_in(self, seconds: float, target: str | None = None) -> int:
+        """Output tokens a provider could have generated in `seconds` (for each of `n`
+        answers), at most the output limit: the one sent upstream, else the model's own
+        (catalog), else just the time. Not the estimate's default: with no limit sent, a
+        model can write far more than that."""
         est = config.limits.estimation
-        cap = max(0, self.estimate - self.prompt_estimate)
-        return min(cap, math.ceil(seconds * est.output_tokens_per_second))
+        tokens = math.ceil(seconds * est.output_tokens_per_second) * self.answers
+        cap = self.output_cap
+        if cap is None and target and (facts := config.catalog.models.get(target)):
+            cap = facts.max_output_tokens
+        return tokens if cap is None else min(cap * self.answers, tokens)
 
     def _estimated(self, target: str, completion: int) -> Used:
         prompt = self.prompt_estimate
@@ -288,7 +313,7 @@ class Meter:
             if self.target is not None:
                 used = self._actual()
             # A timed-out attempt was still processed, and billed, by its provider.
-            extra = [(t, self._estimated(t, self._generated_in(s))) for t, s in self.timed_out]
+            extra = [(t, self._estimated(t, self._generated_in(s, t))) for t, s in self.timed_out]
             total = Used()
             for u in (used, *(u for _, u in extra)):
                 total.add(u)

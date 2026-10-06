@@ -354,23 +354,53 @@ class CommittedStream:
         await self._chunks.aclose()
 
 
-Stream = tuple[dict[str, Any] | None, CommittedStream]
+Stream = tuple[list[dict[str, Any]], CommittedStream]
+
+
+def has_output(chunk: dict[str, Any]) -> bool:
+    """A chunk that carries the model's output (text, tool calls, reasoning), or ends the
+    answer. Role-only opening chunks (Anthropic's message_start, the Responses API's
+    response.created, OpenAI's first delta) don't: a failure after them can still fall back."""
+    if chunk.get("usage") and not chunk.get("choices"):
+        return True
+    for choice in chunk.get("choices") or []:
+        if choice.get("finish_reason"):
+            return True
+        delta = choice.get("delta") or {}
+        if delta.get("content") or delta.get("tool_calls") or delta.get("thinking"):
+            return True
+        if delta.get("reasoning_content") or delta.get("reasoning") or delta.get("refusal"):
+            return True
+    return False
 
 
 async def route_stream(
     body: ChatCompletionRequest, routed: Routed | None = None
 ) -> tuple[Stream, Routed]:
-    """Retry/fallback cover everything up to the first chunk; after that the stream is
-    committed to its target (ADR 0005)."""
+    """Retry/fallback cover everything up to the first chunk of real output; after that
+    the stream is committed to its target (ADR 0005). Opening chunks before it are held
+    back and sent with it. `first_output` (default: `first_token`) bounds the wait."""
 
     async def call(adapter: ProviderAdapter, model: str, req: dict[str, Any]) -> Any:
         chunks = adapter.stream(model, req)
+        t = adapter.cfg.get("timeouts", {})
+        wait = float(t.get("first_output", t.get("first_token", 30)))
+        held: list[dict[str, Any]] = []
         try:
-            first = await anext(chunks, None)  # raises → this target failed before output
+            async with asyncio.timeout(wait):
+                async for chunk in chunks:  # raises → this target failed before output
+                    held.append(chunk)
+                    if has_output(chunk):
+                        break
+        except TimeoutError as exc:
+            await chunks.aclose()
+            raise ProviderError(
+                f"{adapter.name} sent no output within {wait:g}s", retryable=True, timeout=True
+            ) from exc
         except BaseException:
             await chunks.aclose()
             raise
-        return first, chunks
+        return held, chunks
 
     (first, chunks), routed, adapter, reg = await _route(body, call, routed)
     try:

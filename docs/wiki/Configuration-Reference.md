@@ -57,7 +57,7 @@ providers:
 | `defaults` | Flags for models not listed |
 | `stream_usage: false` | (openai type) don't send `stream_options`; usage is taken from the stream if the provider sends it, otherwise estimated |
 | `params` | (openai type) `allow` / `drop` / `rename` / `values` / `pass`, per provider and per model. See [Providers and translation → Parameter rules](Providers-and-Translation.md#parameter-rules) |
-| `default_max_tokens` | The output limit the provider applies when the client sends none. Anthropic requires one (4096 unless set); for others, set it if the provider's default is large, so the token estimate matches |
+| `default_max_tokens` | Sent as the output limit when the client sends none. Anthropic requires one (4096 unless set). For OpenAI-compatible providers it's opt-in: set it to stop unlimited answers (reasoning models can write tens of thousands of tokens), knowing that answers longer than it are cut off |
 | `tools: false`, `vision: false` | (openai type, per model) requests needing them skip this target |
 | `dev_only: true` | Loaded only with `GATEWAY_ENABLE_FAKE=1` (e.g. the benchmark mock) |
 
