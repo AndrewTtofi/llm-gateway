@@ -16,7 +16,7 @@ import logging
 import secrets
 import signal
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
@@ -35,7 +35,6 @@ from app.observability import live, metrics
 from app.observability import logging as obs_log
 from app.providers.anthropic_format import DEFAULT_MAX_TOKENS
 from app.providers.base import ProviderAdapter
-from app.providers.openai_compat import rules_for
 from app.ratelimit import estimate_prompt_tokens
 from app.routing import ab, policy, router, selfheal
 from app.routing.router import AllTargetsFailed, Routed, UnknownModel
