@@ -79,3 +79,4 @@ def configure(level: str = "INFO") -> None:
 
 access = structlog.get_logger("gateway.access")
 usage = structlog.get_logger("gateway.usage")
+audit = structlog.get_logger("gateway.audit")  # admin changes, with the operator (ADR 0025)

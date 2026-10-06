@@ -44,6 +44,7 @@ eventually takes Prometheus down. Unknown models are labelled `_unknown`.
 | `gateway_judge_total` | counter | alias, result | Judge samples: `scored`, `dropped`, `error`, `unparsable` |
 | `gateway_probes_total` | counter | target, result | Background probes: `recovered`, `failed`, `skipped`, `busy` |
 | `gateway_alerts_total` | counter | result | Alert webhook posts: `sent`, `failed` |
+| `gateway_budget_alerts_total` | counter | level | Keys or teams reaching 50 / 80 / 100% of a monthly budget |
 
 ## Grafana dashboard
 
@@ -151,6 +152,9 @@ Alerts:
   - `GatewayAuthServedStale`: keys are checked from cache because Postgres is down.
   - `GatewayInjectionSpike`: more than 50 detections in 15 min.
   - `GatewayConcurrencyRejections`: a key keeps hitting its in-flight limit.
+
+Every alert has a `runbook_url` to its section in [Runbooks](Runbooks.md). In production,
+Alertmanager routes them to a Slack-compatible webhook (`ALERTMANAGER_SLACK_URL`).
 
 Burn-rate alerting beats plain threshold alerts. A 2% error rate for five minutes is noise,
 while 0.5% sustained for a day quietly spends the whole month's budget. Burn rate catches

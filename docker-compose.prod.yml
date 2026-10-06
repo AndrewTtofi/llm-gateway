@@ -41,6 +41,7 @@ x-gateway: &gateway
 
 services:
   caddy:
+    networks: [edge]
     image: caddy:2.11.7-alpine@sha256:d76116d819d5162f464b0f2cd09bd28c568a86148c7bc539ce17c33eb22d8bbb
     restart: unless-stopped
     ports:
@@ -57,6 +58,7 @@ services:
     depends_on: [gateway]
 
   migrate:
+    networks: [data]
     <<: *gateway
     restart: "no"
     healthcheck: { disable: true }
@@ -71,6 +73,7 @@ services:
       postgres: { condition: service_healthy }
 
   gateway:
+    networks: [edge, data, metrics]
     <<: *gateway
     # SIGTERM: wait up to 30 s for open streams (the grace period below must be longer).
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30
@@ -87,6 +90,7 @@ services:
       retries: 3
 
   redis:
+    networks: [data]
     image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
     restart: unless-stopped
     # The password goes into a config file, not the command line (visible in ps/inspect).
@@ -104,6 +108,7 @@ services:
   # Response cache only (ADR 0018, 0023): capped, evicts least-recently-used entries, no
   # persistence (a cache can be rebuilt). Limits and budgets stay in `redis`, uncapped.
   redis-cache:
+    networks: [data]
     image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
     restart: unless-stopped
     command: >-
@@ -118,6 +123,7 @@ services:
       CACHE_MAXMEMORY: ${CACHE_MAXMEMORY:-512mb}
 
   postgres:
+    networks: [data]
     image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     restart: unless-stopped
     environment:
@@ -132,6 +138,7 @@ services:
 
   # Daily usage_log retention (see docs/wiki/Operations-and-Deployment.md).
   prune-usage:
+    networks: [data]
     <<: *gateway
     restart: unless-stopped
     command: >-
@@ -144,7 +151,30 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
 
+  # Daily pg_dump, kept BACKUP_KEEP_DAYS days in the pg-backups volume (copy it off-host
+  # too). Restore and the restore drill: docs/wiki/Runbooks.md#backups. Only the database
+  # password reaches this container.
+  backup:
+    networks: [data]
+    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    restart: unless-stopped
+    entrypoint: ["sh", "/backup.sh"]
+    environment:
+      PGHOST: postgres
+      PGUSER: gateway
+      PGDATABASE: gateway
+      PGPASSWORD: ${POSTGRES_PASSWORD:?}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./config/backup/backup.sh:/backup.sh:ro
+      - ./config/backup/restore.sh:/restore.sh:ro
+      - ./config/backup/drill.sh:/drill.sh:ro
+      - pg-backups:/backups
+    depends_on:
+      migrate: { condition: service_completed_successfully }  # dump a migrated schema
+
   prometheus:
+    networks: [metrics]
     image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     restart: unless-stopped
     profiles: ["monitoring"]
@@ -153,7 +183,23 @@ services:
       - ./config/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
       - prom-data:/prometheus
 
+  # Routes Prometheus alerts to ALERTMANAGER_SLACK_URL (Slack-compatible webhook); each
+  # alert links its runbook. Its own page: 127.0.0.1:9093 (SSH tunnel).
+  alertmanager:
+    networks: [metrics]
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    entrypoint: ["sh", "/start.sh"]
+    ports: ["127.0.0.1:9093:9093"]
+    environment:
+      ALERTMANAGER_SLACK_URL: ${ALERTMANAGER_SLACK_URL:-}
+    volumes:
+      - ./config/alertmanager/start.sh:/start.sh:ro
+      - alertmanager-data:/alertmanager
+
   grafana:
+    networks: [data, metrics]
     image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
     restart: unless-stopped
     profiles: ["monitoring"]
@@ -169,10 +215,20 @@ services:
       - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
 
+# Each container joins only the networks it needs (ADR 0025): only the gateway shares a
+# network with Caddy, so nothing else can reach the operator listener (:8081); the data
+# network has no route out, so Postgres and Redis can't reach the internet.
+networks:
+  edge: {}
+  data: { internal: true }
+  metrics: {}
+
 volumes:
   caddy-data:
   caddy-config:
   redis-data:
   pg-data:
   prom-data:
+  pg-backups:
+  alertmanager-data:
   grafana-data:

@@ -54,6 +54,20 @@ class ProviderError(Exception):
         self.deadline = deadline
 
 
+# What malformed provider data raises inside a translator (a missing field, a wrong type).
+MALFORMED = (KeyError, TypeError, AttributeError, IndexError, ValueError)
+
+
+def invalid_response(provider: str, exc: BaseException) -> ProviderError:
+    """A provider answer or stream event the translator couldn't read (ADR 0026): a
+    retryable provider failure, so the router falls back, never a gateway 500."""
+    return ProviderError(
+        f"{provider} returned an invalid response",
+        retryable=True,
+        detail=f"{type(exc).__name__}: {str(exc)[:200]}",
+    )
+
+
 def hashed_user(user: object) -> str:
     """The `user` field as providers get it: a stable pseudonym, never the raw value
     (often an email address)."""

@@ -5,8 +5,16 @@ FROM python:3.14.8-slim@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af8
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
+# Debian security fixes that came out after the base image was built.
+RUN apt-get update \
+    && apt-get -y --no-install-recommends upgrade \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir --require-hashes -r requirements.txt
+# pip is only needed to install: it's removed afterwards, together with the copies of
+# urllib3 and msgpack it bundles, so the image only ships what the gateway runs.
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt \
+    && pip uninstall -y pip
 
 COPY app ./app
 COPY config ./config

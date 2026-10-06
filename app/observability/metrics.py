@@ -72,6 +72,12 @@ fail_open = Counter(
     ["what"],
     registry=registry,
 )
+budget_alerts = Counter(
+    "gateway_budget_alerts_total",
+    "Keys or teams crossing a budget alert level (percent of the monthly budget, ADR 0024).",
+    ["level"],
+    registry=registry,
+)
 usage_dropped = Counter(
     "gateway_usage_log_dropped_total",
     "Usage rows dropped (queue full or Postgres down).",

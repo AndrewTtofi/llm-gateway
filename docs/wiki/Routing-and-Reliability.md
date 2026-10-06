@@ -92,6 +92,8 @@ stateDiagram-v2
   and failures are at least `failure_rate` (default 50%) of the attempts in that window.
   The rate matters at high traffic: 5 stray errors among thousands of fleet-wide successes
   aren't an outage. A request counts **once** per target, whatever its retries (ADR 0023).
+  Successes are counted only while failures are. The admission check reports that in
+  the same Redis round trip, so a healthy target costs no extra Redis call per request.
 - **Open:** the target is skipped and costs no time.
 - **Half-open:** exactly one **probe** request is let through, using an atomic `SET NX` with
   a unique token.

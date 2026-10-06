@@ -13,7 +13,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import secrets
 import signal
 import time
 from collections.abc import AsyncIterator
@@ -27,7 +26,17 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import cache, config, extensions, guardrails, judge, messages_api, providers, services
+from app import (
+    admin_auth,
+    cache,
+    config,
+    extensions,
+    guardrails,
+    judge,
+    messages_api,
+    providers,
+    services,
+)
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
@@ -96,10 +105,11 @@ async def measure_loop_lag(interval: float = 0.5) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     obs_log.configure(config.settings.log_level)
-    if 0 < len(config.settings.gateway_admin_key) < 32:
+    if 0 < len(config.settings.gateway_admin_key) < 32:  # operators' file keys are generated
         log.warning("GATEWAY_ADMIN_KEY is under 32 characters; use `openssl rand -hex 32`")
     await services.start()
     alerts = selfheal.Alerts(redis=services.redis_client())
+    services.alerts = alerts  # budget alerts send through it too (ADR 0024)
     poller = asyncio.create_task(poll_breakers(alerts=alerts))
     lag = asyncio.create_task(measure_loop_lag())
     prober = asyncio.create_task(selfheal.probe_loop())  # ADR 0019
@@ -307,12 +317,26 @@ def _bearer(authorization: str) -> str:
     return token.strip() if scheme.lower() == "bearer" else ""
 
 
-def require_admin(authorization: Annotated[str, Header()] = "") -> None:
-    key = config.settings.gateway_admin_key
-    # Compare bytes: compare_digest raises TypeError on non-ASCII str (header bytes ≥ 0x80).
-    presented = authorization.encode("utf-8", "surrogateescape")
-    if not key or not secrets.compare_digest(presented, f"Bearer {key}".encode()):
+def require_admin(request: Request, authorization: Annotated[str, Header()] = "") -> str:
+    """→ the operator's name (ADR 0025). Failed logins are counted per source; past the
+    limit, a source gets 429 for the rest of the minute."""
+    source = request.client.host if request.client else "-"
+    if admin_auth.failed_logins.blocked(source):
+        raise HTTPException(
+            429,
+            detail={
+                "message": "Too many failed admin logins. Try again in a minute.",
+                "type": "rate_limit_error",
+                "code": "admin_login_limited",
+            },
+            headers={"retry-after": "60"},
+        )
+    operator = admin_auth.authenticate(_bearer(authorization))
+    if operator is None:
+        admin_auth.failed_logins.failed(source)
+        log.warning("admin login failed from %s", source)
         raise HTTPException(status_code=401, detail="unauthorized")
+    return operator
 
 
 async def require_key(
@@ -360,7 +384,7 @@ def key_limits(key: ApiKey) -> EffectiveLimits:
 
 
 Authenticated = Annotated[ApiKey, Depends(require_key)]
-Admin = Annotated[None, Depends(require_admin)]
+Admin = Annotated[str, Depends(require_admin)]  # the operator's name
 
 
 # --- public ------------------------------------------------------------------
@@ -693,35 +717,15 @@ async def _chat(
             param="model",
         )
 
-    # Budget: checked before the call against month-to-date spend (ADR 0007).
-    team_budget = config.limits.teams.get(key.team) if key.team else None
-    if key.team and team_budget is None:
+    # Budgets (ADR 0007, 0023) are enforced by the reservation before routing: one atomic
+    # check-and-hold per counter, so no separate read of the spend is needed here.
+    if key.team and key.team not in config.limits.teams:
         # Fail closed: a team removed from limits.yaml mustn't mean "no team budget".
         return error_response(
             403,
             f"key team {key.team!r} is not configured",
             "permission_error",
             "team_unknown",
-        )
-    if (
-        team_budget is not None
-        and key.team_spend_id
-        and await services.spend.spent(key.team_spend_id) >= team_budget.monthly_budget_usd
-    ):
-        metrics.rejected.labels("team_budget").inc()
-        return error_response(
-            429,
-            "Monthly budget for this key's team is exhausted.",
-            "insufficient_quota",
-            "insufficient_quota",
-        )
-    if await services.spend.spent(key.id) >= lim.monthly_budget_usd:
-        metrics.rejected.labels("budget").inc()
-        return error_response(
-            429,
-            "Monthly budget for this key is exhausted.",
-            "insufficient_quota",
-            "insufficient_quota",
         )
 
     # Requests in flight for this key (ADR 0023). Freed when the request settles.
@@ -1193,7 +1197,7 @@ class NewKey(BaseModel):
 
 
 @app.post("/admin/keys", status_code=201, response_model=None)
-async def create_key(new: NewKey, _: Admin) -> dict[str, Any] | JSONResponse:
+async def create_key(new: NewKey, operator: Admin) -> dict[str, Any] | JSONResponse:
     if new.tier not in config.limits.tiers:
         return error_response(
             400, f"unknown tier {new.tier!r}; one of {list(config.limits.tiers)}", param="tier"
@@ -1204,6 +1208,9 @@ async def create_key(new: NewKey, _: Admin) -> dict[str, Any] | JSONResponse:
         )
     overrides = new.model_dump(exclude={"name", "tier"}, exclude_none=True)
     key, plaintext = await services.keys.store.create(new.name, new.tier, overrides)
+    await admin_auth.record(
+        operator, "key.create", key.id, name=new.name, tier=new.tier, overrides=overrides
+    )
     # The only time the plaintext exists outside the client: store it now.
     return {**key.public(), "key": plaintext}
 
@@ -1219,9 +1226,10 @@ async def list_keys(_: Admin) -> dict[str, Any]:
 
 
 @app.delete("/admin/keys/{key_id}", response_model=None)
-async def revoke_key(key_id: str, _: Admin) -> dict[str, Any] | JSONResponse:
+async def revoke_key(key_id: str, operator: Admin) -> dict[str, Any] | JSONResponse:
     if not await services.keys.store.revoke(key_id):
         return error_response(404, "no active key with that id", code="key_not_found")
+    await admin_auth.record(operator, "key.revoke", key_id)
     services.keys.invalidate()  # this instance stops accepting it now
     await services.announce_key_change()  # and the others (within 30 s if Redis is down)
     return {"revoked": True, "id": key_id}
@@ -1242,7 +1250,9 @@ class KeyUpdate(BaseModel):
 
 
 @app.patch("/admin/keys/{key_id}", response_model=None)
-async def update_key(key_id: str, changes: KeyUpdate, _: Admin) -> dict[str, Any] | JSONResponse:
+async def update_key(
+    key_id: str, changes: KeyUpdate, operator: Admin
+) -> dict[str, Any] | JSONResponse:
     """Edit a key in place: name, tier, team, limits, allowed aliases. The plaintext key
     doesn't change. Takes effect here and, through Redis, on other replicas now."""
     fields = changes.model_dump(include=changes.model_fields_set)
@@ -1259,6 +1269,7 @@ async def update_key(key_id: str, changes: KeyUpdate, _: Admin) -> dict[str, Any
     key = await services.keys.store.update(key_id, fields)
     if key is None:
         return error_response(404, "no active key with that id", code="key_not_found")
+    await admin_auth.record(operator, "key.update", key_id, changes=fields)
     services.keys.invalidate()
     await services.announce_key_change()
     return {**key.public(), "spent_this_month_usd": await services.spend.spent(key.id)}
@@ -1282,13 +1293,35 @@ async def list_teams(_: Admin) -> dict[str, Any]:
 
 
 @app.post("/admin/reload", response_model=None)
-async def reload(_: Admin) -> dict[str, object] | JSONResponse:
+async def reload(operator: Admin) -> dict[str, object] | JSONResponse:
     try:
         reg = config.reload_registry()
     except Exception as exc:  # bad YAML / validation error: the old config stays live
+        await admin_auth.record(operator, "config.reload", ok=False, error=type(exc).__name__)
         msg = f"reload failed, previous config kept: {type(exc).__name__}: {str(exc)[:300]}"
         return error_response(400, msg, code="invalid_config")
+    await admin_auth.record(operator, "config.reload", ok=True)
     return {"reloaded": True, "aliases": list(reg.aliases)}
+
+
+@app.get("/admin/audit")
+async def admin_audit(
+    _: Admin, limit: Annotated[int, Query(ge=1, le=1000)] = 100
+) -> dict[str, Any]:
+    """Recent admin changes, newest first: who, what, when (ADR 0025)."""
+    entries = await services.audit.recent(limit)
+    return {
+        "data": [
+            {
+                "at": e.at.isoformat(),
+                "operator": e.operator,
+                "action": e.action,
+                "target": e.target,
+                "detail": e.detail,
+            }
+            for e in entries
+        ]
+    }
 
 
 @app.get("/admin/providers", response_model=None)

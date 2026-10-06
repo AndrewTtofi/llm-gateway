@@ -16,7 +16,7 @@ deployment needs.
 
 - **Gateway:** the `Dockerfile` image. It's stateless, so scale horizontally. One replica
   (one core) handled about 100 concurrent streams within 10% of a direct connection, and 2
-  replicas reached 478 req/s on a laptop. Plan from your own load test, not these numbers.
+  replicas reached 551 req/s on a laptop. Plan from your own load test, not these numbers.
 - **Redis:** must be shared by all replicas, because buckets, spend and breakers live there.
   Run it highly available if you need strict limit enforcement. Without it, limits fail open.
 - **Postgres:** keys and the usage log. The usage log grows by one row per request, so plan

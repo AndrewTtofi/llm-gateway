@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app import config
+from app.admin_auth import AuditStore, MemoryAuditStore, PostgresAuditStore
 from app.auth import CachedKeys, MemoryKeyStore, PostgresKeyStore
 from app.cache import CacheStore, MemoryCacheStore, RedisCacheStore
 from app.db import make_engine, make_sessions
@@ -40,6 +41,8 @@ concurrency = Concurrency()  # per replica, so never replaced (ADR 0023)
 usage: UsageSink = MemoryUsageSink()
 response_cache: CacheStore = MemoryCacheStore()  # ADR 0018
 judge: Judge = Judge(MemoryScoreStore())  # ADR 0022
+audit: AuditStore = MemoryAuditStore()  # admin changes (ADR 0025)
+alerts: Any = None  # app.routing.selfheal.Alerts, set at startup (breaker and budget alerts)
 _writer: PostgresUsageWriter | None = None
 
 log = logging.getLogger(__name__)
@@ -51,7 +54,7 @@ _engine: AsyncEngine | None = None
 
 async def start() -> None:
     global keys, limiter, spend, usage, response_cache, judge, _redis, _engine, _writer, started
-    global _cache_redis
+    global _cache_redis, audit
     if config.settings.gateway_stores == "memory":
         router.store = MemoryBreakerStore()
         judge.start()
@@ -74,6 +77,7 @@ async def start() -> None:
         )
     response_cache = RedisCacheStore(_cache_redis or _redis)
     judge = Judge(PostgresScoreStore(sessions))
+    audit = PostgresAuditStore(sessions)
     judge.start()
     spend = RedisSpend(_redis)
     router.store = (

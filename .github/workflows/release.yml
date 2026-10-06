@@ -41,6 +41,15 @@ jobs:
         # The docker-container driver: needed for multi-platform builds and attestations.
         run: docker buildx create --use --name release --driver docker-container
 
+      - name: Scan before publishing
+        # The amd64 build, loaded locally and scanned: nothing is pushed if it fails.
+        run: |
+          docker buildx build . --platform linux/amd64 --load -t release-scan
+          docker save release-scan -o "$RUNNER_TEMP/image.tar"
+          docker run --rm -v "$RUNNER_TEMP:/work" aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --input /work/image.tar --severity CRITICAL,HIGH --ignore-unfixed \
+            --exit-code 1 --no-progress
+
       - name: Log in to GHCR
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}

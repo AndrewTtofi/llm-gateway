@@ -22,6 +22,7 @@
 - [API](API-Reference.md)
 - [Operations and deployment](Operations-and-Deployment.md)
 - [Production deployment](Production-Deployment.md)
+- [Runbooks](Runbooks.md)
 - [Testing and benchmarks](Testing-and-Benchmarks.md)
 - [Security](Security.md)
 

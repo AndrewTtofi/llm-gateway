@@ -61,6 +61,18 @@ class JudgeScoreRow(Base):
     labels: Mapped[list[str]] = mapped_column(JSON)
 
 
+class AdminAuditRow(Base):
+    """Every admin change, with the operator who made it (ADR 0025)."""
+
+    __tablename__ = "admin_audit"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    operator: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(32))
+    target: Mapped[str | None] = mapped_column(String(100))
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
 class UsageRow(Base):
     """One row per admitted request (ADR 0008). Never holds prompt or completion text."""
 

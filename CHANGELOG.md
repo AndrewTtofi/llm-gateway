@@ -9,6 +9,41 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Added (testing, ADR 0026)
+- **Fuzzing (Hypothesis):** the API never answers 500 to any body, provider data fails cleanly, and accepted requests translate or are refused.
+- **Golden provider fixtures** (Anthropic, OpenAI chat, Responses API; streamed and not) replayed end to end. `tools/record_fixtures.py` swaps them for real recordings.
+- **`scripts/e2e_prod.sh`** and a CI `e2e` job: the production compose stack end to end.
+
+### Fixed (found by fuzzing)
+- A `tool` message without `tool_call_id` crashed the Responses translator (500). Tool messages now need their call id, `tool_calls` must be well-formed, and malformed requests are refused as unsupported.
+- Malformed provider events or answers raised `KeyError`/`TypeError` (a 500 before the first chunk). They're now a retryable "invalid response" provider error, so the router falls back.
+
+### Security (ADR 0025)
+- **Scanning:** `pip-audit` and a Trivy image scan run in CI. The release workflow scans before it pushes.
+- **Image:** pip is removed after install (its bundled `urllib3`, `msgpack` and `setuptools` had HIGH findings), and Debian security updates are applied at build. The image now scans clean.
+- **Operator credentials:** one admin key per operator (`ADMIN_KEYS_FILE`, hashes only; `make admin-key name=…`). `GATEWAY_ADMIN_KEY` still works as `admin`.
+- **Admin audit log:** `admin_audit` table (migration 0008), `gateway.audit` log lines and `GET /admin/audit`, recording who created, edited or revoked a key or reloaded config.
+- **Failed admin logins:** limited to 10 a minute per source (`429 admin_login_limited`).
+- **Networks:** the production compose separates `edge`, `data` (internal, no route out) and `metrics`. Only the gateway can reach Caddy.
+
+### Added (operations, ADR 0024)
+- **Budget alerts:** at 50 / 80 / 100% of a key's or team's monthly budget (`budget_alerts` in `limits.yaml`), sent through the alert webhook, plus a log line and `gateway_budget_alerts_total`. Once per level per month, fleet-wide; no extra Redis call per request.
+- **Alertmanager** in the production monitoring profile: routes Prometheus alerts to `ALERTMANAGER_SLACK_URL`. Every alert links its runbook.
+- **Runbooks** wiki page: one section per alert, plus backup, restore and rebuilding spend.
+- **Daily `pg_dump` backups** (`backup` service, `BACKUP_KEEP_DAYS`), `restore.sh`, and `make restore-drill`.
+
+### Changed (performance)
+- **Breaker successes:** they need no Redis call unless failures are being counted (the admission check says so in the same round trip).
+- **Budgets:** the early budget read is gone, since the atomic reservation is the check. A key with no budget left can still be served free cache hits.
+- **Settlement:** it writes the token bucket and spend concurrently.
+- **Slow streaming clients:** they're detected by one watchdog per stream instead of a timeout around every chunk.
+- **Measured locally, same load:**
+
+  | | CPU | p50 |
+  |---|---|---|
+  | Per request | −9% | −0.8 ms |
+  | Per stream | −12% | — |
+
 ## [1.3.1] - 2026-10-06
 
 ### Fixed

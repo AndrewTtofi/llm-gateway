@@ -142,9 +142,13 @@ class Alerts:
         except Exception:
             return True  # Redis down: rather a duplicate alert than none
 
-    async def send(self, target: str, before: str, after: str, reason: str | None) -> None:
+    @staticmethod
+    def _url() -> str:
         env = config.registry.self_healing.alert_webhook_env
-        url = os.environ.get(env, "") if env else ""
+        return os.environ.get(env, "") if env else ""
+
+    async def send(self, target: str, before: str, after: str, reason: str | None) -> None:
+        url = self._url()
         if not url or not await self._first_to_send(target, after):
             return
         icon = {"open": "🔴", "half_open": "🟡", "closed": "🟢"}.get(after, "⚪")
@@ -152,6 +156,22 @@ class Alerts:
         if reason:
             text += f" ({reason})"
         payload = {"text": text, "target": target, "from": before, "to": after, "reason": reason}
+        await self._post_payload(url, payload)
+
+    async def deliver(self, payload: dict[str, Any], dedupe: str, ttl: float) -> None:
+        """Any other alert (budgets): sent once per `dedupe` key per `ttl`, fleet-wide."""
+        url = self._url()
+        if not url:
+            return
+        if self.redis is not None:
+            try:
+                if not await self.redis.set(dedupe, self.host, nx=True, ex=max(1, round(ttl))):
+                    return  # another replica (or an earlier request) already sent it
+            except Exception as exc:  # Redis down: rather a duplicate alert than none
+                log.debug("alert dedupe unavailable: %s", type(exc).__name__)
+        await self._post_payload(url, payload)
+
+    async def _post_payload(self, url: str, payload: dict[str, Any]) -> None:
         try:
             if self._post is not None:
                 await self._post(url, payload)

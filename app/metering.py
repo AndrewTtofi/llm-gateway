@@ -14,6 +14,7 @@ spent generating at an assumed speed, up to the reserved maximum.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
@@ -22,7 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from app import config
+from app import budget_alerts, config
 from app.auth import ApiKey, EffectiveLimits
 from app.observability import live, metrics
 from app.observability import logging as obs_log
@@ -158,27 +159,53 @@ class Meter:
         usd = _cost(likely_target, self.prompt_estimate, self.estimate - self.prompt_estimate)
         usd = usd or 0.0
         team = self.key.team_spend_id
-        if (
-            team
-            and team_budget is not None
-            and not await self.spend.reserve(team, usd, team_budget, self.period)
-        ):
-            return "team_budget"
+        team_total = None
+        if team and team_budget is not None:
+            team_total = await self.spend.reserve(team, usd, team_budget, self.period)
+            if team_total is None:
+                return "team_budget"
         budget = self.limits.monthly_budget_usd
-        if not await self.spend.reserve(self.key.id, usd, budget, self.period):
+        total = await self.spend.reserve(self.key.id, usd, budget, self.period)
+        if total is None:
             if team and team_budget is not None:
                 await self.spend.add(team, -usd, self.period)  # undo the team's hold
             return "budget"
         if team and team_budget is None:
             await self.spend.add(team, usd, self.period)  # tracked, no team budget to enforce
         self.reserved_usd = usd
+        # Budget alerts: this hold may have crossed 50/80/100% (holds count, like spend).
+        budget_alerts.crossed(
+            f"key {self.key.prefix} ({self.key.name})", self.key.id, total, usd, budget, self.period
+        )
+        if team_total is not None and team_budget is not None and self.key.team:
+            budget_alerts.crossed(
+                f"team {self.key.team}",
+                f"team:{self.key.team}",
+                team_total,
+                usd,
+                team_budget,
+                self.period,
+            )
         return None
+
+    async def _reconcile(self, tpm: int, tokens: int, usd: float) -> None:
+        """Correct the token bucket and the spend at once: independent Redis calls, so
+        concurrently rather than one round trip after another."""
+        calls = [self.limiter.adjust(self.key.id, tpm, tokens), self._add_spend(usd)]
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
 
     async def _add_spend(self, usd: float) -> None:
         """Month-to-date spend for the key and, if it has one, its team."""
-        await self.spend.add(self.key.id, usd, self.period)  # the month it started
+        calls = [self.spend.add(self.key.id, usd, self.period)]  # the month it started
         if team := self.key.team_spend_id:
-            await self.spend.add(team, usd, self.period)
+            calls.append(self.spend.add(team, usd, self.period))
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
 
     def failed(self, code: str) -> None:
         """The stream ended with an in-band error (after the 200 went out)."""
@@ -309,8 +336,7 @@ class Meter:
         try:
             if self.target is None and not self.timed_out:
                 # Nothing reached a provider: undo the reservations.
-                await self.limiter.adjust(self.key.id, tpm, -self.estimate)
-                await self._add_spend(-self.reserved_usd)
+                await self._reconcile(tpm, -self.estimate, -self.reserved_usd)
                 return
             if self.target is not None:
                 used = self._actual()
@@ -319,8 +345,7 @@ class Meter:
             total = Used()
             for u in (used, *(u for _, u in extra)):
                 total.add(u)
-            await self.limiter.adjust(self.key.id, tpm, total.tokens - self.estimate)
-            await self._add_spend(total.usd - self.reserved_usd)
+            await self._reconcile(tpm, total.tokens - self.estimate, total.usd - self.reserved_usd)
             if self.target is not None:
                 await self._store_in_cache()
                 self._submit_for_judging()

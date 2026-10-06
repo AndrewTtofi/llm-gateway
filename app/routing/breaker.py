@@ -50,6 +50,9 @@ class Decision(StrEnum):
 class Ticket:
     decision: Decision
     token: str | None = None  # set for PROBE: proves which request is the probe
+    # Closed, but failures are being counted: a success should count too (failure rate).
+    # Otherwise a success needs no breaker call at all, the common case.
+    counting: bool = False
 
 
 class BreakerStore(Protocol):
@@ -77,12 +80,14 @@ def tripped_ttl(cfg: BreakerConfig) -> float:
 #   cb:{t}:tripped  exists from opening until closed (open + half-open)
 #   cb:{t}:probe    token of the in-flight probe, expires after probe_timeout
 
+# KEYS: open, tripped, probe, fails · → 0 deny, 1 allow, 2 probe, 3 allow (counting)
 _DECIDE = """
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 if redis.call('EXISTS', KEYS[2]) == 1 then
   if redis.call('SET', KEYS[3], ARGV[1], 'NX', 'EX', ARGV[2]) then return 2 end
   return 0
 end
+if redis.call('EXISTS', KEYS[4]) == 1 then return 3 end
 return 1
 """
 
@@ -200,11 +205,11 @@ class RedisBreakerStore:
         return result
 
     async def decide(self, target: str, cfg: BreakerConfig) -> Ticket:
-        _, open_, tripped, probe = _keys(target)
+        fails, open_, tripped, probe = _keys(target)
         token = uuid.uuid4().hex
         code = await self._run(
             self._decide,
-            [open_, tripped, probe],
+            [open_, tripped, probe, fails],
             [token, _secs(cfg.probe_timeout_seconds)],
             "decide",
         )
@@ -212,11 +217,14 @@ class RedisBreakerStore:
             return Ticket(Decision.DENY)
         if code == 2:
             return Ticket(Decision.PROBE, token)
+        if code == 3:
+            return Ticket(Decision.ALLOW, counting=True)
         return Ticket(Decision.ALLOW)  # closed, or Redis down → fail open
 
     async def record_success(self, target: str, cfg: BreakerConfig, ticket: Ticket) -> None:
         if ticket.token is None:
-            # Counted (for the failure rate) only while failures are: one cheap call.
+            if not ticket.counting:
+                return  # no failures being counted: nothing to record, no Redis call
             k = _keys(target)
             await self._run(self._ok, [k[0], f"cb:{{{target}}}:oks"], [], "record_success")
             return
@@ -317,7 +325,8 @@ class MemoryBreakerStore:
             token = uuid.uuid4().hex
             self._probe[target] = (token, now + cfg.probe_timeout_seconds)
             return Ticket(Decision.PROBE, token)
-        return Ticket(Decision.ALLOW)
+        counting = (f := self._fails.get(target)) is not None and f[1] > now
+        return Ticket(Decision.ALLOW, counting=counting)
 
     def _is_probe(self, target: str, ticket: Ticket) -> bool:
         return ticket.token is not None and self._probe.get(target, ("", 0.0))[0] == ticket.token
@@ -334,7 +343,7 @@ class MemoryBreakerStore:
             ):
                 d.pop(target, None)
             return
-        if ticket.token is None and (f := self._fails.get(target)) and f[1] > self._now():
+        if ticket.counting and (f := self._fails.get(target)) and f[1] > self._now():
             self._oks[target] = self._oks.get(target, 0) + 1
 
     async def quarantine(

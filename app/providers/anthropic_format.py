@@ -18,7 +18,7 @@ from typing import Any
 
 from anthropic import transform_schema
 
-from app.providers.base import UnsupportedRequest, hashed_user
+from app.providers.base import MALFORMED, UnsupportedRequest, hashed_user, invalid_response
 
 # finish_reason for each Anthropic stop_reason.
 FINISH_REASON = {
@@ -333,6 +333,14 @@ def usage_to_openai(usage: dict[str, Any]) -> dict[str, Any]:
 
 
 def from_anthropic(msg: dict[str, Any]) -> dict[str, Any]:
+    """An Anthropic message → a chat.completion. Malformed input → ProviderError."""
+    try:
+        return _from_anthropic(msg)
+    except MALFORMED as exc:
+        raise invalid_response("anthropic", exc) from exc
+
+
+def _from_anthropic(msg: dict[str, Any]) -> dict[str, Any]:
     """Anthropic message → OpenAI chat.completion."""
     text: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -411,6 +419,13 @@ class StreamTranslator:
         return self._chunk({"tool_calls": [call]})
 
     def feed(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        """One stream event → chunks. A malformed event → ProviderError (ADR 0026)."""
+        try:
+            return self._feed(event)
+        except MALFORMED as exc:
+            raise invalid_response("anthropic", exc) from exc
+
+    def _feed(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         kind = event["type"]
         if kind == "message_start":
             msg = event["message"]

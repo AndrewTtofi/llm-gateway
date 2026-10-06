@@ -1,0 +1,30 @@
+event: response.created
+data: {"type": "response.created", "sequence_number": 0, "response": {"id": "resp_67ccd2bed1ec8190b14f964abc0542670bb6a6b452d3795b", "object": "response", "created_at": 1791230002, "model": "gpt-6-astra", "status": "in_progress", "output": [], "usage": null}}
+
+event: response.in_progress
+data: {"type": "response.in_progress", "sequence_number": 1, "response": {"id": "resp_67ccd2bed1ec8190b14f964abc0542670bb6a6b452d3795b", "object": "response", "created_at": 1791230002, "model": "gpt-6-astra", "status": "in_progress", "output": [], "usage": null}}
+
+event: response.output_item.added
+data: {"type": "response.output_item.added", "sequence_number": 2, "output_index": 0, "item": {"id": "rs_1", "type": "reasoning", "summary": []}}
+
+event: response.output_item.done
+data: {"type": "response.output_item.done", "sequence_number": 3, "output_index": 0, "item": {"id": "rs_1", "type": "reasoning", "summary": []}}
+
+event: response.output_item.added
+data: {"type": "response.output_item.added", "sequence_number": 4, "output_index": 1, "item": {"id": "fc_1", "type": "function_call", "status": "in_progress", "arguments": "", "call_id": "call_9xVsWQkPXK3vFl4UGbJm1Yhi", "name": "get_weather"}}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "sequence_number": 5, "item_id": "fc_1", "output_index": 1, "delta": "{\"city\":"}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "sequence_number": 6, "item_id": "fc_1", "output_index": 1, "delta": "\"Paris\"}"}
+
+event: response.function_call_arguments.done
+data: {"type": "response.function_call_arguments.done", "sequence_number": 7, "item_id": "fc_1", "output_index": 1, "arguments": "{\"city\":\"Paris\"}"}
+
+event: response.output_item.done
+data: {"type": "response.output_item.done", "sequence_number": 8, "output_index": 1, "item": {"id": "fc_1", "type": "function_call", "status": "completed", "arguments": "{\"city\":\"Paris\"}", "call_id": "call_9xVsWQkPXK3vFl4UGbJm1Yhi", "name": "get_weather"}}
+
+event: response.completed
+data: {"type": "response.completed", "sequence_number": 9, "response": {"id": "resp_67ccd2bed1ec8190b14f964abc0542670bb6a6b452d3795b", "object": "response", "created_at": 1791230002, "model": "gpt-6-astra", "status": "completed", "output": [{"id": "rs_1", "type": "reasoning", "summary": []}, {"id": "fc_1", "type": "function_call", "status": "completed", "arguments": "{\"city\":\"Paris\"}", "call_id": "call_9xVsWQkPXK3vFl4UGbJm1Yhi", "name": "get_weather"}], "usage": {"input_tokens": 3072, "input_tokens_details": {"cached_tokens": 1024}, "output_tokens": 210, "output_tokens_details": {"reasoning_tokens": 180}, "total_tokens": 3282}}}
+

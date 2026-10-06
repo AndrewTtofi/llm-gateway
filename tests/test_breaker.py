@@ -229,7 +229,7 @@ async def test_a_busy_healthy_target_doesnt_open_on_a_few_errors(
     for _ in range(10):  # 10 failures among 100 successes: a 9% error rate
         opened |= await s.record_failure(t, cfg, NORMAL)
         for _ in range(10):
-            await s.record_success(t, cfg, NORMAL)
+            await s.record_success(t, cfg, await s.decide(t, cfg))  # a counting ticket
     assert not opened and await s.state(t) is State.CLOSED
     for _ in range(200):  # now mostly failing: it opens
         opened |= await s.record_failure(t, cfg, NORMAL)
