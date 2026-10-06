@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from app import config
+from app import budget_alerts, config
 from app.auth import ApiKey, EffectiveLimits
 from app.observability import live, metrics
 from app.observability import logging as obs_log
@@ -159,20 +159,33 @@ class Meter:
         usd = _cost(likely_target, self.prompt_estimate, self.estimate - self.prompt_estimate)
         usd = usd or 0.0
         team = self.key.team_spend_id
-        if (
-            team
-            and team_budget is not None
-            and not await self.spend.reserve(team, usd, team_budget, self.period)
-        ):
-            return "team_budget"
+        team_total = None
+        if team and team_budget is not None:
+            team_total = await self.spend.reserve(team, usd, team_budget, self.period)
+            if team_total is None:
+                return "team_budget"
         budget = self.limits.monthly_budget_usd
-        if not await self.spend.reserve(self.key.id, usd, budget, self.period):
+        total = await self.spend.reserve(self.key.id, usd, budget, self.period)
+        if total is None:
             if team and team_budget is not None:
                 await self.spend.add(team, -usd, self.period)  # undo the team's hold
             return "budget"
         if team and team_budget is None:
             await self.spend.add(team, usd, self.period)  # tracked, no team budget to enforce
         self.reserved_usd = usd
+        # Budget alerts: this hold may have crossed 50/80/100% (holds count, like spend).
+        budget_alerts.crossed(
+            f"key {self.key.prefix} ({self.key.name})", self.key.id, total, usd, budget, self.period
+        )
+        if team_total is not None and team_budget is not None and self.key.team:
+            budget_alerts.crossed(
+                f"team {self.key.team}",
+                f"team:{self.key.team}",
+                team_total,
+                usd,
+                team_budget,
+                self.period,
+            )
         return None
 
     async def _reconcile(self, tpm: int, tokens: int, usd: float) -> None:

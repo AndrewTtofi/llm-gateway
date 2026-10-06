@@ -9,6 +9,12 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Added (operations, ADR 0024)
+- **Budget alerts:** at 50 / 80 / 100% of a key's or team's monthly budget (`budget_alerts` in `limits.yaml`), sent through the alert webhook, plus a log line and `gateway_budget_alerts_total`. Once per level per month, fleet-wide; no extra Redis call per request.
+- **Alertmanager** in the production monitoring profile: routes Prometheus alerts to `ALERTMANAGER_SLACK_URL`. Every alert links its runbook.
+- **Runbooks** wiki page: one section per alert, plus backup, restore and rebuilding spend.
+- **Daily `pg_dump` backups** (`backup` service, `BACKUP_KEEP_DAYS`), `restore.sh`, and `make restore-drill`.
+
 ### Changed (performance)
 - **Breaker successes:** they need no Redis call unless failures are being counted (the admission check says so in the same round trip).
 - **Budgets:** the early budget read is gone, since the atomic reservation is the check. A key with no budget left can still be served free cache hits.

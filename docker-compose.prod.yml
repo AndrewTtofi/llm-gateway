@@ -144,6 +144,27 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
 
+  # Daily pg_dump, kept BACKUP_KEEP_DAYS days in the pg-backups volume (copy it off-host
+  # too). Restore and the restore drill: docs/wiki/Runbooks.md#backups. Only the database
+  # password reaches this container.
+  backup:
+    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    restart: unless-stopped
+    entrypoint: ["sh", "/backup.sh"]
+    environment:
+      PGHOST: postgres
+      PGUSER: gateway
+      PGDATABASE: gateway
+      PGPASSWORD: ${POSTGRES_PASSWORD:?}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./config/backup/backup.sh:/backup.sh:ro
+      - ./config/backup/restore.sh:/restore.sh:ro
+      - ./config/backup/drill.sh:/drill.sh:ro
+      - pg-backups:/backups
+    depends_on:
+      migrate: { condition: service_completed_successfully }  # dump a migrated schema
+
   prometheus:
     image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     restart: unless-stopped
@@ -152,6 +173,20 @@ services:
       - ./config/prometheus.prod.yml:/etc/prometheus/prometheus.yml:ro
       - ./config/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
       - prom-data:/prometheus
+
+  # Routes Prometheus alerts to ALERTMANAGER_SLACK_URL (Slack-compatible webhook); each
+  # alert links its runbook. Its own page: 127.0.0.1:9093 (SSH tunnel).
+  alertmanager:
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    entrypoint: ["sh", "/start.sh"]
+    ports: ["127.0.0.1:9093:9093"]
+    environment:
+      ALERTMANAGER_SLACK_URL: ${ALERTMANAGER_SLACK_URL:-}
+    volumes:
+      - ./config/alertmanager/start.sh:/start.sh:ro
+      - alertmanager-data:/alertmanager
 
   grafana:
     image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
@@ -175,4 +210,6 @@ volumes:
   redis-data:
   pg-data:
   prom-data:
+  pg-backups:
+  alertmanager-data:
   grafana-data:

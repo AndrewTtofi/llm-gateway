@@ -100,6 +100,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         log.warning("GATEWAY_ADMIN_KEY is under 32 characters; use `openssl rand -hex 32`")
     await services.start()
     alerts = selfheal.Alerts(redis=services.redis_client())
+    services.alerts = alerts  # budget alerts send through it too (ADR 0024)
     poller = asyncio.create_task(poll_breakers(alerts=alerts))
     lag = asyncio.create_task(measure_loop_lag())
     prober = asyncio.create_task(selfheal.probe_loop())  # ADR 0019

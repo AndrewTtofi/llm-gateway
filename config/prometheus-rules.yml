@@ -38,6 +38,7 @@ groups:
         for: 2m
         labels: { severity: page }
         annotations:
+          runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayerrorbudgetfastburn"
           summary: "Gateway is burning its error budget fast ({{ $value | humanizePercentage }} errors)"
           dashboard: "/d/llm-gateway"
       - alert: GatewayErrorBudgetSlowBurn
@@ -45,12 +46,14 @@ groups:
         for: 15m
         labels: { severity: ticket }
         annotations:
+          runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayerrorbudgetslowburn"
           summary: "Gateway error rate will exhaust the monthly budget in ~5 days"
       - alert: GatewayTTFTSLOBreach
         expr: gateway:ttft_seconds:p95_10m > 1.5
         for: 10m
         labels: { severity: ticket }
         annotations:
+          runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayttftslobreach"
           summary: "p95 time to first token is {{ $value | humanizeDuration }} (SLO 1.5 s)"
 
   - name: gateway-health
@@ -59,22 +62,22 @@ groups:
         expr: up{job="gateway"} == 0
         for: 1m
         labels: { severity: page }
-        annotations: { summary: "Prometheus can't scrape the gateway" }
+        annotations: { summary: "Prometheus can't scrape the gateway", runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewaydown" }
       - alert: GatewayCircuitOpen
         expr: max by (target) (gateway_circuit_state) == 2
         for: 5m
         labels: { severity: ticket }
-        annotations: { summary: "Circuit for {{ $labels.target }} has been open for 5 minutes" }
+        annotations: { summary: "Circuit for {{ $labels.target }} has been open for 5 minutes", runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewaycircuitopen" }
       - alert: GatewayUsageLogDropping
         expr: increase(gateway_usage_log_dropped_total[10m]) > 0
         for: 2m   # a single dropped row isn't worth a ticket
         labels: { severity: ticket }
-        annotations: { summary: "Usage-log rows are being dropped (Postgres slow or down)" }
+        annotations: { summary: "Usage-log rows are being dropped (Postgres slow or down)", runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayusagelogdropping" }
       - alert: GatewayEventLoopLag
         expr: histogram_quantile(0.99, sum by (le) (rate(gateway_event_loop_lag_seconds_bucket[5m]))) > 0.1
         for: 5m
         labels: { severity: ticket }
-        annotations: { summary: "Event loop blocked or saturated (p99 lag {{ $value | humanizeDuration }})" }
+        annotations: { summary: "Event loop blocked or saturated (p99 lag {{ $value | humanizeDuration }})", runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayeventlooplag" }
 
   # Security and business-logic signals (ADR 0023).
   - name: gateway-safety
@@ -84,18 +87,18 @@ groups:
         expr: sum by (what) (increase(gateway_redis_fail_open_total[5m])) > 0
         for: 2m
         labels: { severity: page }
-        annotations: { summary: "{{ $labels.what }} is running without Redis (failing open)" }
+        annotations: { summary: "{{ $labels.what }} is running without Redis (failing open)", runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayredisfailingopen" }
       - alert: GatewayAuthServedStale
         expr: increase(gateway_auth_stale_served_total[5m]) > 0
         for: 2m
         labels: { severity: ticket }
-        annotations: { summary: "API keys are checked from cache: the key store (Postgres) is down" }
+        annotations: { summary: "API keys are checked from cache: the key store (Postgres) is down", runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayauthservedstale" }
       - alert: GatewayInjectionSpike
         expr: sum(increase(gateway_guardrail_detections_total{rule!="unscanned"}[15m])) > 50
         labels: { severity: ticket }
-        annotations: { summary: "{{ $value }} prompt-injection detections in 15 minutes" }
+        annotations: { summary: "{{ $value }} prompt-injection detections in 15 minutes", runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayinjectionspike" }
       - alert: GatewayConcurrencyRejections
         # One key holding many requests open: a runaway client, or someone starving others.
         expr: sum(increase(gateway_rejected_total{reason="concurrency"}[10m])) > 100
         labels: { severity: ticket }
-        annotations: { summary: "Keys are hitting their concurrent-request limit ({{ $value }} in 10 min)" }
+        annotations: { summary: "Keys are hitting their concurrent-request limit ({{ $value }} in 10 min)", runbook_url: "https://github.com/AndrewTtofi/llm-gateway/wiki/Runbooks#gatewayconcurrencyrejections" }

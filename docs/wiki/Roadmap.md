@@ -17,9 +17,9 @@ The gateway is built, tested and hardened, but it hasn't served real traffic yet
 |------|-----|
 | **Pick a deploy target and deploy**: a VM with `docker-compose.prod.yml`, Cloud Run or ECS | Everything so far is verified locally. Real traffic shows what the benchmarks can't |
 | **Live tests for every provider in the chains** (`OPENAI_API_KEY` and the rest) | The OpenAI fallbacks and the Responses API path have only been tested against mocks |
-| **Budget alerts at 50 / 80 / 100%** through the alert webhook | Today a key or team finds out its budget ran out from a 429 |
+| ~~**Budget alerts at 50 / 80 / 100%**~~ | Done (ADR 0024) |
 | **Dashboards from real usage**: tune guardrail weights, cache thresholds, `concurrent_requests` and `output_tokens_per_second` | All of these defaults are educated guesses until real traffic tunes them |
-| **Backups and a restore drill** for Postgres (keys, usage log) | The usage log is the finance record |
+| ~~**Backups and a restore drill**~~ | Done: daily `pg_dump`, restore and `make restore-drill` (ADR 0024) |
 
 ## Soon: wider API coverage (v1.5)
 

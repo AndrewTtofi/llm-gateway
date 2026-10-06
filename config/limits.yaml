@@ -10,6 +10,10 @@ estimation:
   # least this many output tokens per second it ran, up to its max_tokens (ADR 0023).
   output_tokens_per_second: 100
 
+# Alert (alert webhook, log, metric) when a key or team reaches these shares of its monthly
+# budget; once per level per month (ADR 0024).
+budget_alerts: [0.5, 0.8, 1.0]
+
 tiers:
   dev:
     requests_per_minute: 60

@@ -447,6 +447,7 @@ Each non-obvious choice has an ADR in [docs/decisions/](docs/decisions/):
 | [0021](docs/decisions/0021-prompt-injection-filter.md) | Prompt-injection filter |
 | [0022](docs/decisions/0022-llm-as-judge.md) | LLM-as-judge sampling |
 | [0023](docs/decisions/0023-security-hardening.md) | Security hardening after the audit: billing, shared breakers, bounded requests |
+| [0024](docs/decisions/0024-operational-readiness.md) | Operational readiness: alert routing, runbooks, backups, budget alerts |
 
 ## Development
 

@@ -83,9 +83,10 @@ class SpendTracker(Protocol):
     async def add(self, key_id: str, usd: float, period: str | None = None) -> None: ...
     async def reserve(
         self, key_id: str, usd: float, budget: float, period: str | None = None
-    ) -> bool:
+    ) -> float | None:
         """Add `usd` only if spend is still under `budget`, in one atomic step, so
-        concurrent requests can't all pass the same stale check (ADR 0023)."""
+        concurrent requests can't all pass the same stale check (ADR 0023). → the new
+        month-to-date total (budget alerts read it), or None when refused."""
         ...
 
 
@@ -211,10 +212,10 @@ class RedisLimiter:
 # Check and add in one step. KEYS: spend counter · ARGV: usd, budget, ttl
 _RESERVE = """
 local spent = tonumber(redis.call('GET', KEYS[1]) or '0')
-if spent >= tonumber(ARGV[2]) then return 0 end
-redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
+if spent >= tonumber(ARGV[2]) then return {0, tostring(spent)} end
+local total = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
-return 1
+return {1, total}
 """
 
 
@@ -288,26 +289,27 @@ class RedisSpend:
 
     async def reserve(
         self, key_id: str, usd: float, budget: float, period: str | None = None
-    ) -> bool:
+    ) -> float | None:
         key = self._key(key_id, period)
         if not self._guard.up:  # fail open, but not past what this replica knows
-            if self._local(key) >= budget:
-                return False
-            self._defer(key, usd)
-            return True
+            return self._reserve_locally(key, usd, budget)
         await self._flush()
         try:
-            ok = bool(int(await self._reserve(keys=[key], args=[usd, budget, self.TTL])))
+            ok, total = await self._reserve(keys=[key], args=[usd, budget, self.TTL])
         except RedisError as exc:
             self._guard.broken(exc)
-            if self._local(key) >= budget:
-                return False
-            self._defer(key, usd)
-            return True
+            return self._reserve_locally(key, usd, budget)
         self._guard.ok()
-        if ok and key in self._known:
-            self._known[key] += usd
-        return ok
+        if not int(ok):
+            return None
+        self._remember(key, float(total))
+        return float(total) + self._pending.get(key, 0.0)
+
+    def _reserve_locally(self, key: str, usd: float, budget: float) -> float | None:
+        if self._local(key) >= budget:
+            return None
+        self._defer(key, usd)
+        return self._local(key)
 
     async def add(self, key_id: str, usd: float, period: str | None = None) -> None:
         if usd == 0:  # negative = a reconciliation refund
@@ -418,12 +420,12 @@ class MemorySpend:
 
     async def reserve(
         self, key_id: str, usd: float, budget: float, period: str | None = None
-    ) -> bool:
+    ) -> float | None:
         k = (key_id, period or month())  # no await between the check and the add: atomic
         if self._spent.get(k, 0.0) >= budget:
-            return False
+            return None
         self._spent[k] = self._spent.get(k, 0.0) + usd
-        return True
+        return self._spent[k]
 
 
 # --- estimation ------------------------------------------------------------

@@ -67,5 +67,8 @@ Slack accepts the payload as-is; other tools get the same JSON.
 - **Privacy:** alerts never include request content.
 - **Metric:** `gateway_alerts_total{result}` counts sent and failed posts.
 
+The same webhook also carries **budget alerts**, when a key or team reaches 50 / 80 / 100%
+of its monthly budget ([Keys, limits and budgets](Keys-Limits-and-Budgets.md#budget-alerts)).
+
 Prometheus's `GatewayCircuitOpen` alert ([Observability](Observability.md#slos-and-alerts))
 stays as the backstop.

@@ -47,6 +47,8 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod --profile monitor
 | `redis-cache` | The response cache only: capped at `CACHE_MAXMEMORY` (512 MB) with LRU eviction, no persistence. Clients decide how fast a cache grows, so it's kept away from limits and budgets (ADR 0023) |
 | `postgres` | Keys, usage log, judge scores |
 | `prune-usage` | Deletes `usage_log` rows older than `USAGE_RETENTION_DAYS` (default 90) every day. Gets only the database URL |
+| `backup` | Daily `pg_dump` (custom format) into the `pg-backups` volume, kept `BACKUP_KEEP_DAYS` (14). Gets only the database password. Restore and restore drill: [Runbooks](Runbooks.md#backups) |
+| `alertmanager` *(monitoring)* | Sends Prometheus alerts to `ALERTMANAGER_SLACK_URL` (Slack-compatible webhook), each with a link to its [runbook](Runbooks.md). Without a URL, alerts are only on its own page, `127.0.0.1:9093` |
 | `prometheus` *(monitoring)* | Scrapes every replica's `:9100` by DNS discovery; loads the SLO and alert rules |
 | `grafana` *(monitoring)* | On `127.0.0.1:3000` only, sign-up off. It reads Postgres as `grafana_ro`, which can read `usage_log`, `judge_scores` and every `api_keys` column **except `key_hash`** |
 

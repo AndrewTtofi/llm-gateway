@@ -264,6 +264,15 @@ class Limits(BaseModel):
     estimation: Estimation = Field(default_factory=Estimation)
     tiers: dict[str, Tier]
     teams: dict[str, Team] = {}  # keys with `team` also count against the team's budget
+    # Alert when a key or team reaches these shares of its monthly budget (ADR 0024).
+    budget_alerts: list[float] = Field(default=[0.5, 0.8, 1.0])
+
+    @field_validator("budget_alerts")
+    @classmethod
+    def _levels(cls, v: list[float]) -> list[float]:
+        if any(not 0 < x <= 1 for x in v):
+            raise ValueError("budget_alerts are shares of the budget: each in (0, 1]")
+        return sorted(set(v))
 
 
 # A negative or non-finite price would corrupt spend and let keys past their budgets.

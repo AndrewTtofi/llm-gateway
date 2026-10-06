@@ -214,6 +214,26 @@ Set `output_tokens_per_second: 0` to bill only what was relayed.
 - **Measured overshoot:** with 50 concurrent streams racing for the last dollar, +0.9%
   (about 0.8 requests). It was +3.4% before holds became atomic.
 
+### Budget alerts
+
+Apps shouldn't find out from a `429` that a budget ran out. When a key or a team reaches
+50%, 80% or 100% of its monthly budget (`budget_alerts` in `limits.yaml`), the gateway
+sends an alert:
+- to the alert webhook (`ALERT_WEBHOOK_URL`, Slack-compatible, the same one breaker alerts
+  use);
+- as a log line, and as `gateway_budget_alerts_total{level}`.
+
+```json
+{"text": "⚠️ LLM gateway: key gw_abc12 (support-bot) has used 80% of its 2026-10 budget ($80.12 of $100.00)",
+ "kind": "budget", "who": "key gw_abc12 (support-bot)", "level": 80, "spent_usd": 80.12, "budget_usd": 100}
+```
+
+- **When:** checked when a request's cost is held, from the total the reservation returns,
+  so it costs nothing extra. Holds count, like for enforcement.
+- **How often:** each level alerts once per key or team and month, across all replicas.
+
+ADR 0024.
+
 ### How cost is calculated
 
 ```

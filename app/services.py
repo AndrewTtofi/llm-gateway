@@ -40,6 +40,7 @@ concurrency = Concurrency()  # per replica, so never replaced (ADR 0023)
 usage: UsageSink = MemoryUsageSink()
 response_cache: CacheStore = MemoryCacheStore()  # ADR 0018
 judge: Judge = Judge(MemoryScoreStore())  # ADR 0022
+alerts: Any = None  # app.routing.selfheal.Alerts, set at startup (breaker and budget alerts)
 _writer: PostgresUsageWriter | None = None
 
 log = logging.getLogger(__name__)
