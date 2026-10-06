@@ -1,0 +1,14 @@
+data: {"id": "chatcmpl-B9MHDbslfkBeAs8l4bebGdFOJ6PeH", "object": "chat.completion.chunk", "created": 1791230001, "model": "gpt-6.1-mini-2026-08-01", "service_tier": "default", "system_fingerprint": "fp_6b68a8204b", "choices": [{"index": 0, "delta": {"role": "assistant", "content": null, "refusal": null}, "logprobs": null, "finish_reason": null}], "usage": null, "obfuscation": "x7"}
+
+data: {"id": "chatcmpl-B9MHDbslfkBeAs8l4bebGdFOJ6PeH", "object": "chat.completion.chunk", "created": 1791230001, "model": "gpt-6.1-mini-2026-08-01", "service_tier": "default", "system_fingerprint": "fp_6b68a8204b", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_DdmO9pD3xa9XTPNJ32zg2hcA", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}, "logprobs": null, "finish_reason": null}], "usage": null}
+
+data: {"id": "chatcmpl-B9MHDbslfkBeAs8l4bebGdFOJ6PeH", "object": "chat.completion.chunk", "created": 1791230001, "model": "gpt-6.1-mini-2026-08-01", "service_tier": "default", "system_fingerprint": "fp_6b68a8204b", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"city\":"}}]}, "logprobs": null, "finish_reason": null}], "usage": null}
+
+data: {"id": "chatcmpl-B9MHDbslfkBeAs8l4bebGdFOJ6PeH", "object": "chat.completion.chunk", "created": 1791230001, "model": "gpt-6.1-mini-2026-08-01", "service_tier": "default", "system_fingerprint": "fp_6b68a8204b", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"Paris\",\"unit\":\"celsius\"}"}}]}, "logprobs": null, "finish_reason": null}], "usage": null}
+
+data: {"id": "chatcmpl-B9MHDbslfkBeAs8l4bebGdFOJ6PeH", "object": "chat.completion.chunk", "created": 1791230001, "model": "gpt-6.1-mini-2026-08-01", "service_tier": "default", "system_fingerprint": "fp_6b68a8204b", "choices": [{"index": 0, "delta": {}, "logprobs": null, "finish_reason": "tool_calls"}], "usage": null}
+
+data: {"id": "chatcmpl-B9MHDbslfkBeAs8l4bebGdFOJ6PeH", "object": "chat.completion.chunk", "created": 1791230001, "model": "gpt-6.1-mini-2026-08-01", "service_tier": "default", "system_fingerprint": "fp_6b68a8204b", "choices": [], "usage": {"prompt_tokens": 3072, "completion_tokens": 118, "total_tokens": 3190, "prompt_tokens_details": {"cached_tokens": 2048, "audio_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 64, "audio_tokens": 0, "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0}}}
+
+data: [DONE]
+

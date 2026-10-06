@@ -4,7 +4,8 @@
 
 | Command | What runs | Cost |
 |---------|-----------|------|
-| `make test` | Unit and integration tests: about 310 tests, with providers mocked | Free; this is what CI runs |
+| `make test` | Unit and integration tests: about 640, with providers mocked, including fuzzing and golden fixtures (below) | Free; this is what CI runs |
+| `scripts/e2e_prod.sh` | The production compose stack, end to end, with the fake provider | Free; CI runs it on every PR |
 | `make test-e2e` | Against the running stack (`make up`) and Ollama: limits, chaos, local model | Free |
 | `make test-live` | Everything, including `@pytest.mark.live` tests against real providers | Costs money |
 | `make lint` | ruff + mypy (strict) | — |
@@ -18,9 +19,36 @@ How providers are mocked:
   `httpx2.ASGITransport`, to prove they work unchanged: `test_openai_sdk.py` and
   `test_messages_api.py`.
 
+Beyond example-based tests (ADR 0026):
+
+- **Fuzzing** (`tests/test_fuzz.py`, Hypothesis):
+  - random and malformed bodies to `/v1/chat/completions`, `/v1/messages` and
+    `count_tokens` must never get a 500;
+  - random provider stream events and answers must translate or raise a clean
+    `ProviderError`;
+  - every request the API accepts must translate for Anthropic and the Responses API, or
+    be refused as unsupported.
+
+  150 examples per property locally, 400 in CI (`HYPOTHESIS_PROFILE=ci`). It found two
+  real bugs, both fixed.
+- **Golden fixtures** (`tests/fixtures/providers/`, `tests/test_golden.py`): complete
+  provider responses (Anthropic, OpenAI chat, the Responses API), streamed and not, with
+  every documented field. They're replayed through the whole gateway, checking what the
+  client gets and what's billed. They follow the providers' API references.
+  `tools/record_fixtures.py` replaces them with real recordings (a few cents, keys needed).
+- **End to end** (`scripts/e2e_prod.sh`): it builds the image and starts
+  `docker-compose.prod.yml`, then checks:
+  - TLS and HSTS;
+  - two healthy replicas;
+  - the operator endpoints are hidden from the public site;
+  - admin actions and the audit log;
+  - chat, streams and `/v1/messages`;
+  - the backup restore drill;
+  - usage rows.
+
 Rules:
 
-- New behaviour needs a test.
+- New behaviour needs a test. A new parser of untrusted input also gets a fuzzing property.
 - Never call a paid API in unit tests.
 - Live tests are marked and skipped by default.
 

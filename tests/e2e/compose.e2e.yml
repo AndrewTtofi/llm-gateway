@@ -1,0 +1,6 @@
+# Test-only override for scripts/e2e_prod.sh: the chaos (fake) provider, so requests can be
+# served without provider keys or spend. Never use this in production.
+services:
+  gateway:
+    environment:
+      GATEWAY_ENABLE_FAKE: "1"

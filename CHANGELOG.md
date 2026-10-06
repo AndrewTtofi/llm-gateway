@@ -9,6 +9,15 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Added (testing, ADR 0026)
+- **Fuzzing (Hypothesis):** the API never answers 500 to any body, provider data fails cleanly, and accepted requests translate or are refused.
+- **Golden provider fixtures** (Anthropic, OpenAI chat, Responses API; streamed and not) replayed end to end. `tools/record_fixtures.py` swaps them for real recordings.
+- **`scripts/e2e_prod.sh`** and a CI `e2e` job: the production compose stack end to end.
+
+### Fixed (found by fuzzing)
+- A `tool` message without `tool_call_id` crashed the Responses translator (500). Tool messages now need their call id, `tool_calls` must be well-formed, and malformed requests are refused as unsupported.
+- Malformed provider events or answers raised `KeyError`/`TypeError` (a 500 before the first chunk). They're now a retryable "invalid response" provider error, so the router falls back.
+
 ### Security (ADR 0025)
 - **Scanning:** `pip-audit` and a Trivy image scan run in CI. The release workflow scans before it pushes.
 - **Image:** pip is removed after install (its bundled `urllib3`, `msgpack` and `setuptools` had HIGH findings), and Debian security updates are applied at build. The image now scans clean.

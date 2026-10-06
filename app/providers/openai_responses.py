@@ -26,7 +26,7 @@ import json
 import time
 from typing import Any
 
-from app.providers.base import ProviderError, UnsupportedRequest
+from app.providers.base import MALFORMED, ProviderError, UnsupportedRequest, invalid_response
 
 FINISH = {"max_output_tokens": "length", "content_filter": "content_filter"}
 
@@ -37,7 +37,19 @@ FINISH = {"max_output_tokens": "length", "content_filter": "content_filter"}
 def to_responses(
     request: dict[str, Any], model: str, reasoning_mode: str | None = None
 ) -> dict[str, Any]:
-    """An (already shaped) chat-completions request → a Responses API request body."""
+    """An (already shaped) chat-completions request → a Responses API request body.
+    Malformed input (missing keys, wrong types) is refused as unsupported, never a 500."""
+    try:
+        return _to_responses(request, model, reasoning_mode)
+    except UnsupportedRequest:
+        raise
+    except MALFORMED as exc:
+        raise UnsupportedRequest(f"malformed request: {type(exc).__name__}: {exc}") from exc
+
+
+def _to_responses(
+    request: dict[str, Any], model: str, reasoning_mode: str | None = None
+) -> dict[str, Any]:
     if (request.get("n") or 1) != 1:  # null means 1
         raise UnsupportedRequest("n > 1 is not supported by the Responses API")
     out: dict[str, Any] = {
@@ -207,6 +219,14 @@ def failure(provider: str, response: dict[str, Any]) -> ProviderError:
 
 
 def from_responses(provider: str, response: dict[str, Any]) -> dict[str, Any]:
+    """A Responses API answer → a chat.completion. Malformed input → ProviderError."""
+    try:
+        return _from_responses(provider, response)
+    except MALFORMED as exc:
+        raise invalid_response(provider, exc) from exc
+
+
+def _from_responses(provider: str, response: dict[str, Any]) -> dict[str, Any]:
     """A Responses API response object → chat.completion."""
     if response.get("status") == "failed":
         raise failure(provider, response)
@@ -279,6 +299,13 @@ class StreamTranslator:
         return None
 
     def feed(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        """One stream event → chunks. A malformed event → ProviderError (ADR 0026)."""
+        try:
+            return self._feed(event)
+        except MALFORMED as exc:
+            raise invalid_response(self.provider, exc) from exc
+
+    def _feed(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         kind = event.get("type")
         if kind == "response.created":
             response = event.get("response") or {}

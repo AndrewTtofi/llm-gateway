@@ -449,6 +449,7 @@ Each non-obvious choice has an ADR in [docs/decisions/](docs/decisions/):
 | [0023](docs/decisions/0023-security-hardening.md) | Security hardening after the audit: billing, shared breakers, bounded requests |
 | [0024](docs/decisions/0024-operational-readiness.md) | Operational readiness: alert routing, runbooks, backups, budget alerts |
 | [0025](docs/decisions/0025-security-finish.md) | Pre-deploy security: image and dependency scanning, operator keys, audit log, networks |
+| [0026](docs/decisions/0026-test-depth.md) | Test depth: fuzzing, golden provider fixtures, end-to-end production stack in CI |
 
 ## Development
 

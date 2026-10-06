@@ -27,6 +27,25 @@ class ChatMessage(BaseModel):
         None
     )
 
+    @model_validator(mode="after")
+    def _tool_fields(self) -> ChatMessage:
+        """What every provider needs to pair tool calls with results (as OpenAI requires)."""
+        extra = self.model_extra or {}
+        if self.role == "tool" and not isinstance(extra.get("tool_call_id"), str):
+            raise ValueError("a tool message needs a tool_call_id (the id of the call it answers)")
+        calls = extra.get("tool_calls")
+        if calls is not None and not (
+            isinstance(calls, list)
+            and all(
+                isinstance(c, dict)
+                and isinstance(c.get("function"), dict)
+                and isinstance(c["function"].get("name"), str)
+                for c in calls
+            )
+        ):
+            raise ValueError("tool_calls must be a list of {id, type, function: {name, arguments}}")
+        return self
+
 
 class StreamOptions(BaseModel):
     model_config = ConfigDict(extra="allow")
