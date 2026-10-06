@@ -47,6 +47,7 @@ readers who are new to them.
 | Review the security model | [Security](Security.md) |
 | Ask whether a subscription (Claude Pro/Max, ChatGPT/Codex) works with it | [Subscriptions and provider terms](Subscriptions-and-Terms.md) |
 | Find a quick answer | [FAQ](FAQ.md) |
+| See what's next | [Roadmap](Roadmap.md) |
 
 ## Design records
 

@@ -9,7 +9,7 @@ every piece working together.
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`:
 - it builds the gateway for **amd64 and arm64**;
-- it pushes the image to `ghcr.io/andrewttofi/llm-gateway` with tags `1.2.0`, `1.2` and the
+- it pushes the image to `ghcr.io/andrewttofi/llm-gateway` with tags `1.3.0`, `1.3` and the
   commit SHA;
 - it attaches an **SBOM** and **build provenance**, and signs an attestation with GitHub's
   OIDC identity.
@@ -17,7 +17,7 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`:
 Verify an image before running it:
 
 ```bash
-gh attestation verify oci://ghcr.io/andrewttofi/llm-gateway:1.2.0 --owner AndrewTtofi
+gh attestation verify oci://ghcr.io/andrewttofi/llm-gateway:1.3.0 --owner AndrewTtofi
 ```
 
 ## `docker-compose.prod.yml`

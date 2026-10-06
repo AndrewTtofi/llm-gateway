@@ -27,5 +27,6 @@
 
 **More**
 - [Subscriptions and terms](Subscriptions-and-Terms.md)
+- [Roadmap](Roadmap.md)
 - [FAQ](FAQ.md)
 - [Glossary](Glossary.md)
