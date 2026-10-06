@@ -81,19 +81,25 @@ per model (529), and a busy Opus shouldn't push Haiku traffic away.
 ```mermaid
 stateDiagram-v2
     [*] --> closed
-    closed --> open: failure_threshold failures within window_seconds
+    closed --> open: failure_threshold failures and failure_rate of attempts, within window_seconds
     open --> half_open: after open_seconds
     half_open --> closed: the probe succeeds
     half_open --> open: the probe fails
 ```
 
-- **Closed:** traffic flows, and failures are counted in a sliding window.
+- **Closed:** traffic flows, and failures are counted in a window that starts at the first
+  failure. It opens when **both** hold: at least `failure_threshold` failures (default 5),
+  and failures are at least `failure_rate` (default 50%) of the attempts in that window.
+  The rate matters at high traffic: 5 stray errors among thousands of fleet-wide successes
+  aren't an outage. A request counts **once** per target, whatever its retries (ADR 0023).
 - **Open:** the target is skipped and costs no time.
 - **Half-open:** exactly one **probe** request is let through, using an atomic `SET NX` with
   a unique token.
   - Only the probe's result changes the state. Requests that started before the trip can't
     close or extend it.
-  - A probe that ends without a verdict (the client hung up) releases its slot.
+  - A probe that ends without a verdict (the client hung up, or the replica is being
+    stopped by a deploy) releases its slot at once, rather than holding it for
+    `probe_timeout_seconds`.
   - A client-fault answer counts as success, because the provider did respond.
   - `probe_timeout_seconds` must exceed the slowest possible call. Otherwise a slow but
     healthy probe lets a second probe through.

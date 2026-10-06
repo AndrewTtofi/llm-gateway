@@ -25,6 +25,7 @@ import json
 import logging
 import random
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -221,12 +222,18 @@ class Judge:
                 ],
             }
         )
+        from app import metering  # late: metering imports this module
+
+        started = time.perf_counter()
         try:
             result, routed = await router.route_chat(body)
         except Exception as exc:
             metrics.judge.labels(job.alias, "error").inc()
             log.warning("judge call failed: %s", type(exc).__name__)
             return None
+        await metering.record_internal(
+            "judge", routed.target, result.get("usage"), started=started, request_id=job.request_id
+        )
         parsed = parse(answer_text(result))
         if parsed is None:
             metrics.judge.labels(job.alias, "unparsable").inc()

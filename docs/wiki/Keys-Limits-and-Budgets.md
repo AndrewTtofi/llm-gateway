@@ -205,6 +205,8 @@ Set `output_tokens_per_second: 0` to bill only what was relayed.
   spend still under the budget?") and the hold are **one atomic step** per counter (a Lua
   script in Redis): a burst can't all pass the same stale check while the store is slow
   (ADR 0023). A request whose hold is refused gets `429 insufficient_quota`.
+- **Month:** a request reserves and settles in the month it **started** (UTC). A request
+  running across midnight on the 1st doesn't refund into the new month.
 - **Settlement:** the reservation is replaced by the **real** cost, priced from
   `config/pricing.yaml` for the target that **actually served**. A fallback may be cheaper or
   more expensive than the first choice.

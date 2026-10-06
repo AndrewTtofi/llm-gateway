@@ -85,8 +85,8 @@ whether the text is an injection attempt.
 - **Can only add:** only "INJECTION" adds a detection; "SAFE" can't clear a rule match. So
   an attacker who manages to fool the classifier gains nothing.
 - **Failure:** errors fail open.
-- **Cost:** each check is one small request, billed to your provider account and not to the
-  caller's key. It's bounded by the caller's requests per minute.
+- **Cost:** each check is one small request. It's recorded in the usage log (`_classifier`)
+  and charged to the caller's key, whose request it checks.
 
 ### What it can't do
 

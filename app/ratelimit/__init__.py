@@ -76,9 +76,14 @@ class Limiter(Protocol):
 
 
 class SpendTracker(Protocol):
+    """`period` (YYYY-MM): which month's counter. A request reserves and settles in the
+    month it started, so a refund at midnight on the 1st doesn't land in the new month."""
+
     async def spent(self, key_id: str) -> float: ...
-    async def add(self, key_id: str, usd: float) -> None: ...
-    async def reserve(self, key_id: str, usd: float, budget: float) -> bool:
+    async def add(self, key_id: str, usd: float, period: str | None = None) -> None: ...
+    async def reserve(
+        self, key_id: str, usd: float, budget: float, period: str | None = None
+    ) -> bool:
         """Add `usd` only if spend is still under `budget`, in one atomic step, so
         concurrent requests can't all pass the same stale check (ADR 0023)."""
         ...
@@ -226,8 +231,8 @@ class RedisSpend:
         self._reserve = redis.register_script(_RESERVE)
 
     @staticmethod
-    def _key(key_id: str) -> str:
-        return f"spend:{{{key_id}}}:{month()}"
+    def _key(key_id: str, period: str | None = None) -> str:
+        return f"spend:{{{key_id}}}:{period or month()}"
 
     def _remember(self, key: str, value: float) -> None:
         self._known.pop(key, None)
@@ -280,8 +285,10 @@ class RedisSpend:
         self._remember(key, spent)
         return spent + self._pending.get(key, 0.0)
 
-    async def reserve(self, key_id: str, usd: float, budget: float) -> bool:
-        key = self._key(key_id)
+    async def reserve(
+        self, key_id: str, usd: float, budget: float, period: str | None = None
+    ) -> bool:
+        key = self._key(key_id, period)
         if not self._guard.up:  # fail open, but not past what this replica knows
             if self._local(key) >= budget:
                 return False
@@ -301,10 +308,10 @@ class RedisSpend:
             self._known[key] += usd
         return ok
 
-    async def add(self, key_id: str, usd: float) -> None:
+    async def add(self, key_id: str, usd: float, period: str | None = None) -> None:
         if usd == 0:  # negative = a reconciliation refund
             return
-        key = self._key(key_id)
+        key = self._key(key_id, period)
         if not self._guard.up:
             self._defer(key, usd)
             return
@@ -403,13 +410,15 @@ class MemorySpend:
     async def spent(self, key_id: str) -> float:
         return self._spent.get((key_id, month()), 0.0)
 
-    async def add(self, key_id: str, usd: float) -> None:
+    async def add(self, key_id: str, usd: float, period: str | None = None) -> None:
         if usd != 0:
-            k = (key_id, month())
+            k = (key_id, period or month())
             self._spent[k] = self._spent.get(k, 0.0) + usd
 
-    async def reserve(self, key_id: str, usd: float, budget: float) -> bool:
-        k = (key_id, month())  # no await between the check and the add: atomic here
+    async def reserve(
+        self, key_id: str, usd: float, budget: float, period: str | None = None
+    ) -> bool:
+        k = (key_id, period or month())  # no await between the check and the add: atomic
         if self._spent.get(k, 0.0) >= budget:
             return False
         self._spent[k] = self._spent.get(k, 0.0) + usd

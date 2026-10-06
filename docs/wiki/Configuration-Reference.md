@@ -109,7 +109,8 @@ retry:
   retry_on_status: [408, 409, 429, 500, 502, 503, 504, 529]
 circuit_breaker:
   store: redis                     # redis (shared) | memory (per process)
-  failure_threshold: 5
+  failure_threshold: 5      # at least this many failures…
+  failure_rate: 0.5         # …and at least this share of attempts, in the window
   window_seconds: 60
   open_seconds: 30
   probe_timeout_seconds: 330       # > the slowest call

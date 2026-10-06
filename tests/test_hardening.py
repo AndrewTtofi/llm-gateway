@@ -898,3 +898,122 @@ async def test_big_prompts_are_scanned_off_the_event_loop(monkeypatch: pytest.Mo
     assert used == []
     await guardrails.check([{"role": "user", "content": "x" * 50_000}], "log")
     assert used == ["scan"]
+
+
+# --- third review (reloads, breaker, probes, months, alerts, internal calls, cache) -------
+
+
+def test_requests_from_before_a_reload_reuse_the_old_adapter(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import providers as prov
+
+    pool = prov.AdapterPool()
+    old = dict(registry.providers["mock"])
+    a = pool.get("mock", old)
+    new = {**old, "limits": {"max_connections": 7}}
+    monkeypatch.setitem(registry.providers, "mock", new)  # the reload
+    b = pool.get("mock", new)
+    assert b is not a
+    for _ in range(5):  # in-flight requests still pass the old config
+        assert pool.get("mock", old) is a
+        assert pool.get("mock", new) is b  # the live adapter doesn't flip back
+
+
+async def test_a_cancelled_probe_hands_its_slot_back(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.routing import selfheal
+    from app.routing.breaker import Decision, MemoryBreakerStore
+
+    store = MemoryBreakerStore()
+    monkeypatch.setattr(router, "store", store)
+    cb = registry.circuit_breaker
+    for _ in range(cb.failure_threshold):
+        await store.record_failure("mock/tiny", cb, router.Ticket(Decision.ALLOW))
+    store._open_until["mock/tiny"] = 0  # open period over: half-open
+
+    class Hang:
+        configured = True
+        cfg: dict[str, Any] = {}
+
+        async def chat(self, *a: Any) -> Any:
+            await asyncio.sleep(60)
+
+    monkeypatch.setattr(selfheal.providers.pool, "get", lambda *a: Hang())
+    task = asyncio.create_task(selfheal.probe_once("mock/tiny"))
+    await asyncio.sleep(0.05)
+    task.cancel()  # a deploy stops the replica mid-probe
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (await store.decide("mock/tiny", cb)).decision is Decision.PROBE  # free again
+
+
+async def test_a_request_settles_in_the_month_it_started() -> None:
+    m = meter(streamed=False)
+    spend = m.spend
+    m.period = "2026-09"  # reserved on 30 September…
+    await spend.add(m.key.id, 5.0, m.period)
+    m.reserved_usd = 5.0
+    m.target = None  # …and refunded after midnight UTC on 1 October
+    await m.settle()
+    assert spend._spent.get((m.key.id, "2026-09")) == 0.0  # type: ignore[attr-defined]
+    assert (m.key.id, "2026-10") not in spend._spent  # type: ignore[attr-defined]
+
+
+def test_null_n_is_one_answer() -> None:
+    from app.providers.anthropic_format import to_anthropic
+
+    out = to_anthropic({"messages": MSGS, "n": None, "max_tokens": 5}, "m", {}, 100)
+    assert out["max_tokens"] == 5
+    assert openai_responses.to_responses({"messages": MSGS, "n": None}, "m")["store"] is False
+
+
+def test_semantic_matching_needs_the_same_history() -> None:
+    long = [
+        {"role": "user", "content": "Plan the migration " * 300},
+        {"role": "assistant", "content": "Here is the plan " * 300},
+    ]
+    yes = {"messages": [*long, {"role": "user", "content": "yes, delete it"}]}
+    no = {"messages": [*long, {"role": "user", "content": "no, keep it"}]}
+    other = {
+        "messages": [
+            {"role": "user", "content": "x"},
+            {"role": "user", "content": "yes, delete it"},
+        ]
+    }
+    assert cache.text_for_embedding(yes) == "yes, delete it"  # only the last question
+    assert cache.text_for_embedding(no) == "no, keep it"
+    # same history → same index, so only the short last questions are compared;
+    # a different history → a different index, never compared at all
+    assert cache.semantic_partition(yes, "e/m") == cache.semantic_partition(no, "e/m")
+    assert cache.semantic_partition(yes, "e/m") != cache.semantic_partition(other, "e/m")
+
+
+@respx.mock
+def test_classifier_calls_are_metered_and_charged_to_the_key(
+    registry: Registry, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.config import Classifier
+
+    priced(monkeypatch)
+    respx.post(URL).mock(return_value=httpx.Response(200, json=COMPLETION))
+    rules = RULES.model_copy(update={"classifier": Classifier(alias="local", when="always")})
+    monkeypatch.setattr(config, "guardrails", rules)
+    client.post("/v1/chat/completions", json={"model": "local", "messages": MSGS})
+    internal = [r for r in records() if r.alias == "_classifier"]
+    assert internal and internal[0].target == "mock/tiny" and internal[0].cost_usd
+    assert internal[0].key_prefix != "_internal"  # it was charged to the caller's key
+
+
+async def test_judge_calls_are_recorded_as_internal(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import metering
+
+    priced(monkeypatch)
+    await metering.record_internal(
+        "judge", "mock/tiny", {"prompt_tokens": 100, "completion_tokens": 20}
+    )
+    rec = records()[-1]
+    assert rec.alias == "_judge" and rec.key_prefix == "_internal" and rec.cost_usd

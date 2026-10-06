@@ -843,7 +843,7 @@ async def _serve(
     prompt_estimate = meter.prompt_estimate
     # Prompt-injection filter (ADR 0021), per the key's tier.
     action = config.limits.tiers[key.tier].injection if key.tier in config.limits.tiers else "log"
-    guard = await guardrails.check(messages, action, tools)
+    guard = await guardrails.check(messages, action, tools, key)
     rules = config.guardrails
     # Over the scan budget (ADR 0023): reported, and refused only where configured.
     unscanned = guard is not None and guard.unscanned > 0 and rules.unscanned != "allow"

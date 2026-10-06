@@ -248,13 +248,15 @@ class SlowSpend(MemorySpend):
         await asyncio.sleep(0.02)
         return await super().spent(key_id)
 
-    async def add(self, key_id: str, usd: float) -> None:
+    async def add(self, key_id: str, usd: float, period: str | None = None) -> None:
         await asyncio.sleep(0.02)
-        await super().add(key_id, usd)
+        await super().add(key_id, usd, period)
 
-    async def reserve(self, key_id: str, usd: float, budget: float) -> bool:
+    async def reserve(
+        self, key_id: str, usd: float, budget: float, period: str | None = None
+    ) -> bool:
         await asyncio.sleep(0.02)
-        return await super().reserve(key_id, usd, budget)
+        return await super().reserve(key_id, usd, budget, period)
 
 
 @pytest.mark.usefixtures("registry", "priced")

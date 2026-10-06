@@ -132,8 +132,8 @@ def test_all_targets_failing_returns_the_last_error(client: TestClient) -> None:
 
 
 def test_breaker_opens_and_traffic_skips_the_sick_target(client: TestClient) -> None:
-    post(client, "down-then-ok")  # 2 failures
-    post(client, "down-then-ok")  # 3rd failure opens (threshold 3 in tests)
+    for _ in range(3):  # one failure per request (retries don't add); threshold 3 in tests
+        post(client, "down-then-ok")
     resp = post(client, "down-then-ok")
     assert resp.status_code == 200
     assert attempts(resp) == 1  # primary skipped: no wasted calls, no added latency
@@ -141,7 +141,7 @@ def test_breaker_opens_and_traffic_skips_the_sick_target(client: TestClient) -> 
 
 
 def test_all_breakers_open_is_503(client: TestClient) -> None:
-    for _ in range(2):
+    for _ in range(3):
         post(client, "only-down")
     resp = post(client, "only-down")
     assert resp.status_code == 503
@@ -156,7 +156,7 @@ def test_breaker_recovers_through_half_open_probe(
     store = MemoryBreakerStore(clock=lambda: now[0])
     monkeypatch.setattr(router, "store", store)
     route = respx.post(URL).mock(return_value=httpx.Response(503))
-    for _ in range(2):
+    for _ in range(3):
         post(client, "mock-then-ok")
     assert store._open_until  # opened
     assert post(client, "mock-then-ok").headers["x-gateway-provider"] == "chaos/ok"
@@ -172,7 +172,7 @@ def test_admin_shows_breaker_state(client: TestClient, monkeypatch: pytest.Monke
     from app import config
 
     monkeypatch.setattr(config.settings, "gateway_admin_key", "gw_admin_test")
-    for _ in range(2):
+    for _ in range(3):
         post(client, "only-down")
     states = client.get(
         "/admin/providers", headers={"Authorization": "Bearer gw_admin_test"}

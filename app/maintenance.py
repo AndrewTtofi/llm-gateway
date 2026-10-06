@@ -6,7 +6,7 @@ python -m app.maintenance prune --days 90
     you need for finance before pruning it.
 
 python -m app.maintenance grant-readonly --role grafana_ro
-    Create or update a read-only login for dashboards. It can read usage_log and the
+    Create or update a read-only login for dashboards. It can read usage_log, judge_scores and the
     non-secret columns of api_keys — never key_hash. Password from $READONLY_PASSWORD.
 """
 
@@ -112,7 +112,7 @@ async def grant_readonly(role: str, password: str) -> None:
             await conn.exec_driver_sql(f"GRANT CONNECT ON DATABASE {_ident(db)} TO {r}")
             await conn.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {r}")
             await conn.exec_driver_sql(f"REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {r}")
-            await conn.exec_driver_sql(f"GRANT SELECT ON usage_log TO {r}")
+            await conn.exec_driver_sql(f"GRANT SELECT ON usage_log, judge_scores TO {r}")
             cols = ", ".join(READABLE_KEY_COLUMNS)
             await conn.exec_driver_sql(f"GRANT SELECT ({cols}) ON api_keys TO {r}")
     finally:
@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     password = os.environ.get("READONLY_PASSWORD", "")
     asyncio.run(grant_readonly(args.role, password))
     cols = ", ".join(READABLE_KEY_COLUMNS)
-    print(f"role {args.role}: read-only access to usage_log and api_keys ({cols})")
+    print(f"role {args.role}: read-only access to usage_log, judge_scores and api_keys ({cols})")
     return 0
 
 

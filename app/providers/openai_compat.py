@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -199,10 +199,18 @@ class OpenAICompatAdapter(ProviderAdapter):
         body.pop("stream_options", None)  # only valid with stream: true
         return await self._post_json("/chat/completions", body)
 
-    async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
-        """OpenAI-compatible /embeddings (used by the semantic response cache)."""
+    async def embed(
+        self,
+        model: str,
+        texts: list[str],
+        on_usage: Callable[[dict[str, Any] | None], Awaitable[None]] | None = None,
+    ) -> list[list[float]]:
+        """OpenAI-compatible /embeddings (used by the semantic response cache). `on_usage`
+        gets the response's usage, so the call can be metered."""
         self._require_key()
         data = await self._post_json("/embeddings", {"model": model, "input": texts})
+        if on_usage is not None:
+            await on_usage(data.get("usage") if isinstance(data.get("usage"), dict) else None)
         rows = sorted(data.get("data") or [], key=lambda r: r.get("index", 0))
         vectors = [r.get("embedding") for r in rows]
         if len(vectors) != len(texts) or not all(

@@ -216,3 +216,21 @@ async def test_redis_down_fails_open_fast_and_stops_asking() -> None:
         assert await s.record_failure(t, CFG, NORMAL) is False
     assert time.perf_counter() - start < 0.05
     await dead.aclose()
+
+
+async def test_a_busy_healthy_target_doesnt_open_on_a_few_errors(
+    store: tuple[BreakerStore, Clock | None],
+) -> None:
+    """Review: 5 failures in a minute opened the breaker however many calls succeeded."""
+    s, _ = store
+    cfg = CFG.model_copy(update={"failure_threshold": 5, "failure_rate": 0.5})
+    t = f"busy/{uuid.uuid4().hex[:6]}"
+    opened = False
+    for _ in range(10):  # 10 failures among 100 successes: a 9% error rate
+        opened |= await s.record_failure(t, cfg, NORMAL)
+        for _ in range(10):
+            await s.record_success(t, cfg, NORMAL)
+    assert not opened and await s.state(t) is State.CLOSED
+    for _ in range(200):  # now mostly failing: it opens
+        opened |= await s.record_failure(t, cfg, NORMAL)
+    assert opened

@@ -232,6 +232,7 @@ async def _try_target[T](
     back so the target isn't blocked until the probe times out."""
     cb = reg.circuit_breaker
     settled = False
+    counted = False  # one request counts against a target's breaker at most once
     # A half-open probe gets one try: if the target is still sick, fail fast.
     tries = 1 if ticket.decision is Decision.PROBE else reg.retry.max_attempts_per_provider
     try:
@@ -271,8 +272,10 @@ async def _try_target[T](
                     await store.record_success(target, cb, ticket)
                     settled = True
                     raise AllTargetsFailed(routed, exc, all_open=False) from exc
-                if await store.record_failure(target, cb, ticket):
-                    log.warning("circuit opened for %s", target)
+                if ticket.decision is Decision.PROBE or not counted:
+                    if await store.record_failure(target, cb, ticket):
+                        log.warning("circuit opened for %s", target)
+                    counted = True
                 settled = True
                 if kind is Kind.GATEWAY and (reason := _quarantine_reason(exc, reg)):
                     # Bad key, unknown model, exhausted quota: won't heal in seconds.

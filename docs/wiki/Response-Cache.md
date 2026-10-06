@@ -25,8 +25,14 @@ aliases:
   sent in the body or in the `x-gateway-route` header, so `optimize: quality` never gets a
   cheaper model's cached answer. A streamed and a
   non-streamed request share entries.
-- **Semantic.** The conversation text is embedded and looked up in a Redis 8 vector set. A
-  neighbour with similarity at or above `threshold` is a hit. An exact match is tried first.
+- **Semantic.** The **last user message** is embedded and looked up in a Redis 8 vector
+  set. A neighbour with similarity at or above `threshold` is a hit. An exact match is
+  tried first.
+  - **History must match exactly:** everything before the last user message (system
+    prompt, earlier turns) is part of the index key, not the embedding. Two long chats that
+    differ only in a final "yes, delete it" / "no, keep it" share history, so only those two
+    short messages are compared, and they don't match. Embedding the whole conversation
+    would have made them look 99% alike (ADR 0023).
   - **Embedding failure:** if embedding fails (provider down, no key), lookups fall back to
     exact.
   - **Matching scope:** only conversations whose *other* settings match are compared: tools,

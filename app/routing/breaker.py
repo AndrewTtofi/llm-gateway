@@ -72,6 +72,7 @@ def tripped_ttl(cfg: BreakerConfig) -> float:
 # --- Redis -----------------------------------------------------------------
 # Keys per target, with a {hash tag} so all four live in one Redis Cluster slot:
 #   cb:{t}:fails    failure counter, expires with the window
+#   cb:{t}:oks      successes since the window's first failure, same expiry
 #   cb:{t}:open     exists while open, expires after open_seconds
 #   cb:{t}:tripped  exists from opening until closed (open + half-open)
 #   cb:{t}:probe    token of the in-flight probe, expires after probe_timeout
@@ -85,7 +86,8 @@ end
 return 1
 """
 
-# KEYS: fails, open, tripped, probe · ARGV: token, window, threshold, open_s, tripped_ttl
+# KEYS: fails, open, tripped, probe, oks · ARGV: token, window, threshold, open_s,
+# tripped_ttl, failure_rate
 _FAIL = """
 if ARGV[1] ~= '' then
   if redis.call('GET', KEYS[4]) == ARGV[1] then
@@ -98,20 +100,33 @@ if ARGV[1] ~= '' then
 end
 if redis.call('EXISTS', KEYS[3]) == 1 then return 0 end
 local fails = redis.call('INCR', KEYS[1])
-if fails == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
-if fails >= tonumber(ARGV[3]) then
+if fails == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+  redis.call('DEL', KEYS[5])
+end
+local oks = tonumber(redis.call('GET', KEYS[5]) or '0')
+if fails >= tonumber(ARGV[3]) and fails / (fails + oks) >= tonumber(ARGV[6]) then
   redis.call('SET', KEYS[2], '1', 'EX', ARGV[4])
   redis.call('SET', KEYS[3], '1', 'EX', ARGV[5])
-  redis.call('DEL', KEYS[1])
+  redis.call('DEL', KEYS[1], KEYS[5])
   return 1
 end
 return 0
 """
 
-# KEYS: fails, open, tripped, probe · ARGV: token
+# A success counts only while failures are being counted. KEYS: fails, oks
+_OK = """
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl <= 0 then return 0 end
+redis.call('INCR', KEYS[2])
+redis.call('PEXPIRE', KEYS[2], ttl)
+return 1
+"""
+
+# KEYS: fails, open, tripped, probe, oks · ARGV: token
 _SUCCEED = """
 if redis.call('GET', KEYS[4]) == ARGV[1] then
-  redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4])
+  redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5])
   return 1
 end
 return 0
@@ -153,6 +168,7 @@ class RedisBreakerStore:
         self._decide = redis.register_script(_DECIDE)
         self._fail = redis.register_script(_FAIL)
         self._succeed = redis.register_script(_SUCCEED)
+        self._ok = redis.register_script(_OK)
         self._release = redis.register_script(_RELEASE)
         self._quarantine = redis.register_script(_QUARANTINE)
 
@@ -200,8 +216,12 @@ class RedisBreakerStore:
 
     async def record_success(self, target: str, cfg: BreakerConfig, ticket: Ticket) -> None:
         if ticket.token is None:
-            return  # only the probe's success changes state — no Redis call otherwise
-        if await self._run(self._succeed, _keys(target), [ticket.token], "record_success"):
+            # Counted (for the failure rate) only while failures are: one cheap call.
+            k = _keys(target)
+            await self._run(self._ok, [k[0], f"cb:{{{target}}}:oks"], [], "record_success")
+            return
+        keys = [*_keys(target), f"cb:{{{target}}}:oks"]
+        if await self._run(self._succeed, keys, [ticket.token], "record_success"):
             with contextlib.suppress(RedisError):
                 await self.redis.delete(f"cb:{{{target}}}:why")
 
@@ -212,8 +232,10 @@ class RedisBreakerStore:
             cfg.failure_threshold,
             _secs(cfg.open_seconds),
             _secs(tripped_ttl(cfg)),
+            cfg.failure_rate,
         ]
-        return bool(await self._run(self._fail, _keys(target), args, "record_failure"))
+        keys = [*_keys(target), f"cb:{{{target}}}:oks"]
+        return bool(await self._run(self._fail, keys, args, "record_failure"))
 
     async def release(self, target: str, ticket: Ticket) -> None:
         if ticket.token is not None:
@@ -260,6 +282,7 @@ class MemoryBreakerStore:
     def __init__(self, clock: Callable[[], float] | None = None) -> None:
         self._now = clock or time.monotonic
         self._fails: dict[str, tuple[int, float]] = {}  # target → (count, window_end)
+        self._oks: dict[str, int] = {}  # successes since the window's first failure
         self._open_until: dict[str, float] = {}
         self._tripped_until: dict[str, float] = {}
         self._probe: dict[str, tuple[str, float]] = {}  # target → (token, expires)
@@ -280,6 +303,7 @@ class MemoryBreakerStore:
         self._open_until[target] = now + cfg.open_seconds
         self._tripped_until[target] = now + tripped_ttl(cfg)
         self._fails.pop(target, None)
+        self._oks.pop(target, None)
         self._probe.pop(target, None)
 
     async def decide(self, target: str, cfg: BreakerConfig) -> Ticket:
@@ -300,8 +324,18 @@ class MemoryBreakerStore:
 
     async def record_success(self, target: str, cfg: BreakerConfig, ticket: Ticket) -> None:
         if self._is_probe(target, ticket):
-            for d in (self._fails, self._open_until, self._tripped_until, self._probe, self._why):
+            for d in (
+                self._fails,
+                self._oks,
+                self._open_until,
+                self._tripped_until,
+                self._probe,
+                self._why,
+            ):
                 d.pop(target, None)
+            return
+        if ticket.token is None and (f := self._fails.get(target)) and f[1] > self._now():
+            self._oks[target] = self._oks.get(target, 0) + 1
 
     async def quarantine(
         self, target: str, cfg: BreakerConfig, seconds: float, reason: str
@@ -327,10 +361,12 @@ class MemoryBreakerStore:
             return False  # already open/half-open: stragglers don't change anything
         self._prune(now)
         count, window_end = self._fails.get(target, (0, now + cfg.window_seconds))
-        if window_end <= now:
+        if window_end <= now or count == 0:
             count, window_end = 0, now + cfg.window_seconds
+            self._oks.pop(target, None)
         count += 1
-        if count >= cfg.failure_threshold:
+        oks = self._oks.get(target, 0)
+        if count >= cfg.failure_threshold and count / (count + oks) >= cfg.failure_rate:
             self._open(target, cfg, now)
             return True
         self._fails[target] = (count, window_end)
