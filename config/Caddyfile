@@ -1,0 +1,38 @@
+# Production front door (docker-compose.prod.yml). Caddy gets and renews the TLS
+# certificate for $GATEWAY_DOMAIN automatically.
+(gateway_upstreams) {
+	reverse_proxy {
+		# Every replica, re-resolved every 5 s (Docker DNS lists them all), so balancing
+		# and health checks are per replica, not per service name.
+		dynamic a gateway 8000 {
+			refresh 5s
+		}
+		lb_policy least_conn
+		health_uri /readyz
+		health_interval 10s
+		# Streams: send every chunk at once, and allow answers that take many minutes.
+		flush_interval -1
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+}
+
+# Public: the API only. Operator endpoints aren't served here at all, whatever the
+# source address (source IPs can look private behind proxies or Docker's userland proxy).
+{$GATEWAY_DOMAIN} {
+	encode zstd gzip
+	request_body {
+		max_size 32MB
+	}
+	@operator path /admin/* /metrics /readyz /docs /openapi.json
+	respond @operator "not found" 404
+	import gateway_upstreams
+}
+
+# Operators: published on 127.0.0.1 only (docker-compose.prod.yml); reach it with an SSH
+# tunnel or a VPN. /admin still needs GATEWAY_ADMIN_KEY.
+http://:8081 {
+	import gateway_upstreams
+}

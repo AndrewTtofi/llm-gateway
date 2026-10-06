@@ -328,7 +328,7 @@ def test_stop_reasons(stop: str, finish: str) -> None:
 def test_usage_counts_cached_tokens_as_prompt_tokens() -> None:
     u = usage_to_openai(MSG["usage"])
     assert u["prompt_tokens"] == 100 and u["completion_tokens"] == 5 and u["total_tokens"] == 105
-    assert u["prompt_tokens_details"] == {"cached_tokens": 90}
+    assert u["prompt_tokens_details"] == {"cached_tokens": 90, "cache_creation_tokens": 0}
 
 
 # --- streaming -------------------------------------------------------------

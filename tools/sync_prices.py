@@ -43,7 +43,23 @@ LITELLM_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
 OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
-PRICE_FIELDS = ("input", "output", "cached_input")
+RATE_FIELDS = ("input", "output", "cached_input", "cache_write", "cache_write_1h")
+PRICE_FIELDS = (*RATE_FIELDS, "tiers")  # everything that bills someone
+LITELLM_KEYS = {
+    "input": "input_cost_per_token",
+    "output": "output_cost_per_token",
+    "cached_input": "cache_read_input_token_cost",
+    "cache_write": "cache_creation_input_token_cost",
+    "cache_write_1h": "cache_creation_input_token_cost_above_1hr",
+}
+OPENROUTER_KEYS = {
+    "input": "prompt",
+    "output": "completion",
+    "cached_input": "input_cache_read",
+    "cache_write": "input_cache_write",
+    "cache_write_1h": "input_cache_write_1h",
+}
+_LITELLM_TIER = re.compile(r"^input_cost_per_token_above_(\d+)k_tokens$")
 FACT_FIELDS = ("context_window", "max_output_tokens", "capabilities")
 CAPABILITIES = {  # LiteLLM flag → catalog capability
     "supports_function_calling": "tools",
@@ -110,6 +126,56 @@ def positive_int(value: Any) -> int | None:
     return value
 
 
+def _status(new: float, other: float | None) -> Status:
+    return "unchecked" if other is None else "agreed" if same(new, other) else "disputed"
+
+
+def litellm_tiers(src: dict[str, Any]) -> list[dict[str, Any]]:
+    """Long-context tiers from LiteLLM's `*_above_<N>k_tokens` prices (ADR 0015)."""
+    tiers = []
+    for key in src:
+        if not (m := _LITELLM_TIER.match(key)):
+            continue
+        suffix = f"_above_{m.group(1)}k_tokens"
+        tier: dict[str, Any] = {"above_prompt_tokens": int(m.group(1)) * 1000}
+        for f in ("input", "output", "cached_input", "cache_write"):
+            if (v := per_million(src.get(LITELLM_KEYS[f] + suffix))) is not None:
+                tier[f] = v
+        if "input" in tier and "output" in tier:
+            tiers.append(tier)
+    return sorted(tiers, key=lambda t: t["above_prompt_tokens"])
+
+
+def openrouter_tiers(prices: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """OpenRouter's `overrides` (min_prompt_tokens → prices); None when it lists none."""
+    overrides = prices.get("overrides")
+    if not isinstance(overrides, list) or not overrides:
+        return None
+    tiers = []
+    for o in overrides:
+        if not isinstance(o, dict) or (n := positive_int(o.get("min_prompt_tokens"))) is None:
+            continue
+        tier: dict[str, Any] = {"above_prompt_tokens": n}
+        for f in ("input", "output", "cached_input", "cache_write"):
+            if (v := per_million(o.get(OPENROUTER_KEYS[f]))) is not None:
+                tier[f] = v
+        tiers.append(tier)
+    return sorted(tiers, key=lambda t: t["above_prompt_tokens"]) or None
+
+
+def same_tiers(a: list[dict[str, Any]], b: list[dict[str, Any]]) -> bool:
+    """Same thresholds, and every price both sides list agrees."""
+    if [t.get("above_prompt_tokens") for t in a] != [t.get("above_prompt_tokens") for t in b]:
+        return False
+    for x, y in zip(a, b, strict=True):
+        for f in ("input", "output", "cached_input", "cache_write"):
+            if f in x and f in y and not same(float(x[f]), float(y[f])):
+                return False
+            if (f in x) != (f in y) and f in ("input", "output"):
+                return False
+    return True
+
+
 def same(a: float | None, b: float | None) -> bool:
     if a is None or b is None:
         return a is b
@@ -142,9 +208,18 @@ def targets(models_yaml: dict[str, Any], pricing: dict[str, Any]) -> list[str]:
 def source_for(
     target: str, litellm: dict[str, Any], entry: dict[str, Any]
 ) -> dict[str, Any] | None:
-    model = target.partition("/")[2]
-    src = litellm.get(entry.get("litellm_id") or model) or litellm.get(target)
-    return src if isinstance(src, dict) else None
+    """The LiteLLM entry for a target. An explicit `litellm_id` wins, then the
+    provider-prefixed key; a bare model ID only counts if LiteLLM files it under the same
+    provider (the same model name can be another provider's listing, e.g. Vertex AI)."""
+    provider, _, model = target.partition("/")
+    if (explicit := entry.get("litellm_id")) and isinstance(src := litellm.get(explicit), dict):
+        return src
+    if isinstance(src := litellm.get(target), dict):
+        return src
+    src = litellm.get(model)
+    if isinstance(src, dict) and src.get("litellm_provider") in (provider, None):
+        return src
+    return None
 
 
 def propose(
@@ -160,25 +235,25 @@ def propose(
     check = openrouter.get(entry.get("openrouter_id") or openrouter_id(target))
     check_prices = check.get("pricing") if isinstance(check, dict) else None
     check_prices = check_prices if isinstance(check_prices, dict) else {}
-    proposed = {
-        "input": per_million(src.get("input_cost_per_token")),
-        "output": per_million(src.get("output_cost_per_token")),
-        "cached_input": per_million(src.get("cache_read_input_token_cost")),
-    }
-    checked = {
-        "input": per_million(check_prices.get("prompt")),
-        "output": per_million(check_prices.get("completion")),
-        "cached_input": per_million(check_prices.get("input_cache_read")),
-    }
+    proposed = {f: per_million(src.get(k)) for f, k in LITELLM_KEYS.items()}
+    checked = {f: per_million(check_prices.get(k)) for f, k in OPENROUTER_KEYS.items()}
     out: list[Change] = []
-    for f in PRICE_FIELDS:
+    for f in RATE_FIELDS:
         new, cur, other = proposed[f], price.get(f), checked[f]
         if new is None or same(new, cur):
             continue
+        out.append(Change(target, f, cur, new, other, _status(new, other)))
+
+    tiers, check_tiers = litellm_tiers(src), openrouter_tiers(check_prices)
+    if tiers and not same_tiers(tiers, price.get("tiers") or []):
         status: Status = (
-            "unchecked" if other is None else "agreed" if same(new, other) else "disputed"
+            "unchecked"
+            if check_tiers is None
+            else "agreed"
+            if same_tiers(tiers, check_tiers)
+            else "disputed"
         )
-        out.append(Change(target, f, cur, new, other, status))
+        out.append(Change(target, "tiers", price.get("tiers"), tiers, check_tiers, status))
 
     facts: dict[str, Any] = {
         "context_window": positive_int(src.get("max_input_tokens")),
@@ -209,22 +284,25 @@ def _price(v: float) -> str:
     return f"{whole}.{frac.ljust(2, '0')}"
 
 
-def _scalar(v: Any, prices: bool) -> str:
+def _scalar(v: Any, prices: bool, key: str = "") -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, int | float):
         if not math.isfinite(v):
             raise ValueError(f"refusing to write non-finite number {v!r}")
-        return _price(float(v)) if prices else str(v)
+        # Only rates look like prices; thresholds, multipliers and sizes stay as they are.
+        return _price(float(v)) if prices and key in RATE_FIELDS else str(v)
     if isinstance(v, list):
-        return "[" + ", ".join(_scalar(x, prices) for x in v) + "]"
+        return "[" + ", ".join(_scalar(x, prices, key) for x in v) + "]"
+    if isinstance(v, dict):
+        return _flow(v, prices)
     s = str(v)
     # Plain only when it can't be read as anything else; otherwise a quoted YAML string.
     return s if _PLAIN.fullmatch(s) and yaml.safe_load(s) == s else json.dumps(s)
 
 
 def _flow(values: dict[str, Any], prices: bool = False) -> str:
-    return "{ " + ", ".join(f"{k}: {_scalar(v, prices)}" for k, v in values.items()) + " }"
+    return "{ " + ", ".join(f"{k}: {_scalar(v, prices, k)}" for k, v in values.items()) + " }"
 
 
 def _patch_models(text: str, updates: dict[str, dict[str, Any]], prices: bool, note: str) -> str:

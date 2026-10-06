@@ -69,6 +69,10 @@ def test_catalog_lists_prices_facts_and_aliases(client: TestClient, priced: None
         "input": 1.0,
         "output": 5.0,
         "cached_input": 0.1,
+        "cache_write": None,
+        "cache_write_1h": None,
+        "tiers": [],
+        "off_peak": None,
         "blended": 2.0,  # (3 × 1 + 1 × 5) / 4
         "unit": "USD per 1M tokens",
     }
@@ -438,3 +442,196 @@ def test_sync_leaves_pinned_facts_alone(config_dir: Path) -> None:
     found = changes_by_key(sync_prices.diff(config_dir, LITELLM, OPENROUTER)[0])
     assert ("anthropic/claude-x-1", "capabilities") not in found
     assert ("anthropic/claude-x-1", "context_window") in found  # not pinned
+
+
+# --- cost accuracy (ADR 0015) -------------------------------------------------
+
+
+def test_long_context_tier_reprices_the_whole_request() -> None:
+    from app.config import PriceTier
+
+    p = Pricing(
+        models={
+            "a/b": Price(
+                input=10,
+                output=50,
+                tiers=[PriceTier(above_prompt_tokens=272_000, input=20, output=75)],
+            )
+        }
+    )
+    assert p.cost("a/b", 272_000, 1000) == pytest.approx((272_000 * 10 + 1000 * 50) / 1e6)
+    assert p.cost("a/b", 272_001, 1000) == pytest.approx((272_001 * 20 + 1000 * 75) / 1e6)
+
+
+def test_cache_writes_are_billed_at_their_own_price() -> None:
+    p = Pricing(
+        models={
+            "a/b": Price(input=2, output=10, cached_input=0.2, cache_write=2.5, cache_write_1h=4)
+        }
+    )
+    # 1M prompt: 100K read, 300K written (100K of them to the 1-hour cache), 600K plain
+    usd = p.cost(
+        "a/b",
+        1_000_000,
+        0,
+        cached_tokens=100_000,
+        written_tokens=300_000,
+        written_1h_tokens=100_000,
+    )
+    assert usd == pytest.approx((600_000 * 2 + 100_000 * 0.2 + 200_000 * 2.5 + 100_000 * 4) / 1e6)
+    no_write_price = Pricing(models={"a/b": Price(input=2, output=10)})
+    assert no_write_price.cost("a/b", 1000, 0, written_tokens=1000) == pytest.approx(0.002)
+
+
+def test_off_peak_windows() -> None:
+    from app.config import OffPeak
+
+    off = OffPeak(multiplier=0.5, peak_utc=["01:00-04:00", "06:00-10:00"])
+    p = Pricing(models={"a/b": Price(input=1, output=1, off_peak=off)})
+    monday = dt.datetime(2026, 10, 5, tzinfo=dt.UTC)
+    assert p.cost("a/b", 1_000_000, 0, at=monday.replace(hour=2)) == pytest.approx(1.0)
+    assert p.cost("a/b", 1_000_000, 0, at=monday.replace(hour=4)) == pytest.approx(
+        0.5
+    )  # end exclusive
+    assert p.cost("a/b", 1_000_000, 0, at=monday.replace(hour=12)) == pytest.approx(0.5)
+    saturday = dt.datetime(2026, 10, 3, 2, tzinfo=dt.UTC)
+    assert p.cost("a/b", 1_000_000, 0, at=saturday) == pytest.approx(0.5)
+    with pytest.raises(ValueError):
+        OffPeak(multiplier=0.5, peak_utc=["25:00-26:00"])
+
+
+def test_tiers_must_ascend() -> None:
+    from app.config import PriceTier
+
+    with pytest.raises(ValueError):
+        Price(
+            input=1,
+            output=1,
+            tiers=[
+                PriceTier(above_prompt_tokens=2, input=1, output=1),
+                PriceTier(above_prompt_tokens=1, input=1, output=1),
+            ],
+        )
+
+
+def test_meter_bills_anthropic_cache_writes(registry: Registry) -> None:
+    from app.metering import Meter
+    from app.providers.anthropic_format import usage_to_openai
+
+    usage = usage_to_openai(
+        {
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 500,
+            "cache_creation": {"ephemeral_1h_input_tokens": 200},
+        }
+    )
+    assert usage["prompt_tokens"] == 1600
+    assert usage["prompt_tokens_details"] == {
+        "cached_tokens": 1000,
+        "cache_creation_tokens": 500,
+        "cache_creation_1h_tokens": 200,
+    }
+    m = Meter.__new__(Meter)
+    m.usage, m.target, m.prompt_estimate, m._chars = usage, "claude/old", 0, 0
+    m.started_at = dt.datetime.now(dt.UTC)
+    old = Pricing(
+        models={
+            "claude/old": Price(
+                input=3, output=15, cached_input=0.3, cache_write=3.75, cache_write_1h=6
+            )
+        }
+    )
+    import app.config as cfg
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cfg, "pricing", old)
+        used = m._actual()
+    assert used.usd == pytest.approx((100 * 3 + 1000 * 0.3 + 300 * 3.75 + 200 * 6 + 10 * 15) / 1e6)
+
+
+def test_sync_proposes_tiers_and_cache_writes(config_dir: Path) -> None:
+    litellm = {
+        "gpt-y": {
+            "input_cost_per_token": 1e-06,
+            "output_cost_per_token": 4e-06,
+            "cache_creation_input_token_cost": 1.25e-06,
+            "input_cost_per_token_above_272k_tokens": 2e-06,
+            "output_cost_per_token_above_272k_tokens": 6e-06,
+            "input_cost_per_token_above_272k_tokens_priority": 9e-06,  # other tiers: ignored
+        }
+    }
+    openrouter = {
+        "openai/gpt-y": {
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000004",
+                "input_cache_write": "0.00000125",
+                "overrides": [
+                    {"min_prompt_tokens": 272000, "prompt": "0.000002", "completion": "0.000006"}
+                ],
+            }
+        }
+    }
+    found = changes_by_key(sync_prices.diff(config_dir, litellm, openrouter)[0])
+    assert found[("openai/gpt-y", "cache_write")].status == "agreed"
+    tiers = found[("openai/gpt-y", "tiers")]
+    assert tiers.status == "agreed"
+    assert tiers.proposed == [{"above_prompt_tokens": 272000, "input": 2.0, "output": 6.0}]
+
+
+def test_sync_writes_tiers_as_valid_yaml(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    litellm = {
+        "gpt-y": {
+            "input_cost_per_token": 1e-06,
+            "output_cost_per_token": 4e-06,
+            "input_cost_per_token_above_272k_tokens": 2e-06,
+            "output_cost_per_token_above_272k_tokens": 6e-06,
+        }
+    }
+    openrouter = {
+        "openai/gpt-y": {
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000004",
+                "overrides": [
+                    {"min_prompt_tokens": 272000, "prompt": "0.000002", "completion": "0.000006"}
+                ],
+            }
+        }
+    }
+    monkeypatch.setattr(sync_prices, "fetch", lambda: (litellm, openrouter))
+    sync_prices.main(["--config-dir", str(config_dir), "--write"])
+    price = config.load_pricing(config_dir).models["openai/gpt-y"]
+    assert price.tiers[0].above_prompt_tokens == 272000 and price.tiers[0].input == 2.0
+    assert (
+        "above_prompt_tokens: 272000," in (config_dir / "pricing.yaml").read_text()
+    )  # not 272000.00
+
+
+def test_bare_model_ids_from_other_providers_are_ignored(config_dir: Path) -> None:
+    litellm = {
+        "gpt-y": {
+            "input_cost_per_token": 9e-06,
+            "output_cost_per_token": 9e-06,
+            "litellm_provider": "vertex_ai",
+        }
+    }
+    _, missing = sync_prices.diff(config_dir, litellm, {})
+    assert "openai/gpt-y" in missing
+
+
+@pytest.mark.parametrize("window", ["22:00-02:00", "10:00-10:00", "24:59-25:00", "09:00-24:30"])
+def test_invalid_off_peak_windows_are_rejected(window: str) -> None:
+    from app.config import OffPeak
+
+    with pytest.raises(ValueError):
+        OffPeak(multiplier=0.5, peak_utc=[window])
+
+
+def test_off_peak_end_of_day_window() -> None:
+    from app.config import OffPeak
+
+    off = OffPeak(multiplier=0.5, peak_utc=["22:00-24:00"])
+    assert off.is_peak(dt.datetime(2026, 10, 5, 23, 59, tzinfo=dt.UTC))

@@ -141,7 +141,7 @@ def test_shipped_config_rules() -> None:
     """The real providers' rules, as researched (ADR 0012)."""
     providers = load_registry(Path(__file__).parent.parent / "config").providers
     astra = rules_for(providers["openai"], "gpt-6-astra")
-    assert astra["tools"] is False and "temperature" in astra["drop"]
+    assert astra["api"] == "responses" and astra["tools"] is True and "temperature" in astra["drop"]
     assert astra["rename"] == {"max_tokens": "max_completion_tokens"}
     mistral = rules_for(providers["mistral"], "mistral-medium-3-5-26-04")
     assert "user" not in mistral["allow"] and "reasoning_effort" not in mistral["allow"]

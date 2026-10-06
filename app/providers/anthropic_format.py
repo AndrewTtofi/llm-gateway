@@ -72,7 +72,9 @@ def _to_anthropic(
     if request.get("n", 1) != 1:
         raise TranslationError("n > 1 is not supported for this model")
 
-    system_parts: list[str] = []
+    # System prompt as blocks, so cache breakpoints survive (ADR 0013); sent as one
+    # string when nothing in it is marked for caching.
+    system_parts: list[dict[str, Any]] = []
     messages = _messages(request["messages"], system_parts)
 
     out: dict[str, Any] = {
@@ -109,7 +111,7 @@ def _to_anthropic(
         # constraints; the SDK rewrites OpenAI-style schemas to fit.
         output_config["format"] = {"type": "json_schema", "schema": transform_schema(schema)}
     elif fmt.get("type") in ("json_object", "json_schema"):
-        system_parts.append("Respond with a single valid JSON object and nothing else.")
+        system_parts.append(_text("Respond with a single valid JSON object and nothing else."))
     if output_config:
         out["output_config"] = output_config
 
@@ -121,14 +123,28 @@ def _to_anthropic(
     if user := request.get("user"):
         # Clients often put an email here; Anthropic wants an opaque id. Hash it.
         out["metadata"] = {"user_id": hashlib.sha256(str(user).encode()).hexdigest()}
+    if isinstance(thinking := request.get("thinking"), dict):
+        out["thinking"] = thinking  # extension field from /v1/messages clients (ADR 0013)
     if system_parts:
-        out["system"] = "\n\n".join(system_parts)
+        if any("cache_control" in b for b in system_parts):
+            out["system"] = system_parts
+        else:
+            out["system"] = "\n\n".join(b["text"] for b in system_parts)
     if extra:
         out["extra_body"] = extra
     return out
 
 
-def _messages(oai: list[dict[str, Any]], system_parts: list[str]) -> list[dict[str, Any]]:
+def _text(text: str, cache_control: Any = None) -> dict[str, Any]:
+    block: dict[str, Any] = {"type": "text", "text": text}
+    if cache_control:
+        block["cache_control"] = cache_control
+    return block
+
+
+def _messages(
+    oai: list[dict[str, Any]], system_parts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
     def append(role: str, blocks: list[dict[str, Any]]) -> None:
@@ -146,21 +162,31 @@ def _messages(oai: list[dict[str, Any]], system_parts: list[str]) -> list[dict[s
         if role in ("system", "developer"):
             # Collected into the top-level system prompt. A system message in the middle
             # of the conversation therefore moves to the front.
-            if text := _text_of(msg.get("content")):
-                system_parts.append(text)
+            content = msg.get("content")
+            if isinstance(content, list):
+                system_parts.extend(
+                    _text(p.get("text", ""), p.get("cache_control"))
+                    for p in content
+                    if p.get("type") == "text" and p.get("text")
+                )
+            elif text := _text_of(content):
+                system_parts.append(_text(text, msg.get("cache_control")))
         elif role == "user":
-            append("user", _content_blocks(msg.get("content")))
+            append("user", _content_blocks(msg.get("content"), msg.get("cache_control")))
         elif role == "assistant":
-            blocks = _content_blocks(msg.get("content"))
+            # Earlier thinking (with signatures) goes first, as the API returned it.
+            blocks = [b for b in msg.get("thinking_blocks") or [] if isinstance(b, dict)]
+            blocks += _content_blocks(msg.get("content"), msg.get("cache_control"))
             for call in msg.get("tool_calls") or []:
                 fn = call["function"]
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
                 except ValueError as exc:
                     raise TranslationError(f"tool call {call.get('id')} has invalid JSON") from exc
-                blocks.append(
-                    {"type": "tool_use", "id": call["id"], "name": fn["name"], "input": args}
-                )
+                tool_use = {"type": "tool_use", "id": call["id"], "name": fn["name"], "input": args}
+                if cc := call.get("cache_control"):
+                    tool_use["cache_control"] = cc
+                blocks.append(tool_use)
             append("assistant", blocks)
         elif role == "tool":
             result: dict[str, Any] = {
@@ -168,6 +194,8 @@ def _messages(oai: list[dict[str, Any]], system_parts: list[str]) -> list[dict[s
                 "tool_use_id": msg["tool_call_id"],
                 "content": _text_of(msg.get("content")),
             }
+            if cc := msg.get("cache_control"):
+                result["cache_control"] = cc
             append("user", [result])
     # The Messages API needs a user turn first (and at least one message). OpenAI allows
     # system-only requests and conversations opening with a seeded assistant greeting.
@@ -184,18 +212,21 @@ def _text_of(content: Any) -> str:
     return "".join(p.get("text", "") for p in content if p.get("type") == "text")
 
 
-def _content_blocks(content: Any) -> list[dict[str, Any]]:
+def _content_blocks(content: Any, cache_control: Any = None) -> list[dict[str, Any]]:
     if content is None:
         return []
     if isinstance(content, str):
-        return [{"type": "text", "text": content}] if content else []
+        return [_text(content, cache_control)] if content else []
     blocks: list[dict[str, Any]] = []
     for part in content:
         kind = part.get("type")
         if kind in ("text", "refusal") and (text := part.get("text") or part.get("refusal")):
-            blocks.append({"type": "text", "text": text})
+            blocks.append(_text(text, part.get("cache_control")))
         elif kind == "image_url":
-            blocks.append(_image(part["image_url"]["url"]))
+            image = _image(part["image_url"]["url"])
+            if cc := part.get("cache_control"):
+                image["cache_control"] = cc
+            blocks.append(image)
         else:
             raise TranslationError(f"content part type {kind!r} is not supported for this model")
     return blocks
@@ -229,6 +260,8 @@ def _tool(tool: dict[str, Any], stream: bool) -> dict[str, Any]:
     if fn.get("strict"):
         out["strict"] = True
         out["input_schema"] = transform_schema(out["input_schema"])
+    if cc := tool.get("cache_control"):
+        out["cache_control"] = cc
     if stream:
         # Stream tool arguments as they're generated (like OpenAI does) instead of in
         # one burst at the end. Clients must validate the final arguments either way.
@@ -237,7 +270,7 @@ def _tool(tool: dict[str, Any], stream: bool) -> dict[str, Any]:
 
 
 def _tool_choice(
-    request: dict[str, Any], caps: dict[str, Any], system_parts: list[str]
+    request: dict[str, Any], caps: dict[str, Any], system_parts: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
     choice = request.get("tool_choice")
     no_parallel = request.get("parallel_tool_calls") is False
@@ -260,9 +293,11 @@ def _tool_choice(
         # prompt — a strong nudge, not a guarantee.
         out = {"type": "auto"}
         system_parts.append(
-            f"You must call the `{forced}` tool in your response."
-            if forced
-            else "You must call one of the provided tools in your response."
+            _text(
+                f"You must call the `{forced}` tool in your response."
+                if forced
+                else "You must call one of the provided tools in your response."
+            )
         )
     if no_parallel:
         out["disable_parallel_tool_use"] = True
@@ -275,16 +310,18 @@ def _tool_choice(
 def usage_to_openai(usage: dict[str, Any]) -> dict[str, Any]:
     """Anthropic's input_tokens excludes cached tokens; OpenAI's prompt_tokens includes them."""
     cached = usage.get("cache_read_input_tokens") or 0
-    prompt = (
-        (usage.get("input_tokens") or 0) + cached + (usage.get("cache_creation_input_tokens") or 0)
-    )
+    written = usage.get("cache_creation_input_tokens") or 0
+    prompt = (usage.get("input_tokens") or 0) + cached + written
     completion = usage.get("output_tokens") or 0
     out: dict[str, Any] = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": prompt + completion,
-        "prompt_tokens_details": {"cached_tokens": cached},
+        # cache_creation_tokens: an extension, billed at the cache-write price (ADR 0013)
+        "prompt_tokens_details": {"cached_tokens": cached, "cache_creation_tokens": written},
     }
+    if written_1h := int((usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0):
+        out["prompt_tokens_details"]["cache_creation_1h_tokens"] = written_1h  # dearer writes
     if iterations := usage.get("iterations"):
         # With a refusal fallback, top-level usage covers only the attempt that produced
         # the answer; each attempt (billed at its own model's rates) is in `iterations`.
@@ -297,8 +334,11 @@ def from_anthropic(msg: dict[str, Any]) -> dict[str, Any]:
     """Anthropic message → OpenAI chat.completion."""
     text: list[str] = []
     tool_calls: list[dict[str, Any]] = []
+    thinking: list[dict[str, Any]] = []
     for block in msg.get("content", []):
-        if block["type"] == "text":
+        if block["type"] in ("thinking", "redacted_thinking"):
+            thinking.append(block)  # extension: only /v1/messages clients see it
+        elif block["type"] == "text":
             text.append(block["text"])
         elif block["type"] == "tool_use":
             tool_calls.append(
@@ -308,10 +348,12 @@ def from_anthropic(msg: dict[str, Any]) -> dict[str, Any]:
                     "function": {"name": block["name"], "arguments": json.dumps(block["input"])},
                 }
             )
-        # thinking / redacted_thinking / fallback blocks have no OpenAI equivalent.
+        # fallback blocks have no OpenAI equivalent.
     message: dict[str, Any] = {"role": "assistant", "content": "".join(text) or None}
     if tool_calls:
         message["tool_calls"] = tool_calls
+    if thinking:
+        message["thinking_blocks"] = thinking
     return {
         "id": msg["id"],
         "object": "chat.completion",
@@ -352,6 +394,7 @@ class StreamTranslator:
         self._tool_index: dict[int, int] = {}  # content block index → tool call index
         self._tool_has_args: dict[int, bool] = {}
         self._held: dict[int, dict[str, Any]] = {}  # tool call index → buffered call
+        self._thinking: set[int] = set()  # content block indices of thinking blocks
 
     def _chunk(self, delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
         return {
@@ -380,7 +423,14 @@ class StreamTranslator:
                 self._tool_index.clear()
                 self._tool_has_args.clear()
                 self._held.clear()
+                self._thinking.clear()
                 return []
+            if block["type"] in ("thinking", "redacted_thinking"):
+                self._thinking.add(event["index"])
+                start = {"type": block["type"]}
+                if block["type"] == "redacted_thinking":
+                    start["data"] = block.get("data", "")
+                return [self._chunk({"thinking": {"index": event["index"], "start": start}})]
             if block["type"] == "tool_use":
                 i = self._tool_index[event["index"]] = len(self._tool_index)
                 self._tool_has_args[i] = False
@@ -410,7 +460,14 @@ class StreamTranslator:
                     self._held[i]["function"]["arguments"] += part
                     return []
                 return [self._tool_chunk({"index": i, "function": {"arguments": part}})]
-            return []  # thinking_delta, signature_delta, …
+            if event["index"] in self._thinking:
+                if delta["type"] == "thinking_delta" and delta.get("thinking"):
+                    t = {"index": event["index"], "thinking": delta["thinking"]}
+                    return [self._chunk({"thinking": t})]
+                if delta["type"] == "signature_delta" and delta.get("signature"):
+                    t = {"index": event["index"], "signature": delta["signature"]}
+                    return [self._chunk({"thinking": t})]
+            return []
 
         if kind == "content_block_stop" and event.get("index") in self._tool_index:
             i = self._tool_index[event["index"]]

@@ -7,3 +7,4 @@ __pycache__/
 .ruff_cache/
 .claude/settings.local.json
 tests/load/results/
+.env.prod

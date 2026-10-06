@@ -87,3 +87,20 @@ async def test_revoked_keys_dont_authenticate(store: PostgresKeyStore) -> None:
 async def test_revoke_unknown_or_malformed_id(store: PostgresKeyStore) -> None:
     assert await store.revoke("not-a-uuid") is False
     assert await store.revoke("00000000-0000-0000-0000-000000000000") is False
+
+
+async def test_update_changes_limits_and_team_in_place(store: PostgresKeyStore) -> None:
+    key, plaintext = await store.create("app", "dev", {"tokens_per_minute": 1000, "team": "web"})
+    assert key.team == "web"
+    updated = await store.update(
+        key.id,
+        {"tier": "standard", "tokens_per_minute": None, "monthly_budget_usd": 5, "team": None},
+    )
+    assert updated is not None
+    assert updated.tier == "standard" and updated.team is None
+    assert updated.overrides == {"monthly_budget_usd": 5}  # tokens_per_minute cleared
+    again = await store.get_by_hash(hash_key(plaintext))
+    assert again is not None and again.tier == "standard"  # same key, edited
+    assert await store.update("not-a-uuid", {"name": "x"}) is None
+    assert await store.revoke(key.id)
+    assert await store.update(key.id, {"name": "x"}) is None  # revoked keys can't be edited

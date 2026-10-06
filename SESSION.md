@@ -23,6 +23,30 @@ Keep "Current state" short and always true.
 
 ## Session log
 
+### 2026-10-06 — Session 13
+**Did**
+- Phase 9 (`phase-9-gaps`), ADRs 0013–0016:
+  - prompt caching and thinking through `/v1/messages`;
+  - OpenAI Responses API adapter (Astra and Sol call tools again);
+  - long-context tiers, cache-write prices and off-peak pricing;
+  - `PATCH /admin/keys`, teams with budgets, body limit;
+  - release workflow (GHCR, SBOM, provenance), `docker-compose.prod.yml`, retention job, read-only Grafana role.
+- The production stack was brought up locally from a local image, twice (before and after review):
+  - TLS, 2 replicas, per-replica balancing;
+  - operator listener, read-only role, retention;
+  - secrets scoped per container.
+- Code review fixes:
+  - **Caddy:** dynamic upstreams, plus an operator listener in place of `remote_ip` matching.
+  - **Leaks:** usage extension fields leaking to OpenAI clients; OpenAI clients could turn thinking on.
+  - **Requests:** system prompts arriving as part lists at non-Anthropic providers; truncated chunked bodies on disconnect.
+  - **Database role:** the password is sent as a SCRAM verifier, through driver-level DDL.
+  - **Validation:** off-peak windows checked and billed at request start; batch size 0 rejected.
+
+**Learned**
+- SQLAlchemy `text()` treats `:word` inside string literals as bind parameters; run DDL with `exec_driver_sql`
+- Source-IP allowlists are unreliable behind proxies and Docker's userland proxy: put operator endpoints on a separate listener
+- redis-py's VSIM raises AttributeError when the vector set doesn't exist yet
+
 ### 2026-10-05 — Session 12
 **Did**
 - Researched subscription terms across providers (wiki: Subscriptions-and-Terms). No credential reuse. Pass-through is documented for Claude Code and Codex but not built

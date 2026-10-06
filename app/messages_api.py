@@ -78,7 +78,7 @@ def _to_openai(body: dict[str, Any]) -> dict[str, Any]:
         if field not in body:
             raise InboundError(f"{field}: Field required", field)
     messages: list[dict[str, Any]] = []
-    if system := _system_text(body.get("system")):
+    if system := _system_content(body.get("system")):
         messages.append({"role": "system", "content": system})
     for msg in body["messages"]:
         messages.extend(_message(msg))
@@ -104,6 +104,8 @@ def _to_openai(body: dict[str, Any]) -> dict[str, Any]:
     effort = (body.get("output_config") or {}).get("effort")
     if effort in EFFORTS:
         out["reasoning_effort"] = effort
+    if isinstance(thinking := body.get("thinking"), dict):
+        out["thinking"] = thinking  # extension field: Anthropic targets only (ADR 0013)
     return out
 
 
@@ -115,12 +117,32 @@ def _system_text(system: Any) -> str:
     return "\n\n".join(b["text"] for b in system if b.get("type") == "text")
 
 
+def _system_content(system: Any) -> str | list[dict[str, Any]]:
+    """The system prompt; as text parts when any block is marked for caching, so the
+    cache breakpoint survives to Anthropic targets (ADR 0013)."""
+    if isinstance(system, list) and any(
+        isinstance(b, dict) and b.get("cache_control") for b in system
+    ):
+        return [
+            _cached({"type": "text", "text": str(b.get("text", ""))}, b)
+            for b in system
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+    return _system_text(system)
+
+
+def _cached(part: dict[str, Any], block: dict[str, Any]) -> dict[str, Any]:
+    if cc := block.get("cache_control"):
+        part["cache_control"] = cc
+    return part
+
+
 def _message(msg: dict[str, Any]) -> list[dict[str, Any]]:
     role, content = msg["role"], msg["content"]
     if role == "system":
         # Mid-conversation system messages (sent by e.g. Claude Code). OpenAI has the same
         # role; the outbound Claude adapter folds it into the top-level system prompt.
-        return [{"role": "system", "content": _system_text(content)}]
+        return [{"role": "system", "content": _system_content(content)}]
     if role not in ("user", "assistant"):
         raise InboundError(f"messages: role {role!r} is not supported", "messages.role")
     if isinstance(content, str):
@@ -139,7 +161,9 @@ def _message(msg: dict[str, Any]) -> list[dict[str, Any]]:
             if block.get("is_error"):
                 text = f"[tool error] {text}"
             tool_msgs.append(
-                {"role": "tool", "tool_call_id": block["tool_use_id"], "content": text}
+                _cached(
+                    {"role": "tool", "tool_call_id": block["tool_use_id"], "content": text}, block
+                )
             )
             parts.extend(images)
         else:
@@ -153,9 +177,11 @@ def _message(msg: dict[str, Any]) -> list[dict[str, Any]]:
 def _user_part(block: dict[str, Any]) -> dict[str, Any]:
     kind = block.get("type")
     if kind == "text":
-        return {"type": "text", "text": block["text"]}
+        return _cached({"type": "text", "text": block["text"]}, block)
     if kind == "image":
-        return {"type": "image_url", "image_url": {"url": _image_url(block["source"])}}
+        return _cached(
+            {"type": "image_url", "image_url": {"url": _image_url(block["source"])}}, block
+        )
     raise InboundError(f"content block type {kind!r} is not supported", "content.type")
 
 
@@ -185,34 +211,55 @@ def _tool_result(content: Any) -> tuple[str, list[dict[str, Any]]]:
 
 
 def _assistant(content: list[dict[str, Any]]) -> dict[str, Any]:
-    texts: list[str] = []
+    texts: list[dict[str, Any]] = []
     calls: list[dict[str, Any]] = []
+    thinking: list[dict[str, Any]] = []
     for block in content:
         kind = block.get("type")
         if kind == "text":
-            texts.append(block["text"])
+            texts.append(_cached({"type": "text", "text": block["text"]}, block))
         elif kind == "tool_use":
             calls.append(
+                _cached(
+                    {
+                        "id": block["id"],
+                        "type": "function",
+                        "function": {
+                            "name": block["name"],
+                            "arguments": json.dumps(block["input"]),
+                        },
+                    },
+                    block,
+                )
+            )
+        elif kind == "thinking":
+            # Kept for Anthropic targets, which need earlier thinking (with its
+            # signature) to continue a tool-using turn. Others never see it.
+            thinking.append(
                 {
-                    "id": block["id"],
-                    "type": "function",
-                    "function": {"name": block["name"], "arguments": json.dumps(block["input"])},
+                    "type": "thinking",
+                    "thinking": block.get("thinking", ""),
+                    "signature": block.get("signature", ""),
                 }
             )
-        elif kind in ("thinking", "redacted_thinking"):
-            continue  # earlier reasoning: no OpenAI equivalent, and not needed to continue
+        elif kind == "redacted_thinking":
+            thinking.append({"type": "redacted_thinking", "data": block.get("data", "")})
         else:
             raise InboundError(
                 f"assistant content block type {kind!r} is not supported", "assistant.content.type"
             )
     # OpenAI rejects an assistant turn with neither content nor tool calls (e.g. one that
     # held only thinking blocks), so that keeps an empty string.
-    out: dict[str, Any] = {
-        "role": "assistant",
-        "content": "".join(texts) or (None if calls else ""),
-    }
+    text: str | list[dict[str, Any]] | None
+    if any("cache_control" in t for t in texts):
+        text = texts  # as parts, so the cache breakpoint survives
+    else:
+        text = "".join(t["text"] for t in texts) or (None if calls else "")
+    out: dict[str, Any] = {"role": "assistant", "content": text}
     if calls:
         out["tool_calls"] = calls
+    if thinking:
+        out["thinking_blocks"] = thinking
     return out
 
 
@@ -229,7 +276,7 @@ def _tool(tool: dict[str, Any]) -> dict[str, Any]:
         fn["description"] = desc
     if tool.get("strict"):
         fn["strict"] = True
-    return {"type": "function", "function": fn}
+    return _cached({"type": "function", "function": fn}, tool)
 
 
 def _tool_choice(choice: dict[str, Any]) -> dict[str, Any]:
@@ -256,13 +303,15 @@ def _tool_choice(choice: dict[str, Any]) -> dict[str, Any]:
 def usage_from_openai(usage: dict[str, Any] | None) -> dict[str, int]:
     """OpenAI's prompt_tokens includes cached tokens; Anthropic's input_tokens doesn't."""
     usage = usage or {}
-    cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    details = usage.get("prompt_tokens_details") or {}
+    cached = int(details.get("cached_tokens") or 0)
+    written = int(details.get("cache_creation_tokens") or 0)  # extension (ADR 0013)
     prompt = int(usage.get("prompt_tokens") or 0)
     return {
-        "input_tokens": max(0, prompt - cached),
+        "input_tokens": max(0, prompt - cached - written),
         "output_tokens": int(usage.get("completion_tokens") or 0),
         "cache_read_input_tokens": cached,
-        "cache_creation_input_tokens": 0,
+        "cache_creation_input_tokens": written,
     }
 
 
@@ -283,7 +332,10 @@ def from_openai(result: dict[str, Any]) -> dict[str, Any]:
     """OpenAI chat.completion → Anthropic message."""
     choice = (result.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
-    content: list[dict[str, Any]] = []
+    # Thinking first, as Anthropic returns it (and as it must be sent back next turn).
+    content: list[dict[str, Any]] = [
+        b for b in msg.get("thinking_blocks") or [] if isinstance(b, dict)
+    ]
     if text := msg.get("content"):
         content.append({"type": "text", "text": text})
     if refusal := msg.get("refusal"):
@@ -373,6 +425,7 @@ class MessagesStream:
         self.started = False
         self.index = -1  # last block opened
         self.text_open = False
+        self.thinking_open: dict[int, int] = {}  # source thinking block → our block index
         self.open_tools: list[int] = []  # block indices of open tool_use blocks
         self.tools: dict[int, tuple[str | None, int]] = {}  # OpenAI index → (id, block)
         self.stop_reason: str | None = None
@@ -405,6 +458,41 @@ class MessagesStream:
         self.open_tools.clear()
         return out
 
+    def _close_thinking(self) -> list[str]:
+        out = [_event("content_block_stop", {"index": i}) for i in self.thinking_open.values()]
+        self.thinking_open.clear()
+        return out
+
+    def _close_all(self) -> list[str]:
+        return self._close_thinking() + self._close_text() + self._close_tools()
+
+    def _thinking(self, t: dict[str, Any]) -> list[str]:
+        """Extension delta from an Anthropic target (ADR 0013): thinking blocks, which
+        must reach the client intact (text and signature) to be sent back next turn."""
+        out: list[str] = []
+        src = int(t.get("index") or 0)
+        if isinstance(start := t.get("start"), dict):
+            out += self._close_all()
+            self.index += 1
+            block = (
+                {"type": "redacted_thinking", "data": start.get("data", "")}
+                if start.get("type") == "redacted_thinking"
+                else {"type": "thinking", "thinking": "", "signature": ""}
+            )
+            out.append(_event("content_block_start", {"index": self.index, "content_block": block}))
+            self.thinking_open[src] = self.index
+            return out
+        idx = self.thinking_open.get(src)
+        if idx is None:
+            return out
+        if text := t.get("thinking"):
+            delta = {"type": "thinking_delta", "thinking": text}
+            out.append(_event("content_block_delta", {"index": idx, "delta": delta}))
+        if sig := t.get("signature"):
+            delta = {"type": "signature_delta", "signature": sig}
+            out.append(_event("content_block_delta", {"index": idx, "delta": delta}))
+        return out
+
     def _open(self, block: dict[str, Any]) -> list[str]:
         self.index += 1
         return [_event("content_block_start", {"index": self.index, "content_block": block})]
@@ -415,10 +503,12 @@ class MessagesStream:
             self.usage = chunk["usage"]
         for choice in chunk.get("choices") or []:
             delta = choice.get("delta") or {}
+            if isinstance(thinking := delta.get("thinking"), dict):
+                out += self._thinking(thinking)
             if text := delta.get("content"):
                 self.chars += len(text)
                 if not self.text_open:
-                    out += self._close_tools()
+                    out += self._close_thinking() + self._close_tools()
                     out += self._open({"type": "text", "text": ""})
                     self.text_open = True
                 out.append(
@@ -431,7 +521,7 @@ class MessagesStream:
                 out += self._tool_delta(call)
             if reason := choice.get("finish_reason"):
                 self.stop_reason = STOP_REASON.get(reason, "end_turn")
-                out += self._close_text() + self._close_tools()
+                out += self._close_all()
         return out
 
     def _tool_delta(self, call: dict[str, Any]) -> list[str]:
@@ -443,7 +533,7 @@ class MessagesStream:
         # A different id at a known index is a new call too (providers that send every
         # call as index 0); arguments without an id belong to the latest call there.
         if known is None or (call.get("id") and call["id"] != known[0]):
-            out += self._close_text()
+            out += self._close_thinking() + self._close_text()
             block: dict[str, Any] = {
                 "type": "tool_use",
                 "id": call.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
@@ -472,7 +562,7 @@ class MessagesStream:
 
     def end(self) -> list[str]:
         out = [] if self.started else self._start({})
-        out += self._close_text() + self._close_tools()
+        out += self._close_all()
         delta = {"stop_reason": self.stop_reason or "end_turn", "stop_sequence": None}
         out.append(_event("message_delta", {"delta": delta, "usage": self._final_usage()}))
         out.append(_event("message_stop", {}))

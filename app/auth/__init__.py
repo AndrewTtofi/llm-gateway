@@ -56,6 +56,12 @@ class ApiKey:
     overrides: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     revoked: bool = False
+    team: str | None = None  # teams have their own monthly budget (limits.yaml)
+
+    @property
+    def team_spend_id(self) -> str | None:
+        """Where the team's month-to-date spend is tracked (same store as keys)."""
+        return f"team:{self.team}" if self.team else None
 
     def limits(self, limits: Limits) -> EffectiveLimits:
         tier = limits.tiers[self.tier]
@@ -79,6 +85,7 @@ class ApiKey:
             "name": self.name,
             "prefix": self.prefix,
             "tier": self.tier,
+            "team": self.team,
             "overrides": self.overrides,
             "revoked": self.revoked,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -95,6 +102,28 @@ class KeyStore(Protocol):
     async def get_by_hash(self, key_hash: str) -> ApiKey | None: ...
     async def list(self) -> list[ApiKey]: ...
     async def revoke(self, key_id: str) -> bool: ...
+    async def update(self, key_id: str, changes: dict[str, Any]) -> ApiKey | None: ...
+
+
+EDITABLE = ("name", "tier", "team", *OVERRIDES)
+
+
+def _apply(key: ApiKey, changes: dict[str, Any]) -> ApiKey:
+    """`changes` maps EDITABLE fields to new values; None clears a field or override."""
+    overrides = dict(key.overrides)
+    for k in OVERRIDES:
+        if k in changes:
+            if changes[k] is None:
+                overrides.pop(k, None)
+            else:
+                overrides[k] = changes[k]
+    return replace(
+        key,
+        name=changes.get("name") or key.name,
+        tier=changes.get("tier") or key.tier,
+        team=changes["team"] if "team" in changes else key.team,
+        overrides=overrides,
+    )
 
 
 class MemoryKeyStore:
@@ -105,6 +134,8 @@ class MemoryKeyStore:
 
     async def create(self, name: str, tier: str, overrides: dict[str, Any]) -> tuple[ApiKey, str]:
         plaintext = generate_key()
+        overrides = dict(overrides)
+        team = overrides.pop("team", None)
         key = ApiKey(
             id=str(uuid.uuid4()),
             name=name,
@@ -112,6 +143,7 @@ class MemoryKeyStore:
             tier=tier,
             overrides={k: v for k, v in overrides.items() if v is not None},
             created_at=datetime.now(UTC),
+            team=team,
         )
         self._by_hash[hash_key(plaintext)] = key
         return key, plaintext
@@ -129,6 +161,13 @@ class MemoryKeyStore:
                 return True
         return False
 
+    async def update(self, key_id: str, changes: dict[str, Any]) -> ApiKey | None:
+        for h, key in self._by_hash.items():
+            if key.id == key_id and not key.revoked:
+                self._by_hash[h] = _apply(key, changes)
+                return self._by_hash[h]
+        return None
+
 
 def _from_row(row: ApiKeyRow) -> ApiKey:
     overrides = {k: getattr(row, k) for k in OVERRIDES if getattr(row, k) is not None}
@@ -140,6 +179,7 @@ def _from_row(row: ApiKeyRow) -> ApiKey:
         overrides=overrides,
         created_at=row.created_at,
         revoked=row.revoked_at is not None,
+        team=row.team,
     )
 
 
@@ -154,6 +194,7 @@ class PostgresKeyStore:
             prefix=plaintext[:8],
             key_hash=hash_key(plaintext),
             tier=tier,
+            team=overrides.get("team"),
             **{k: overrides[k] for k in OVERRIDES if overrides.get(k) is not None},
         )
         async with self.sessions() as s, s.begin():
@@ -187,6 +228,28 @@ class PostgresKeyStore:
                 .values(revoked_at=datetime.now(UTC))
             )
             return bool(getattr(result, "rowcount", 0))
+
+    async def update(self, key_id: str, changes: dict[str, Any]) -> ApiKey | None:
+        try:
+            kid = uuid.UUID(key_id)
+        except ValueError:
+            return None
+        values = {k: v for k, v in changes.items() if k in EDITABLE}
+        if not values:
+            async with self.sessions() as s:
+                row = await s.get(ApiKeyRow, kid)
+                return _from_row(row) if row and row.revoked_at is None else None
+        async with self.sessions() as s, s.begin():
+            result = await s.execute(
+                update(ApiKeyRow)
+                .where(ApiKeyRow.id == kid, ApiKeyRow.revoked_at.is_(None))
+                .values(**values)
+            )
+            if not getattr(result, "rowcount", 0):
+                return None
+        async with self.sessions() as s:
+            row = await s.get(ApiKeyRow, kid)
+            return _from_row(row) if row else None
 
 
 class CachedKeys:

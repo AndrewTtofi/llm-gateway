@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # quick single-process run without the stack. Keys and limits then die with the process.
     gateway_stores: Literal["external", "memory"] = "external"
     db_timeout_seconds: float = 2.0  # pool wait, connect and query timeout on the request path
+    # Largest request body accepted (413 above it). Base64 images make bodies big:
+    # Anthropic allows up to 32 MB per request.
+    max_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     # Prometheus metrics on their own port (internal only). 0 = serve /metrics on the API port.
     metrics_port: int = 9100
 
@@ -89,19 +92,85 @@ class Tier(BaseModel):
     allowed_aliases: list[str]
 
 
+class Team(BaseModel):
+    monthly_budget_usd: float = Field(ge=0)
+
+
 class Limits(BaseModel):
     estimation: Estimation = Field(default_factory=Estimation)
     tiers: dict[str, Tier]
+    teams: dict[str, Team] = {}  # keys with `team` also count against the team's budget
 
 
 # A negative or non-finite price would corrupt spend and let keys past their budgets.
 _PRICE = Field(default=None, ge=0, allow_inf_nan=False)
 
 
+Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+class PriceTier(BaseModel):
+    """Prices once a request's prompt is above a size (ADR 0015). Providers that tier
+    (OpenAI above 272K, Gemini and xAI above 200K) reprice the *whole* request."""
+
+    above_prompt_tokens: int = Field(gt=0)
+    input: float = Field(ge=0, allow_inf_nan=False)
+    output: float = Field(ge=0, allow_inf_nan=False)
+    cached_input: float | None = _PRICE
+    cache_write: float | None = _PRICE
+    cache_write_1h: float | None = _PRICE
+
+
+class OffPeak(BaseModel):
+    """Time-of-day pricing (DeepSeek): outside the peak windows, every rate is multiplied."""
+
+    multiplier: float = Field(gt=0, le=1)
+    peak_utc: list[str] = Field(min_length=1)  # "HH:MM-HH:MM", end exclusive
+    peak_days: list[Weekday] = list(WEEKDAYS[:5])
+
+    @field_validator("peak_utc")
+    @classmethod
+    def _windows(cls, value: list[str]) -> list[str]:
+        for window in value:
+            m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)-(([01]\d|2[0-3]):([0-5]\d)|24:00)", window)
+            if not m:
+                raise ValueError(f"peak window {window!r} is not HH:MM-HH:MM (end may be 24:00)")
+            start, end = (int(t[:2]) * 60 + int(t[3:]) for t in window.split("-"))
+            if start >= end:  # a window crossing midnight is two windows: 22:00-24:00, 00:00-02:00
+                raise ValueError(f"peak window {window!r} must end after it starts")
+        return value
+
+    def is_peak(self, at: datetime) -> bool:
+        at = at.astimezone(UTC)
+        if WEEKDAYS[at.weekday()] not in self.peak_days:
+            return False
+        minute = at.hour * 60 + at.minute
+        for window in self.peak_utc:
+            start, end = (
+                int(h) * 60 + int(m) for h, m in (t.split(":") for t in window.split("-"))
+            )
+            if start <= minute < end:
+                return True
+        return False
+
+
 class Price(BaseModel):
     input: float | None = _PRICE  # USD per 1M tokens; None = unknown
     output: float | None = _PRICE
     cached_input: float | None = _PRICE  # cache reads; None = billed as normal input
+    cache_write: float | None = _PRICE  # prompt-cache writes (5-minute); None = input price
+    cache_write_1h: float | None = _PRICE  # 1-hour cache writes; None = cache_write
+    tiers: list[PriceTier] = []
+    off_peak: OffPeak | None = None
+
+    @field_validator("tiers")
+    @classmethod
+    def _ascending(cls, tiers: list[PriceTier]) -> list[PriceTier]:
+        thresholds = [t.above_prompt_tokens for t in tiers]
+        if thresholds != sorted(set(thresholds)):
+            raise ValueError("tiers must have distinct, ascending above_prompt_tokens")
+        return tiers
 
 
 class Pricing(BaseModel):
@@ -110,23 +179,46 @@ class Pricing(BaseModel):
     models: dict[str, Price] = {}
 
     def cost(
-        self, target: str, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0
+        self,
+        target: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cached_tokens: int = 0,
+        written_tokens: int = 0,
+        written_1h_tokens: int = 0,
+        at: datetime | None = None,
     ) -> float | None:
         """USD for one call, or None if the target has no (complete) price.
 
-        `prompt_tokens` includes `cached_tokens` (OpenAI convention); cached ones are
-        billed at `cached_input` when the model has one.
+        `prompt_tokens` includes cache reads and writes (OpenAI convention). Reads are
+        billed at `cached_input`, writes at `cache_write` / `cache_write_1h`, and the rest
+        at `input`. The tier is chosen by the prompt size; off-peak pricing by `at` (UTC,
+        default now).
         """
         price = self.models.get(target)
         if price is None or price.input is None or price.output is None:
             return None
+        rates: Price | PriceTier = price
+        for tier in price.tiers:  # ascending: the last one the prompt exceeds wins
+            if prompt_tokens > tier.above_prompt_tokens:
+                rates = tier
+        assert rates.input is not None and rates.output is not None
         cached = min(max(cached_tokens, 0), prompt_tokens)
-        cached_rate = price.cached_input if price.cached_input is not None else price.input
-        return (
-            (prompt_tokens - cached) * price.input
-            + cached * cached_rate
-            + completion_tokens * price.output
+        written = min(max(written_tokens, 0), prompt_tokens - cached)
+        written_1h = min(max(written_1h_tokens, 0), written)
+        read_rate = rates.cached_input if rates.cached_input is not None else rates.input
+        write_rate = rates.cache_write if rates.cache_write is not None else rates.input
+        write_1h_rate = rates.cache_write_1h if rates.cache_write_1h is not None else write_rate
+        usd = (
+            (prompt_tokens - cached - written) * rates.input
+            + cached * read_rate
+            + (written - written_1h) * write_rate
+            + written_1h * write_1h_rate
+            + completion_tokens * rates.output
         ) / 1_000_000
+        if price.off_peak is not None and not price.off_peak.is_peak(at or datetime.now(UTC)):
+            usd *= price.off_peak.multiplier
+        return usd
 
 
 Capability = Literal["tools", "vision", "reasoning", "json_schema"]

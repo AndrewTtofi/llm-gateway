@@ -1,0 +1,149 @@
+# Production-shaped stack on one host: TLS (Caddy) → 2 gateway replicas → Redis + Postgres,
+# optional Prometheus + Grafana (profile `monitoring`). Uses the release image from GHCR.
+#
+#   cp .env.prod.example .env.prod   # fill in secrets; never commit it
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod --profile monitoring up -d
+#
+# Differences from the dev stack: no fake provider, no --reload, no source mounts; migrations
+# run once (`migrate`) before the replicas start; only Caddy publishes ports; secrets come
+# from .env.prod. For managed Redis/Postgres, drop those services and point the URLs at them.
+x-gateway: &gateway
+  image: ghcr.io/andrewttofi/llm-gateway:${GATEWAY_VERSION:?set GATEWAY_VERSION, e.g. 1.2.0}
+  restart: unless-stopped
+  # Only what the gateway needs; other secrets in .env.prod (Grafana's, the read-only
+  # role's) never reach these containers.
+  environment: &gateway-env
+    REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379/0
+    DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:?}@postgres:5432/gateway
+    CONFIG_DIR: /app/config
+    GATEWAY_ADMIN_KEY: ${GATEWAY_ADMIN_KEY:?}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    XAI_API_KEY: ${XAI_API_KEY:-}
+    MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+    DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+  volumes:
+    - ./config:/app/config:ro            # models, pricing, catalog, limits (reload: POST /admin/reload)
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
+services:
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+      - "127.0.0.1:8081:8081"   # operator listener: /admin, /metrics, /readyz (SSH tunnel)
+    environment:
+      GATEWAY_DOMAIN: ${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN}
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [gateway]
+
+  migrate:
+    <<: *gateway
+    restart: "no"
+    healthcheck: { disable: true }
+    # Schema, then the dashboards' read-only login (never sees key hashes).
+    command: sh -c "alembic upgrade head && python -m app.maintenance grant-readonly --role grafana_ro"
+    environment:
+      <<: *gateway-env
+      READONLY_PASSWORD: ${GRAFANA_PG_PASSWORD:?set GRAFANA_PG_PASSWORD (16+ characters)}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  gateway:
+    <<: *gateway
+    # SIGTERM: wait up to 30 s for open streams (the grace period below must be longer).
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30
+    stop_grace_period: 45s
+    deploy: { replicas: 2 }
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  redis:
+    image: redis:8.10.2-alpine
+    restart: unless-stopped
+    # The password goes into a config file, not the command line (visible in ps/inspect).
+    command: >-
+      sh -c 'umask 077 && printf "requirepass %s\nappendonly yes\n" "$$REDIS_PASSWORD" > /tmp/redis.conf
+      && exec redis-server /tmp/redis.conf'
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+
+  postgres:
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: gateway
+    volumes: [pg-data:/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 5s
+      retries: 10
+
+  # Daily usage_log retention (see docs/wiki/Operations-and-Deployment.md).
+  prune-usage:
+    <<: *gateway
+    restart: unless-stopped
+    command: >-
+      sh -c 'while true; do python -m app.maintenance prune --days "$${USAGE_RETENTION_DAYS:-90}"; sleep 86400; done'
+    healthcheck: { disable: true }       # not a web server (the image's check is for the API)
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    volumes:
+      - ./config/prometheus.prod.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
+      - prom-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    ports: ["127.0.0.1:3000:3000"]        # reach it through an SSH tunnel or a VPN
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GRAFANA_PG_USER: grafana_ro                     # read-only role made by `migrate`
+      GRAFANA_PG_PASSWORD: ${GRAFANA_PG_PASSWORD:?}
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  caddy-data:
+  caddy-config:
+  redis-data:
+  pg-data:
+  prom-data:
+  grafana-data:
