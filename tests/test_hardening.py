@@ -208,7 +208,8 @@ def test_a_key_at_its_concurrency_limit_gets_429(
     assert services.concurrency.active(key_id) == 0  # freed when the request settled
 
 
-async def test_a_client_that_stops_reading_is_disconnected() -> None:
+@pytest.mark.parametrize("spec", ["2.4", "2.3"])  # Starlette streams differently per ASGI version
+async def test_a_client_that_stops_reading_is_disconnected(spec: str) -> None:
     closed, settled = [], []
 
     class Upstream:
@@ -235,7 +236,7 @@ async def test_a_client_that_stops_reading_is_disconnected() -> None:
         await asyncio.sleep(10)
         return {"type": "http.disconnect"}
 
-    scope = {"type": "http", "asgi": {"spec_version": "2.4"}}
+    scope = {"type": "http", "asgi": {"spec_version": spec}}
     await asyncio.wait_for(resp(scope, receive, send), 2)
     assert closed and settled  # upstream closed and the request settled
 

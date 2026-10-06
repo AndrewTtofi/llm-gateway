@@ -90,7 +90,8 @@ class SpendTracker(Protocol):
 
 
 def month(now: datetime | None = None) -> str:
-    return (now or datetime.now(UTC)).strftime("%Y-%m")
+    now = now or datetime.now(UTC)
+    return f"{now.year:04d}-{now.month:02d}"  # strftime is several times slower, per request
 
 
 # --- Redis -----------------------------------------------------------------

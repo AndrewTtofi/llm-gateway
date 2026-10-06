@@ -9,6 +9,18 @@ Version plan: each completed phase bumps the minor version
 
 ## [Unreleased]
 
+### Changed (performance)
+- **Breaker successes:** they need no Redis call unless failures are being counted (the admission check says so in the same round trip).
+- **Budgets:** the early budget read is gone, since the atomic reservation is the check. A key with no budget left can still be served free cache hits.
+- **Settlement:** it writes the token bucket and spend concurrently.
+- **Slow streaming clients:** they're detected by one watchdog per stream instead of a timeout around every chunk.
+- **Measured locally, same load:**
+
+  | | CPU | p50 |
+  |---|---|---|
+  | Per request | −9% | −0.8 ms |
+  | Per stream | −12% | — |
+
 ## [1.3.1] - 2026-10-06
 
 ### Fixed

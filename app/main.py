@@ -693,35 +693,15 @@ async def _chat(
             param="model",
         )
 
-    # Budget: checked before the call against month-to-date spend (ADR 0007).
-    team_budget = config.limits.teams.get(key.team) if key.team else None
-    if key.team and team_budget is None:
+    # Budgets (ADR 0007, 0023) are enforced by the reservation before routing: one atomic
+    # check-and-hold per counter, so no separate read of the spend is needed here.
+    if key.team and key.team not in config.limits.teams:
         # Fail closed: a team removed from limits.yaml mustn't mean "no team budget".
         return error_response(
             403,
             f"key team {key.team!r} is not configured",
             "permission_error",
             "team_unknown",
-        )
-    if (
-        team_budget is not None
-        and key.team_spend_id
-        and await services.spend.spent(key.team_spend_id) >= team_budget.monthly_budget_usd
-    ):
-        metrics.rejected.labels("team_budget").inc()
-        return error_response(
-            429,
-            "Monthly budget for this key's team is exhausted.",
-            "insufficient_quota",
-            "insufficient_quota",
-        )
-    if await services.spend.spent(key.id) >= lim.monthly_budget_usd:
-        metrics.rejected.labels("budget").inc()
-        return error_response(
-            429,
-            "Monthly budget for this key is exhausted.",
-            "insufficient_quota",
-            "insufficient_quota",
         )
 
     # Requests in flight for this key (ADR 0023). Freed when the request settles.

@@ -199,7 +199,8 @@ Set `output_tokens_per_second: 0` to bill only what was relayed.
   expiring after about 2 months).
 - **Admission:** a request is refused if spend is already at or over the budget, with
   `429 insufficient_quota`, the error OpenAI uses for an empty account. On `/v1/messages` it
-  is `billing_error`.
+  is `billing_error`. The check happens when the request's cost is held, just before
+  routing, so a cached answer, which costs nothing, is still served to a key at its budget.
 - **Reservation:** the estimated cost, priced at the chain's first target, is added to spend
   immediately, so 50 concurrent requests can't all spend the last dollar. The check ("is
   spend still under the budget?") and the hold are **one atomic step** per counter (a Lua

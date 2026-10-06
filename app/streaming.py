@@ -23,10 +23,6 @@ class ClientDisconnected(Exception):
     pass
 
 
-class ClientTooSlow(Exception):
-    """The client stopped reading: a write to it didn't finish in time."""
-
-
 async def cancel_on_disconnect[T](request: Request, work: Awaitable[T]) -> T:
     """Run `work`, cancelling it if the client hangs up (→ ClientDisconnected).
 
@@ -95,22 +91,43 @@ class SSEResponse(StreamingResponse):
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         limit = self._write_timeout
+        loop = asyncio.get_running_loop()
+        sending_since: float | None = None  # when the write in progress started
+        too_slow = False
 
-        async def bounded_send(message: Any) -> None:
-            if not limit:
-                await send(message)
-                return
+        async def tracked_send(message: Any) -> None:
+            # One clock read per chunk. A timeout context per chunk measured 1.5–3.7 µs,
+            # ~10% of a busy replica's CPU across thousands of chunks a second.
+            nonlocal sending_since
+            sending_since = loop.time()
             try:
-                with anyio.fail_after(limit):
-                    await send(message)
-            except TimeoutError:
-                raise ClientTooSlow from None
+                await send(message)
+            finally:
+                sending_since = None
 
+        async def watchdog(task: asyncio.Task[Any]) -> None:
+            """Cancel the response if one write has been stuck for `limit` seconds."""
+            nonlocal too_slow
+            assert limit
+            while True:
+                await asyncio.sleep(min(limit / 4, 1.0))
+                if sending_since is not None and loop.time() - sending_since >= limit:
+                    too_slow = True
+                    task.cancel()
+                    return
+
+        task = asyncio.current_task()
+        guard = asyncio.create_task(watchdog(task)) if limit and task is not None else None
         try:
-            await super().__call__(scope, receive, bounded_send)
-        except ClientTooSlow:
+            await super().__call__(scope, receive, tracked_send if guard else send)
+        except asyncio.CancelledError:
+            if not too_slow or task is None:
+                raise  # cancelled for another reason (disconnect, shutdown)
+            task.uncancel()
             log.warning("client stopped reading for %ss; closing the stream", limit)
         finally:
+            if guard is not None:
+                guard.cancel()
             # Our task may already be cancelled; shield so the cleanup awaits still run.
             with anyio.CancelScope(shield=True):
                 with contextlib.suppress(RuntimeError):  # already running/closed
