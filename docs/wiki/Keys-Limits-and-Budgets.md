@@ -210,8 +210,8 @@ Set `output_tokens_per_second: 0` to bill only what was relayed.
 - **Settlement:** the reservation is replaced by the **real** cost, priced from
   `config/pricing.yaml` for the target that **actually served**. A fallback may be cheaper or
   more expensive than the first choice.
-- **Measured overshoot:** with 50 concurrent streams racing for the last dollar, +3.4%
-  (about 2.8 requests).
+- **Measured overshoot:** with 50 concurrent streams racing for the last dollar, +0.9%
+  (about 0.8 requests). It was +3.4% before holds became atomic.
 
 ### How cost is calculated
 

@@ -58,14 +58,19 @@ Each choice avoids a common benchmarking mistake:
 
 | | |
 |---|---|
-| Gateway overhead | **+2.6 ms p50 / +3.8 ms p95** per request; **+4.25 ms (0.8%)** on a realistic TTFT |
-| Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **200**; the core saturates at **400** |
-| Throughput, 1 → 2 replicas | **445 → 614 req/s** (rig ceiling 951) |
-| Rate-limit accuracy, 2 replicas | **−0.06%** |
-| Budget overshoot, 50 concurrent streams | **+3.4%** |
-| Provider outage | **5** requests to the dead provider before the breaker opened; **0** errors reached clients |
-| Provider down/slow, Redis slow/down, Postgres down | **100%** served (limits off during a Redis outage; uncached keys get 503 during a Postgres outage) |
-| SIGTERM with open streams | **90/90** completed |
+| Gateway overhead | **+3.6 ms p50 / +4.9 ms p95** per request; **+5.45 ms (1.0%)** on a realistic TTFT |
+| 100k-character prompt | **+8.1 ms p50 / +10.3 ms p95** |
+| Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **100**; the core saturates at **200** |
+| Throughput, 1 → 2 replicas | **365 → 478 req/s** (rig ceiling 851) |
+| Rate-limit accuracy, 2 replicas | **−0.12%** |
+| Budget overshoot, 50 concurrent streams | **+0.9%** (atomic budget holds, ADR 0023) |
+| Provider outage | **3** requests to the dead provider before the breaker opened; **0** errors reached clients |
+| Provider down/slow, Redis slow/down, Postgres down | **100%** served (rate limits off during a Redis outage; uncached keys get 503 during a Postgres outage) |
+| SIGTERM with open streams | **97/97** completed |
+
+Re-measured on 2026-10-06 for v1.3.0. The request path now includes the injection scan, the
+cache lookup and atomic budget holds. That adds about 1 ms per request, and one core
+saturates at about 200 concurrent streams instead of 400.
 
 ### Reproduce
 

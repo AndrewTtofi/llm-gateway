@@ -147,7 +147,11 @@ async def one(
 
 
 def make_body(args: argparse.Namespace, seq: int) -> dict[str, Any]:
-    prompt = f"{args.prompt} seed={seq}" if args.paired else args.prompt
+    prompt = args.prompt
+    if args.prompt_chars > len(prompt):  # a long context, like a chat resent in full
+        filler = " The river carried silt past the old mill and on towards the sea."
+        prompt = (prompt + filler * (args.prompt_chars // len(filler) + 1))[: args.prompt_chars]
+    prompt = f"{prompt} seed={seq}" if args.paired else prompt
     body: dict[str, Any] = {
         "model": args.model,
         "max_tokens": args.max_tokens,
@@ -227,6 +231,7 @@ def main() -> None:
     p.add_argument("--paired", action="store_true", help="seed=i in prompt i (mock timing)")
     p.add_argument("--max-tokens", type=int, default=128)
     p.add_argument("--prompt", default="Write a few sentences about rivers.")
+    p.add_argument("--prompt-chars", type=int, default=0, help="pad the prompt to N characters")
     p.add_argument("--timeout", type=float, default=120)
     p.add_argument("--label", default="")
     p.add_argument("--timeline", action="store_true", help="keep every request in the output")

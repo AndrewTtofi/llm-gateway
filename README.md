@@ -343,14 +343,19 @@ Haiku timing. Runs are paired request by request, so the mock's own randomness c
 
 | | |
 |---|---|
-| Gateway overhead | **+2.6 ms p50 / +3.8 ms p95** per request · **+4.25 ms (0.8%)** on a realistic time to first token |
-| Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **200** streams; the core saturates at **400** |
-| Throughput, 1 → 2 replicas | **445 → 614 req/s** (the test rig tops out at 951) |
-| Rate-limit accuracy across 2 replicas | **−0.06%** of the configured limit |
-| Budget overshoot, 50 concurrent streams | **+3.4%** (≈2.8 requests) |
-| Provider outage | **5** requests went to the dead provider before the breaker opened · **0** errors reached clients |
-| Provider down/slow, Redis slow/down, Postgres down | **100%** of requests served in each case (while Redis is down, limits and budgets are off; while Postgres is down, uncached keys get `503`) |
-| SIGTERM with open streams | **90/90** streams completed |
+| Gateway overhead | **+3.6 ms p50 / +4.9 ms p95** per request · **+5.45 ms (1.0%)** on a realistic time to first token |
+| With a 100k-character prompt | **+8.1 ms p50 / +10.3 ms p95** (estimate and injection scan included) |
+| Concurrent streams, one replica (one core) | Within 10% of a direct connection up to **100** streams; the core saturates at **200** |
+| Throughput, 1 → 2 replicas | **365 → 478 req/s** (the test rig tops out at 851) |
+| Rate-limit accuracy across 2 replicas | **−0.12%** of the configured limit |
+| Budget overshoot, 50 concurrent streams | **+0.9%** (≈0.8 requests) |
+| Provider outage | **3** requests went to the dead provider before the breaker opened · **0** errors reached clients |
+| Provider down/slow, Redis slow/down, Postgres down | **100%** of requests served in each case (while Redis is down, rate limits are off and budgets use the last known spend; while Postgres is down, uncached keys get `503`) |
+| SIGTERM with open streams | **97/97** streams completed |
+
+Measured on v1.3.0's request path (guardrails, cache lookup, atomic budget holds). It costs
+about 1 ms more per request than the v1.0 path, and one core now saturates at about 200
+concurrent streams rather than 400. The rig itself also ran about 10% slower in this run.
 
 To reproduce:
 

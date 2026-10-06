@@ -78,12 +78,15 @@ def overhead(out: list[str]) -> None:
         "| Load | Direct p50 / p95 | Gateway p50 / p95 | **Added by the gateway** (paired p50 / p95) | Admission p50 |",
         "|---|---|---|---|---|",
     ]
-    for tag in ("json-20rps", "json-100rps", "stream-20rps", "stream-100rps"):
+    tags = ("json-20rps", "json-100rps", "stream-20rps", "stream-100rps")
+    for tag in (*tags, "json-20rps-100k", "stream-20rps-100k"):
         if tag not in d:
             continue
         r = d[tag]
-        kind, rate = tag.split("-")
+        kind, rate, *size = tag.split("-")
         what = "time to first token" if kind == "stream" else "whole request"
+        if size:
+            what += ", **100k-character prompt**"
         key = "ttft_ms" if kind == "stream" else "total_ms"
         g, x, a = r["gateway"][key], r["direct"][key], r["paired_added_ms"]
         out.append(
@@ -367,13 +370,15 @@ def chaos(out: list[str]) -> None:
         (
             "Redis +200 ms latency",
             d["redis_slow_200ms"],
-            "Redis calls time out (100 ms); limits, budgets and breakers **fail open** for 5 s "
-            "at a time — traffic flows, but unmetered while it lasts.",
+            "Redis calls time out (100 ms); limits and breakers **fail open** for 5 s at a "
+            "time. Traffic flows; spend is queued on each replica and written once Redis "
+            "answers, and budgets use the last known spend meanwhile (ADR 0023).",
         ),
         (
             "Redis down",
             d["redis_down"],
-            "Fails open: rate limits, **budgets** and breakers are off until it's back.",
+            "Fails open: rate limits and breakers are off until it's back. Budgets keep the "
+            "last known spend plus what each replica queued, so a spent key stays blocked.",
         ),
         (
             "Postgres down",
@@ -515,8 +520,8 @@ def findings() -> list[str]:
         out.append(
             f"- **Chaos:** provider down/slow, Redis slow/down, Postgres down — "
             f"{min(rates):.1%}+ of requests served in each. Redis outages switch "
-            "limits and budgets off (fail open); a slow provider costs 2 × first_token "
-            "per request until the breaker opens."
+            "rate limits off (fail open; budgets use the last known spend, and spend is "
+            "queued); a slow provider costs 2 × first_token per request until the breaker opens."
         )
     if lc:
         rs = lc["restart_with_open_streams"]
