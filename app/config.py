@@ -155,6 +155,10 @@ class OffPeak(BaseModel):
         return False
 
 
+# A negative or non-finite price would corrupt spend and let keys past their budgets.
+_PRICE = Field(default=None, ge=0, allow_inf_nan=False)
+
+
 class Price(BaseModel):
     input: float | None = _PRICE  # USD per 1M tokens; None = unknown
     output: float | None = _PRICE
@@ -219,6 +223,30 @@ class Pricing(BaseModel):
         if price.off_peak is not None and not price.off_peak.is_peak(at or datetime.now(UTC)):
             usd *= price.off_peak.multiplier
         return usd
+
+
+Capability = Literal["tools", "vision", "reasoning", "json_schema"]
+
+
+class CatalogEntry(BaseModel):
+    """Facts about one target, for /v1/catalog (ADR 0011). Unknown = None."""
+
+    model_config = ConfigDict(extra="ignore")  # source-ID hints etc. are for the sync tool
+
+    context_window: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    capabilities: list[Capability] = []
+    quality: int | None = Field(default=None, ge=1, le=5)  # the operator's score
+
+    def model_dump_public(self) -> dict[str, Any]:
+        return self.model_dump(
+            include={"context_window", "max_output_tokens", "capabilities", "quality"}
+        )
+
+
+class Catalog(BaseModel):
+    checked: date | None = None  # when the synced facts were last checked
+    models: dict[str, CatalogEntry] = {}
 
 
 Capability = Literal["tools", "vision", "reasoning", "json_schema"]
