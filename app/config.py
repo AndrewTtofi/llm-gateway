@@ -257,6 +257,10 @@ class Team(BaseModel):
     monthly_budget_usd: float = Field(ge=0)
 
 
+class Team(BaseModel):
+    monthly_budget_usd: float = Field(ge=0)
+
+
 class Limits(BaseModel):
     estimation: Estimation = Field(default_factory=Estimation)
     tiers: dict[str, Tier]
