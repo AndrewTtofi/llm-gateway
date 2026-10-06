@@ -75,6 +75,10 @@ def scram_verifier(password: str, iterations: int = 4096) -> str:
     (log_statement = ddl) and pg_stat_activity, and leaves nothing to escape."""
     if "\x00" in password:
         raise ValueError("password contains a NUL byte")
+    if not password.isascii():
+        # PostgreSQL applies SASLprep (RFC 4013) to non-ASCII passwords before hashing; a
+        # verifier built without it wouldn't match, and the role couldn't log in.
+        raise ValueError("password must be ASCII (generate one with `openssl rand -hex 24`)")
     salt = secrets.token_bytes(16)
     salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
     client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()

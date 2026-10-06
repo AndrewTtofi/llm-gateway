@@ -5,6 +5,10 @@
 estimation:
   chars_per_token: 4              # rough for English across tokenizers
   default_completion_tokens: 1024 # assumed output when the client sends no max_tokens
+                                  # (providers with a default_max_tokens use theirs)
+  # A request cut off before the provider reported usage (hang-up, timeout) is billed at
+  # least this many output tokens per second it ran, up to its max_tokens (ADR 0023).
+  output_tokens_per_second: 100
 
 tiers:
   dev:
@@ -13,13 +17,18 @@ tiers:
     monthly_budget_usd: 10
     # Aliases (or exact provider/model names) this tier may call; "*" = everything.
     allowed_aliases: [fast, local]   # chaos aliases exist only with GATEWAY_ENABLE_FAKE=1
+    injection: log                   # prompt-injection filter (ADR 0021): off | log | flag | block
+    concurrent_requests: 10          # in flight per key and replica; 0 = no limit (ADR 0023)
   standard:
     requests_per_minute: 300
     tokens_per_minute: 200000
     monthly_budget_usd: 100
-    allowed_aliases: [fast, balanced, smart, local, frontier]
+    allowed_aliases: [fast, balanced, smart, local, frontier, auto]
+    injection: log                   # start with log; move to flag/block once tuned
+    concurrent_requests: 50
   chaos:                             # for load/chaos tests against the fake provider
     requests_per_minute: 600
     tokens_per_minute: 1000000
     monthly_budget_usd: 1
     allowed_aliases: [chaos, chaos-down, chaos-blip, fake/ok, fake/metered]
+    concurrent_requests: 0           # load tests drive hundreds of requests per key

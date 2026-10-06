@@ -7,6 +7,8 @@ gateway instances can't overdraw them. After the call, the token bucket is corre
 with the real usage (`adjust`).
 
 Redis fails open (allow, log once, skip Redis for a few seconds), like the breaker.
+Spend added while Redis is unreachable is kept and written when it's back, and budget
+checks meanwhile use the last known spend (ADR 0023).
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from typing import Any, Protocol
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError, ResponseError
+
+from app.observability import metrics
 
 log = logging.getLogger(__name__)
 
@@ -143,9 +147,13 @@ class _Guard:
 
     @property
     def up(self) -> bool:
-        return self._now() >= self._down_until
+        if self._now() >= self._down_until:
+            return True
+        metrics.fail_open.labels(self.what).inc()
+        return False
 
     def broken(self, exc: RedisError) -> None:
+        metrics.fail_open.labels(self.what).inc()
         if isinstance(exc, ResponseError):
             log.error("%s: Redis rejected a command (script bug?): %s", self.what, exc)
         elif not self._outage:
@@ -192,30 +200,78 @@ class RedisLimiter:
 
 class RedisSpend:
     TTL = 62 * 24 * 3600  # a month-to-date counter outlives its month, then goes
+    MAX_TRACKED = 10_000  # keys whose pending or last known spend this replica remembers
 
     def __init__(self, redis: Redis) -> None:
         self.redis = redis
         self._guard = _Guard("budget tracker")
+        # Spend not yet in Redis, by Redis key (so it lands in the month it was spent).
+        self._pending: dict[str, float] = {}
+        self._known: dict[str, float] = {}  # last spend read per Redis key
+        self._dropping = False  # logged that the queue is full
 
     @staticmethod
     def _key(key_id: str) -> str:
         return f"spend:{{{key_id}}}:{month()}"
 
-    async def spent(self, key_id: str) -> float:
-        if not self._guard.up:
-            return 0.0
+    def _remember(self, key: str, value: float) -> None:
+        self._known.pop(key, None)
+        self._known[key] = value
+        if len(self._known) > self.MAX_TRACKED:
+            self._known.pop(next(iter(self._known)))
+
+    def _local(self, key: str) -> float:
+        """Best guess without Redis: last known spend plus what's queued here."""
+        return self._known.get(key, 0.0) + self._pending.get(key, 0.0)
+
+    def _defer(self, key: str, usd: float) -> None:
+        if key in self._pending or len(self._pending) < self.MAX_TRACKED:
+            self._pending[key] = self._pending.get(key, 0.0) + usd
+        elif not self._dropping:
+            self._dropping = True
+            log.error("budget tracker: too much spend queued while Redis is down; dropping")
+
+    async def _flush(self) -> None:
+        if not self._pending:
+            return
+        pending, self._pending = self._pending, {}
         try:
-            value = await self.redis.get(self._key(key_id))
+            async with self.redis.pipeline(transaction=True) as pipe:
+                for key, usd in pending.items():
+                    pipe.incrbyfloat(key, usd)
+                    pipe.expire(key, self.TTL)
+                await pipe.execute()
+        except BaseException as exc:
+            # Not written (or not known to be): keep it. If EXEC did apply and only the
+            # reply was lost, it's counted twice; over-counting is the safe side.
+            for key, usd in pending.items():
+                self._defer(key, usd)
+            if not isinstance(exc, RedisError):
+                raise  # e.g. cancelled: the queue survives for the next flush
+            self._guard.broken(exc)
+
+    async def spent(self, key_id: str) -> float:
+        key = self._key(key_id)
+        if not self._guard.up:
+            return self._local(key)
+        await self._flush()  # first, so the read includes it
+        try:
+            value = await self.redis.get(key)
         except RedisError as exc:
             self._guard.broken(exc)
-            return 0.0
+            return self._local(key)
         self._guard.ok()
-        return float(value) if value else 0.0
+        spent = float(value) if value else 0.0
+        self._remember(key, spent)
+        return spent + self._pending.get(key, 0.0)
 
     async def add(self, key_id: str, usd: float) -> None:
-        if usd == 0 or not self._guard.up:  # negative = a reconciliation refund
+        if usd == 0:  # negative = a reconciliation refund
             return
         key = self._key(key_id)
+        if not self._guard.up:
+            self._defer(key, usd)
+            return
         try:
             async with self.redis.pipeline(transaction=True) as pipe:
                 pipe.incrbyfloat(key, usd)
@@ -223,6 +279,47 @@ class RedisSpend:
                 await pipe.execute()
         except RedisError as exc:
             self._guard.broken(exc)
+            self._defer(key, usd)
+            return
+        if key in self._known:
+            self._known[key] += usd  # so an outage starts from an up-to-date figure
+        await self._flush()
+
+
+# --- concurrency -----------------------------------------------------------
+
+
+class Concurrency:
+    """Requests in flight per key, on this replica (ADR 0023). Per replica on purpose: what
+    it protects, the provider connection pools, is per replica too. Without it, one key
+    could hold every connection (long streams read slowly) and starve other tenants."""
+
+    def __init__(self) -> None:
+        self._active: dict[str, int] = {}
+
+    def acquire(self, key_id: str, limit: int) -> Callable[[], None] | None:
+        """A release function, or None when the key is at its limit (0 = no limit)."""
+        n = self._active.get(key_id, 0)
+        if limit and n >= limit:
+            return None
+        self._active[key_id] = n + 1
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            left = self._active.get(key_id, 1) - 1
+            if left > 0:
+                self._active[key_id] = left
+            else:
+                self._active.pop(key_id, None)
+
+        return release
+
+    def active(self, key_id: str) -> int:
+        return self._active.get(key_id, 0)
 
 
 # --- memory ----------------------------------------------------------------
@@ -279,17 +376,49 @@ class MemorySpend:
 # --- estimation ------------------------------------------------------------
 
 
-def estimate_prompt_tokens(messages: list[Any], chars_per_token: float) -> int:
-    """Rough prompt size from characters (ADR 0007). Images count a flat 1000."""
-    chars, images = 0, 0
+# Base64 file and audio payloads count a tenth of their characters: a PDF's base64 is
+# ~10x more characters than the tokens a provider bills for it. Still generous, and it
+# keeps the estimate (billed as-is when a request is cut off) near the real size.
+BASE64_SHARE = 0.1
+_PAYLOAD_KEYS = frozenset({"file_data", "data"})
+
+
+def _chars(value: Any, depth: int = 0, payload: bool = False) -> int:
+    """Characters in every string inside `value` (keys included): tool schemas, file and
+    audio payloads, tool-call arguments. Depth-bounded; parsed JSON is shallow anyway."""
+    if isinstance(value, str):
+        if payload or value.startswith("data:"):
+            return math.ceil(len(value) * BASE64_SHARE)
+        return len(value)
+    if depth > 32:
+        return 0
+    if isinstance(value, dict):
+        return sum(len(str(k)) + _chars(v, depth + 1, k in _PAYLOAD_KEYS) for k, v in value.items())
+    if isinstance(value, list):
+        return sum(_chars(v, depth + 1) for v in value)
+    return 0
+
+
+def estimate_prompt_tokens(messages: list[Any], chars_per_token: float, tools: Any = None) -> int:
+    """Rough prompt size from characters (ADR 0007). Counts everything the provider reads:
+    text, tool definitions, tool calls, thinking blocks and file/audio payloads (base64
+    at a tenth of its characters). Images count a flat 1000 each."""
+    chars, images = _chars(tools) if tools else 0, 0
     for m in messages:
-        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        if not isinstance(m, dict):
+            m = m.model_dump() if hasattr(m, "model_dump") else {}
+        content = m.get("content")
         if isinstance(content, str):
             chars += len(content)
         elif isinstance(content, list):
             for part in content:
+                if not isinstance(part, dict):
+                    continue
                 if part.get("type") == "text":
-                    chars += len(part.get("text", ""))
+                    chars += len(part.get("text") or "")
                 elif part.get("type") == "image_url":
                     images += 1
+                else:
+                    chars += _chars(part)
+        chars += _chars(m.get("tool_calls")) + _chars(m.get("thinking_blocks"))
     return math.ceil(chars / chars_per_token) + 1000 * images + 4 * len(messages)

@@ -17,6 +17,7 @@ to every request.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
@@ -57,6 +58,10 @@ class BreakerStore(Protocol):
     async def record_failure(self, target: str, cfg: BreakerConfig, ticket: Ticket) -> bool: ...
     async def release(self, target: str, ticket: Ticket) -> None: ...
     async def state(self, target: str) -> State: ...
+    async def quarantine(
+        self, target: str, cfg: BreakerConfig, seconds: float, reason: str
+    ) -> None: ...
+    async def reason(self, target: str) -> str | None: ...
 
 
 def tripped_ttl(cfg: BreakerConfig) -> float:
@@ -112,6 +117,15 @@ end
 return 0
 """
 
+# KEYS: fails, open, tripped, probe, why · ARGV: open_s, tripped_ttl, reason
+_QUARANTINE = """
+redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
+redis.call('SET', KEYS[3], '1', 'EX', ARGV[2])
+redis.call('SET', KEYS[5], ARGV[3], 'EX', ARGV[1])
+redis.call('DEL', KEYS[1], KEYS[4])
+return 1
+"""
+
 _RELEASE = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
 return 0
@@ -140,6 +154,7 @@ class RedisBreakerStore:
         self._fail = redis.register_script(_FAIL)
         self._succeed = redis.register_script(_SUCCEED)
         self._release = redis.register_script(_RELEASE)
+        self._quarantine = redis.register_script(_QUARANTINE)
 
     def _available(self) -> bool:
         return self._now() >= self._down_until
@@ -186,7 +201,9 @@ class RedisBreakerStore:
     async def record_success(self, target: str, cfg: BreakerConfig, ticket: Ticket) -> None:
         if ticket.token is None:
             return  # only the probe's success changes state — no Redis call otherwise
-        await self._run(self._succeed, _keys(target), [ticket.token], "record_success")
+        if await self._run(self._succeed, _keys(target), [ticket.token], "record_success"):
+            with contextlib.suppress(RedisError):
+                await self.redis.delete(f"cb:{{{target}}}:why")
 
     async def record_failure(self, target: str, cfg: BreakerConfig, ticket: Ticket) -> bool:
         args = [
@@ -201,6 +218,23 @@ class RedisBreakerStore:
     async def release(self, target: str, ticket: Ticket) -> None:
         if ticket.token is not None:
             await self._run(self._release, [_keys(target)[3]], [ticket.token], "release")
+
+    async def quarantine(
+        self, target: str, cfg: BreakerConfig, seconds: float, reason: str
+    ) -> None:
+        """Hold the breaker open for `seconds` (a fault that won't heal soon), with why."""
+        keys = [*_keys(target), f"cb:{{{target}}}:why"]
+        ttl = seconds + cfg.probe_timeout_seconds + cfg.window_seconds
+        await self._run(self._quarantine, keys, [_secs(seconds), _secs(ttl), reason], "quarantine")
+
+    async def reason(self, target: str) -> str | None:
+        if not self._available():
+            return None
+        try:
+            raw = await self.redis.get(f"cb:{{{target}}}:why")
+        except RedisError:
+            return None
+        return raw.decode() if isinstance(raw, bytes) else raw
 
     async def state(self, target: str) -> State:
         _, open_, tripped, _ = _keys(target)
@@ -229,6 +263,7 @@ class MemoryBreakerStore:
         self._open_until: dict[str, float] = {}
         self._tripped_until: dict[str, float] = {}
         self._probe: dict[str, tuple[str, float]] = {}  # target → (token, expires)
+        self._why: dict[str, str] = {}  # quarantine reason
 
     def _tripped(self, target: str, now: float) -> bool:
         return self._tripped_until.get(target, 0) > now
@@ -265,8 +300,21 @@ class MemoryBreakerStore:
 
     async def record_success(self, target: str, cfg: BreakerConfig, ticket: Ticket) -> None:
         if self._is_probe(target, ticket):
-            for d in (self._fails, self._open_until, self._tripped_until, self._probe):
+            for d in (self._fails, self._open_until, self._tripped_until, self._probe, self._why):
                 d.pop(target, None)
+
+    async def quarantine(
+        self, target: str, cfg: BreakerConfig, seconds: float, reason: str
+    ) -> None:
+        now = self._now()
+        self._open_until[target] = now + seconds
+        self._tripped_until[target] = now + seconds + cfg.probe_timeout_seconds + cfg.window_seconds
+        self._fails.pop(target, None)
+        self._probe.pop(target, None)
+        self._why[target] = reason
+
+    async def reason(self, target: str) -> str | None:
+        return self._why.get(target) if self._tripped(target, self._now()) else None
 
     async def record_failure(self, target: str, cfg: BreakerConfig, ticket: Ticket) -> bool:
         now = self._now()

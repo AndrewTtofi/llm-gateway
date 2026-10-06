@@ -1,5 +1,18 @@
 # Production front door (docker-compose.prod.yml). Caddy gets and renews the TLS
 # certificate for $GATEWAY_DOMAIN automatically.
+{
+	servers {
+		# Slow clients can't hold connections open by trickling headers or a body. No write
+		# timeout: answers stream for minutes. (The gateway's own client write timeout
+		# rarely fires behind a proxy: buffers on both hops absorb most stalls.)
+		timeouts {
+			read_header 10s
+			read_body 2m
+			idle 2m
+		}
+	}
+}
+
 (gateway_upstreams) {
 	reverse_proxy {
 		# Every replica, re-resolved every 5 s (Docker DNS lists them all), so balancing
@@ -26,7 +39,8 @@
 	request_body {
 		max_size 32MB
 	}
-	@operator path /admin/* /metrics /readyz /docs /openapi.json
+	header Strict-Transport-Security "max-age=31536000"
+	@operator path /admin/* /metrics /readyz /docs /redoc /openapi.json
 	respond @operator "not found" 404
 	import gateway_upstreams
 }

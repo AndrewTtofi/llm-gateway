@@ -40,6 +40,10 @@ def provider_error_response(exc: ProviderError) -> JSONResponse:
     quota, provider outage — is a 5xx, so clients don't "fix" a request that was fine.
     """
     status = exc.status
+    if exc.local:  # every connection to the provider is in use on this replica
+        return error_response(
+            503, exc.message, "api_error", "gateway_busy", headers={"retry-after": "1"}
+        )
     if exc.timeout:
         return error_response(504, exc.message, "api_error", "upstream_timeout")
     if exc.code in QUOTA_CODES:

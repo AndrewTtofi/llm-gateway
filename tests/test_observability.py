@@ -139,22 +139,33 @@ def test_cached_tokens_are_cheaper() -> None:
 # --- request ids & logs ------------------------------------------------------------
 
 
-def test_request_id_echoed_reused_or_replaced(client: TestClient) -> None:
+def test_request_id_is_ours_and_a_callers_id_is_kept_beside_it(client: TestClient) -> None:
     generated = chat(client).headers["x-request-id"]
     assert len(generated) == 32
-    reused = client.post(
+    traced = client.post(
         "/v1/chat/completions",
         headers={"x-request-id": "trace-abc.123"},
         json={"model": "chaos/ok", "messages": MSGS},
     )
-    assert reused.headers["x-request-id"] == "trace-abc.123"
-    assert records()[-1].request_id == "trace-abc.123"
+    # A caller can't make its request share an id with someone else's (ADR 0023).
+    assert traced.headers["x-request-id"] != "trace-abc.123"
+    assert len(traced.headers["x-request-id"]) == 32
+    assert traced.headers["x-client-request-id"] == "trace-abc.123"
+    assert records()[-1].request_id == traced.headers["x-request-id"]
+    assert records()[-1].client_request_id == "trace-abc.123"
+    preferred = client.post(
+        "/v1/chat/completions",
+        headers={"x-client-request-id": "mine-1", "x-request-id": "other"},
+        json={"model": "chaos/ok", "messages": MSGS},
+    )
+    assert preferred.headers["x-client-request-id"] == "mine-1"
     junk = client.post(
         "/v1/chat/completions",
         headers={"x-request-id": "x" * 500},
         json={"model": "chaos/ok", "messages": MSGS},
     )
-    assert junk.headers["x-request-id"] != "x" * 500
+    assert "x-client-request-id" not in junk.headers
+    assert records()[-1].client_request_id is None
 
 
 def test_logs_are_json_with_request_id_and_never_content(
@@ -169,7 +180,8 @@ def test_logs_are_json_with_request_id_and_never_content(
     )
     lines = [json.loads(ln) for ln in capsys.readouterr().err.splitlines() if ln.startswith("{")]
     usage = [ln for ln in lines if ln.get("logger") == "gateway.usage"]
-    assert usage and usage[-1]["request_id"] == "rid-logtest"
+    assert usage and usage[-1]["client_request_id"] == "rid-logtest"
+    assert len(usage[-1]["request_id"]) == 32
     assert usage[-1]["target"] == "chaos/ok" and "completion_tokens" in usage[-1]
     assert all(marker not in json.dumps(ln) for ln in lines)
     assert all("Hello from fake" not in json.dumps(ln) for ln in lines)  # nor the answer

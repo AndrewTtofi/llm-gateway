@@ -23,6 +23,10 @@ class ClientDisconnected(Exception):
     pass
 
 
+class ClientTooSlow(Exception):
+    """The client stopped reading: a write to it didn't finish in time."""
+
+
 async def cancel_on_disconnect[T](request: Request, work: Awaitable[T]) -> T:
     """Run `work`, cancelling it if the client hangs up (→ ClientDisconnected).
 
@@ -69,6 +73,10 @@ class SSEResponse(StreamingResponse):
     the cancel lands while we're suspended at a `yield` (slow client, or before the body
     started), nothing would close the upstream until garbage collection — and the
     provider would keep generating, and billing, tokens.
+
+    Each write to the client gets `write_timeout` seconds. A client that stops reading
+    would otherwise hold its upstream connection, one of a bounded pool, forever
+    (ADR 0023); it's treated as gone.
     """
 
     def __init__(
@@ -77,15 +85,31 @@ class SSEResponse(StreamingResponse):
         upstream: Closable,
         headers: Mapping[str, str],
         on_close: Callable[[], Awaitable[None]] | None = None,
+        write_timeout: float | None = None,
     ) -> None:
         super().__init__(content, media_type="text/event-stream", headers=headers)
         self._content = content
         self._upstream = upstream
         self._on_close = on_close
+        self._write_timeout = write_timeout
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        limit = self._write_timeout
+
+        async def bounded_send(message: Any) -> None:
+            if not limit:
+                await send(message)
+                return
+            try:
+                with anyio.fail_after(limit):
+                    await send(message)
+            except TimeoutError:
+                raise ClientTooSlow from None
+
         try:
-            await super().__call__(scope, receive, send)
+            await super().__call__(scope, receive, bounded_send)
+        except ClientTooSlow:
+            log.warning("client stopped reading for %ss; closing the stream", limit)
         finally:
             # Our task may already be cancelled; shield so the cleanup awaits still run.
             with anyio.CancelScope(shield=True):

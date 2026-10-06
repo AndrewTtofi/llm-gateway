@@ -5,23 +5,68 @@ Running log of where the work is. Updated at the end of every session
 Keep "Current state" short and always true.
 
 ## Current state
-- **Phase:** 8 — extensions. First: inbound Anthropic Messages API (`phase-8-messages-api`)
-- **Branch:** `phase-8-cost-catalog` (on top of `docs-wiki`) · `v1.0.0` tagged + released on main · remote `github.com/AndrewTtofi/llm-gateway` (public)
+- **Phase:** 10 done, plus the security audit fixes (ADR 0023) on `phase-10-extensions`
+- **Branch:** `phase-10-extensions`. Stacked PRs: #11 (catalog) → #12 (frontier) → #13 (phase 9) → #14 (phase 10). #10 (wiki) merged to `main` (squash). Remote `github.com/AndrewTtofi/llm-gateway` (public)
 - **Status:**
-  - PR #9 (`/v1/messages`, v1.1.0) is waiting on CI after the GitHub outage.
-  - The `docs-wiki` branch has the wiki (17 pages + publish script).
-  - `phase-8-cost-catalog` has the model catalog, `/v1/catalog` and `make prices` + the weekly drift issue (ADR 0011). `make test` 322.
-  - `phase-8-frontier-models` (on the catalog branch) adds Fable 5.1, Gemini, xAI, Mistral, DeepSeek, the `frontier` alias and per-provider parameter rules (ADR 0012). `make test` 356. The new providers are untested live: no keys yet.
+  - Security audit done: no Critical findings. The High, Medium and almost all Low findings are fixed, with `tests/test_hardening.py`.
+  - `make test` 588; lint clean; production stack verified locally (docs off, HSTS, env isolation, cache Redis, revocation broadcast).
+  - Dev DB migrated to 0007.
 - **Next up:**
-  1. Merge #9 → tag v1.1.0, then the wiki PR, then the catalog PR.
-  2. Owner: enable Wikis and restrict editing to collaborators, then run `scripts/publish_wiki.sh`.
-  3. Then policy routing (`model: auto` + hints, built on the catalog), or lossless caching/thinking for `/v1/messages`.
-- **Blockers:** none. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` still empty (OpenAI fallbacks untested live)
+  - Merge #11 → #14. After #10's squash merge, #11 conflicts with `main`; it needs `main` merged into `phase-8-cost-catalog` (keep the branch side) or a rebase. Each later PR needs the same after its base merges.
+  - Then tag releases.
+- **Blockers:** the owner must approve the branch-update strategy for the stacked PRs. Owner: confirm the Anthropic API key was rotated; `OPENAI_API_KEY` is still empty.
 - **Open questions:** deploy target (Cloud Run / ECS / VM), still optional
 
 ---
 
 ## Session log
+
+### 2026-10-06 — Session 14
+**Did**
+- Full security audit (background agent, PoCs). Nothing Critical. The confirmed findings:
+  - High: unbilled reasoning, hang-ups and timeouts; one tenant opening shared breakers through pool exhaustion or long requests.
+  - Medium: estimate gaps; usage rows dropped through int4 overflow; billing parameters passed through; CPU on unauthenticated large bodies; tail-only guardrail scan; shared-cache poisoning; spend lost during Redis outages.
+  - Ten Lows.
+- All fixed in one commit (ADR 0023), with migration 0007 and 40 regression tests (after a code review round). The audit PoCs re-run:
+  - the breaker stays closed;
+  - a bad key with a 32 MB body costs 0.01 s (was 0.25 s);
+  - a 950k-message body is rejected in 0.38 s (was 4.55 s).
+- Docs: Security (audit summary), Keys/limits, Routing, Cache, Quality and safety, Production, Configuration, Providers, Observability, API reference, FAQ, Glossary, README.
+- Merged #10. #12's CI had been cancelled by the Actions outage; re-run requested.
+
+**Learned**
+- A shared, fleet-wide circuit breaker must only count failures the provider caused. Pool waits and request-length timeouts are caused by clients.
+- A request with no usage must be billed on time as well as on bytes relayed: providers bill reasoning they never stream.
+- Squash-merging the bottom of a stacked PR chain makes the next PR conflict; plan for a merge-from-main or rebase per level.
+
+### 2026-10-06 — Session 13 (continued)
+**Did**
+- Phase 10 (`phase-10-extensions`), ADRs 0017–0022:
+  - policy routing (`auto`);
+  - response cache, exact and semantic;
+  - self-healing: probes, quarantine, alerts;
+  - A/B routing;
+  - prompt-injection filter;
+  - LLM-as-judge.
+- Live: `auto` picked Haiku for cost and Opus 5.5 for quality; an injection was logged by rule name; all 25 dashboard queries ran.
+- Code review fixes (18 items + nits):
+  - **Quarantine:** only 401 and quota now.
+  - **Cache:**
+    - keys use a denylist and include routing hints;
+    - the semantic index is partitioned, expires and evicts;
+    - the threshold is a true cosine similarity;
+    - embeddings time out after 2 s;
+    - multimodal requests are exact-only, and `n > 1` isn't cached.
+  - **Policy:** `allow_pin` and `allowed_hints`; concurrent breaker reads; policy candidates are probed.
+  - **Self-healing:** probe timeouts count as failures; half-open isn't alerted; webhooks are async.
+  - **Guardrails:** bounded scan; NFKD and confusables; the block response hides rule names.
+  - **Load-time checks** for judge, classifier and embedding references.
+- Wiki and README for phases 9–10 (5 new pages). `make test` 539.
+
+**Learned**
+- Cache keys built from an allowlist of fields silently collide when the request model allows extras: use a denylist
+- Redis VSIM scores are (1 + cosine) / 2, not cosine
+- Quarantining on a single 403/404 lets one request take a model away from every tenant
 
 ### 2026-10-06 — Session 13
 **Did**

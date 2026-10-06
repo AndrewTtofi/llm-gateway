@@ -16,7 +16,7 @@ import logging
 import secrets
 import signal
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
@@ -27,18 +27,18 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import config, extensions, messages_api, providers, services
+from app import cache, config, extensions, guardrails, judge, messages_api, providers, services
 from app.auth import ApiKey, EffectiveLimits
 from app.errors import error_response, routing_error_response
 from app.metering import Meter
 from app.observability import live, metrics
 from app.observability import logging as obs_log
+from app.providers.anthropic_format import DEFAULT_MAX_TOKENS
 from app.providers.base import ProviderAdapter
-from app.providers.openai_compat import rules_for
 from app.ratelimit import estimate_prompt_tokens
-from app.routing import router
+from app.routing import ab, policy, router, selfheal
 from app.routing.router import AllTargetsFailed, Routed, UnknownModel
-from app.schemas import ChatCompletionRequest, StreamOptions
+from app.schemas import MAX_MESSAGES, ChatCompletionRequest, StreamOptions
 
 # Re-exported: tests and tools import these from app.main.
 from app.streaming import (  # noqa: F401
@@ -60,13 +60,14 @@ def reload_from_signal() -> None:
         log.exception("config reload on SIGHUP failed; keeping the previous config")
 
 
-async def poll_breakers(interval: float = 15.0) -> None:
-    """Keep gateway_circuit_state current (the state lives in Redis, shared). Targets
-    removed by a config reload are dropped, so they don't linger as "open"."""
+async def poll_breakers(interval: float = 15.0, alerts: selfheal.Alerts | None = None) -> None:
+    """Keep gateway_circuit_state current (the state lives in Redis, shared) and turn
+    state changes into alerts. Targets removed by a config reload are dropped, so they
+    don't linger as "open"."""
     known: set[str] = set()
     while True:
         try:
-            targets = {t for a in config.registry.aliases.values() for t in a.chain}
+            targets = config.registry.routable_targets()
             for gone in known - targets:
                 with contextlib.suppress(KeyError):
                     metrics.breaker.remove(gone)
@@ -75,6 +76,8 @@ async def poll_breakers(interval: float = 15.0) -> None:
                 with contextlib.suppress(Exception):
                     state = await router.store.state(t)
                     metrics.breaker.labels(t).set(metrics.BREAKER_VALUE.get(str(state), 0))
+                    if alerts is not None:
+                        await alerts.observe(t, str(state))
         except Exception:
             log.exception("breaker poll failed")
         await asyncio.sleep(interval)
@@ -93,9 +96,14 @@ async def measure_loop_lag(interval: float = 0.5) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     obs_log.configure(config.settings.log_level)
+    if 0 < len(config.settings.gateway_admin_key) < 32:
+        log.warning("GATEWAY_ADMIN_KEY is under 32 characters; use `openssl rand -hex 32`")
     await services.start()
-    poller = asyncio.create_task(poll_breakers())
+    alerts = selfheal.Alerts(redis=services.redis_client())
+    poller = asyncio.create_task(poll_breakers(alerts=alerts))
     lag = asyncio.create_task(measure_loop_lag())
+    prober = asyncio.create_task(selfheal.probe_loop())  # ADR 0019
+    key_watch = asyncio.create_task(services.watch_key_changes())  # ADR 0023
     metrics_server = None
     if config.settings.metrics_port:
         # Separate port: /metrics can be firewalled off while the API stays public.
@@ -106,7 +114,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
         loop.add_signal_handler(signal.SIGHUP, reload_from_signal)  # `kill -HUP <pid>`
     yield
-    for task in (poller, lag):
+    for task in (poller, lag, prober, key_watch):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
@@ -118,11 +126,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await services.stop()
 
 
-app = FastAPI(title="LLM Gateway", version="1.1.0", lifespan=lifespan)
+_docs = config.settings.docs_enabled
+app = FastAPI(
+    title="LLM Gateway",
+    version="1.1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _docs else None,
+    redoc_url="/redoc" if _docs else None,
+    openapi_url="/openapi.json" if _docs else None,
+)
 
 
 class RequestContext:
-    """Pure ASGI middleware: request id (in logs, usage rows and `x-request-id`) and one
+    """Pure ASGI middleware: request id (in logs, usage rows and `x-request-id`; a caller's
+    own id is echoed as `x-client-request-id` and stored beside it) and one
     access line per HTTP request. Pure ASGI rather than BaseHTTPMiddleware, which wraps
     `receive` and would break disconnect detection on streams."""
 
@@ -134,9 +151,11 @@ class RequestContext:
             await self.inner(scope, receive, send)
             return
         headers = dict(scope.get("headers") or [])
-        incoming = headers.get(b"x-request-id", b"").decode("latin-1")
-        rid = obs_log.new_request_id(incoming)
+        incoming = headers.get(b"x-client-request-id") or headers.get(b"x-request-id") or b""
+        cid = obs_log.caller_request_id(incoming.decode("latin-1"))
+        rid = obs_log.new_request_id()
         token = obs_log.request_id.set(rid)
+        client_token = obs_log.client_request_id.set(cid)
         start, status = time.perf_counter(), 0
         started_token = obs_log.request_started.set(start)
 
@@ -144,7 +163,10 @@ class RequestContext:
             nonlocal status
             if message["type"] == "http.response.start":
                 status = message["status"]
-                message.setdefault("headers", []).append((b"x-request-id", rid.encode()))
+                out = message.setdefault("headers", [])
+                out.append((b"x-request-id", rid.encode()))
+                if cid:
+                    out.append((b"x-client-request-id", cid.encode()))
             await send(message)
 
         try:
@@ -162,6 +184,7 @@ class RequestContext:
                     ms=round((time.perf_counter() - start) * 1000),
                 )
             obs_log.request_id.reset(token)
+            obs_log.client_request_id.reset(client_token)
             obs_log.request_started.reset(started_token)
 
 
@@ -363,12 +386,31 @@ async def readyz() -> dict[str, Any] | JSONResponse:
     return {"status": "degraded" if degraded else "ready", "dependencies": deps}
 
 
+def _alias_listing(a: config.Alias) -> dict[str, Any]:
+    if a.policy is not None:
+        return {"policy": a.policy.model_dump()}
+    if a.variants:
+        return {
+            "variants": [
+                {"name": v.name, "weight": v.weight, "chain": v.chain} for v in a.variants
+            ],
+            "sticky": a.sticky,
+        }
+    return {"chain": a.chain}
+
+
 @app.get("/v1/models")
 async def list_models(key: Authenticated) -> dict[str, object]:
     """Models this key may call: aliases (with their chain), then direct provider/models."""
     reg, lim = config.registry, key_limits(key)
     data: list[dict[str, object]] = [
-        {"id": name, "object": "model", "created": 0, "owned_by": "gateway", "chain": a.chain}
+        {
+            "id": name,
+            "object": "model",
+            "created": 0,
+            "owned_by": "gateway",
+            **_alias_listing(a),
+        }
         for name, a in reg.aliases.items()
         if lim.allows(name)
     ]
@@ -382,8 +424,8 @@ async def list_models(key: Authenticated) -> dict[str, object]:
     return {"object": "list", "data": data}
 
 
-# Blended price for sorting: a typical 3:1 mix of input to output tokens.
-BLEND_INPUT, BLEND_OUTPUT = 3, 1
+# Blended price for sorting: a typical 3:1 mix of input to output tokens (shared with policy).
+BLEND_INPUT, BLEND_OUTPUT = policy.BLEND_INPUT, policy.BLEND_OUTPUT
 SortBy = Literal["name", "price", "quality", "ttft", "latency"]
 
 
@@ -411,7 +453,14 @@ async def model_catalog(
     # One snapshot of the config: a reload during the awaits below mustn't mix versions.
     reg, pricing, catalog = config.registry, config.pricing, config.catalog
     prices, cat = pricing.models, catalog.models
-    aliases = {n: a.chain for n, a in reg.aliases.items() if lim.allows(n)}
+    aliases = {
+        n: policy.candidates(n, a.policy) if a.policy is not None else a.targets
+        for n, a in reg.aliases.items()
+        if lim.allows(n)
+    }
+    policies = {
+        n: a.policy.model_dump() for n, a in reg.aliases.items() if a.policy and lim.allows(n)
+    }
     targets = dict.fromkeys(t for chain in aliases.values() for t in chain)
     if reg.allow_direct_models:
         targets |= dict.fromkeys(t for t in sorted(reg.known_targets()) if lim.allows(t))
@@ -454,7 +503,7 @@ async def model_catalog(
                 "pricing": row_price,
                 **facts.model_dump_public(),
                 # What the gateway can use, not just what the model can do (ADR 0012).
-                "capabilities": _usable(facts.capabilities, reg.providers, t),
+                "capabilities": policy.usable_capabilities(list(facts.capabilities), t),
                 "circuit": "unknown",  # filled in below, all targets at once
                 "live": live.snapshot(t),
             }
@@ -467,22 +516,15 @@ async def model_catalog(
         "prices_checked": pricing.checked,
         "catalog_checked": catalog.checked,
         "blend": f"{BLEND_INPUT}:{BLEND_OUTPUT} input:output tokens",
-        "aliases": [{"id": n, "chain": chain} for n, chain in aliases.items()],
+        "aliases": [
+            {
+                "id": n,
+                **({"policy": policies[n], "candidates": c} if n in policies else {"chain": c}),
+            }
+            for n, c in aliases.items()
+        ],
         "data": rows,
     }
-
-
-def _usable(caps: Sequence[str], providers: dict[str, dict[str, Any]], target: str) -> list[str]:
-    provider, _, model = target.partition("/")
-    cfg = providers.get(provider) or {}
-    if cfg.get("type") != "openai":
-        return list(caps)
-    rules = rules_for(cfg, model)
-    return [
-        c
-        for c in caps
-        if not (c == "tools" and not rules["tools"]) and not (c == "vision" and not rules["vision"])
-    ]
 
 
 def _configured(name: str, cfg: dict[str, Any] | None) -> bool:
@@ -520,13 +562,30 @@ def _catalog_sort_key(row: dict[str, Any], sort: str) -> tuple[Any, ...]:
     return (value, row["id"])
 
 
-@app.post("/v1/chat/completions", response_model=None)
+@app.post(
+    "/v1/chat/completions",
+    response_model=None,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": ChatCompletionRequest.model_json_schema()}},
+        }
+    },
+)
 async def chat_completions(
-    body: ChatCompletionRequest, request: Request, key: Authenticated
+    request: Request, key: Authenticated
 ) -> JSONResponse | StreamingResponse | Response:
-    raw = body.model_dump(exclude_unset=True)
-    if (clean := extensions.without_thinking(raw)) is not raw:
-        body = ChatCompletionRequest.model_validate(clean)
+    # The key is checked before the body is parsed (ADR 0023): parsing a large body costs
+    # CPU on the event loop, and an unauthenticated caller mustn't get to spend it.
+    raw = await _read_json(request)
+    if isinstance(raw, str):
+        return error_response(400, f"Invalid request: {raw}")
+    if isinstance(raw.get("messages"), list):
+        raw = extensions.without_thinking(raw)
+    try:
+        body = ChatCompletionRequest.model_validate(raw)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from None
     return await _chat(body, request, key, anthropic_client=False)
 
 
@@ -542,7 +601,8 @@ async def messages(
     fmt = None
     if body.stream:
         cpt = config.limits.estimation.chars_per_token
-        prompt = estimate_prompt_tokens(body.model_dump()["messages"], cpt)
+        tools = (body.model_extra or {}).get("tools")
+        prompt = estimate_prompt_tokens(body.model_dump()["messages"], cpt, tools)
         fmt = messages_api.MessagesStream(input_tokens=prompt, chars_per_token=cpt)
     resp = await _chat(body, request, key, fmt=fmt, anthropic_client=True)
     # Streams are already written as Anthropic events; JSON answers and errors convert here.
@@ -572,24 +632,34 @@ async def count_tokens(request: Request, key: Authenticated) -> dict[str, int] |
             429, "Rate limit reached for this key.", headers=verdict.headers()
         )
     cpt = config.limits.estimation.chars_per_token
-    tools = len(json.dumps(oai.get("tools") or [])) / cpt
-    return {"input_tokens": estimate_prompt_tokens(oai["messages"], cpt) + int(tools)}
+    return {"input_tokens": estimate_prompt_tokens(oai["messages"], cpt, oai.get("tools"))}
+
+
+async def _read_json(request: Request) -> dict[str, Any] | str:
+    """The body as a JSON object, or what's wrong with it."""
+    try:
+        raw = await request.json()
+    except ValueError, RecursionError:  # RecursionError: absurdly deep nesting
+        return "request body is not valid JSON"
+    if not isinstance(raw, dict):
+        return "request body must be a JSON object"
+    return raw
 
 
 async def _json_body(request: Request) -> dict[str, Any] | JSONResponse:
-    try:
-        raw = await request.json()
-    except ValueError:
-        return messages_api.error_response(400, "request body is not valid JSON")
-    if not isinstance(raw, dict):
-        return messages_api.error_response(400, "request body must be a JSON object")
-    return raw
+    raw = await _read_json(request)
+    return messages_api.error_response(400, raw) if isinstance(raw, str) else raw
 
 
 async def _messages_body(request: Request) -> ChatCompletionRequest | JSONResponse:
     raw = await _json_body(request)
     if isinstance(raw, JSONResponse):
         return raw
+    if isinstance(raw.get("messages"), list) and len(raw["messages"]) > MAX_MESSAGES:
+        # Before translating: the cost of that is what the limit bounds.
+        return messages_api.error_response(
+            400, f"messages: at most {MAX_MESSAGES} messages per request"
+        )
     try:
         return ChatCompletionRequest.model_validate(messages_api.to_openai(raw))
     except messages_api.InboundError as exc:
@@ -625,6 +695,14 @@ async def _chat(
 
     # Budget: checked before the call against month-to-date spend (ADR 0007).
     team_budget = config.limits.teams.get(key.team) if key.team else None
+    if key.team and team_budget is None:
+        # Fail closed: a team removed from limits.yaml mustn't mean "no team budget".
+        return error_response(
+            403,
+            f"key team {key.team!r} is not configured",
+            "permission_error",
+            "team_unknown",
+        )
     if (
         team_budget is not None
         and key.team_spend_id
@@ -646,10 +724,54 @@ async def _chat(
             "insufficient_quota",
         )
 
+    # Requests in flight for this key (ADR 0023). Freed when the request settles.
+    release = services.concurrency.acquire(key.id, lim.concurrent_requests)
+    if release is None:
+        metrics.rejected.labels("concurrency").inc()
+        return error_response(
+            429,
+            f"Too many concurrent requests for this key (limit {lim.concurrent_requests}).",
+            "rate_limit_error",
+            "concurrency_limit_exceeded",
+            headers={"retry-after": "1"},
+        )
+
+    try:  # nothing between taking the slot and the meter owning it may leak it
+        admitted = await _admit(body, key, lim, fmt)
+    except BaseException:
+        release()
+        raise
+    if isinstance(admitted, JSONResponse):
+        release()
+        return admitted
+    meter, messages, tools, rl_headers = admitted
+    meter.release = release
+    try:
+        return await _serve(
+            body, request, key, meter, messages, tools, rl_headers, fmt, anthropic_client
+        )
+    except BaseException:
+        # A bug or a cancellation before the request reached a provider: still settle,
+        # so the reservations are undone and the concurrency slot is freed.
+        if not meter.error_code:
+            meter.status, meter.error_code = 500, "gateway_error"
+        await _settle_shielded(meter)
+        raise
+
+
+async def _admit(
+    body: ChatCompletionRequest, key: ApiKey, lim: EffectiveLimits, fmt: StreamFormat | None
+) -> tuple[Meter, list[Any], Any, dict[str, str]] | JSONResponse:
+    """Token estimate, rate limits, and the request's meter (or the 429)."""
     # Rate limits: one request + an estimate of its tokens, from both buckets at once.
     est = config.limits.estimation
-    prompt_estimate = estimate_prompt_tokens(body.model_dump()["messages"], est.chars_per_token)
-    completion_cap = body.max_completion_tokens or body.max_tokens or est.default_completion_tokens
+    messages = body.model_dump()["messages"]  # once: the estimate and the guardrails read it
+    extra = body.model_extra or {}
+    tools = extra.get("tools") or extra.get("functions")
+    prompt_estimate = estimate_prompt_tokens(messages, est.chars_per_token, tools)
+    completion_cap = (
+        body.max_completion_tokens or body.max_tokens or _default_completion(body.model)
+    )
     estimate = prompt_estimate + int(completion_cap)
     verdict = await services.limiter.take(
         key.id, lim.requests_per_minute, lim.tokens_per_minute, estimate
@@ -669,6 +791,7 @@ async def _chat(
     client_wants_usage = fmt is not None or bool(
         body.stream_options and body.stream_options.include_usage
     )
+    reg = config.registry
     meter = Meter(
         key,
         lim,
@@ -680,7 +803,99 @@ async def _chat(
         sink=services.usage,
         alias=body.model,
         streamed=body.stream,
+        # A metric label: only names from the config, never what the client typed.
+        alias_label=body.model
+        if body.model in reg.aliases or body.model in reg.known_targets()
+        else "_unknown",
     )
+    return meter, messages, tools, rl_headers
+
+
+def _default_completion(model: str) -> int:
+    """The output limit the provider applies when the client sends none: the first
+    target's configured default (Anthropic requires one), else the estimation default."""
+    fallback = config.limits.estimation.default_completion_tokens
+    reg = config.registry
+    try:
+        first = reg.resolve(model)[0]
+    except KeyError, IndexError:
+        return fallback
+    cfg = reg.providers.get(first.partition("/")[0]) or {}
+    if cfg.get("type") == "anthropic":
+        return int(cfg.get("default_max_tokens", DEFAULT_MAX_TOKENS))
+    return int(cfg.get("default_max_tokens") or fallback)
+
+
+async def _serve(
+    body: ChatCompletionRequest,
+    request: Request,
+    key: ApiKey,
+    meter: Meter,
+    messages: list[Any],
+    tools: Any,
+    rl_headers: dict[str, str],
+    fmt: StreamFormat | None,
+    anthropic_client: bool,
+) -> JSONResponse | StreamingResponse | Response:
+    """After admission: guardrails, A/B arm, judge sampling, cache, routing."""
+    prompt_estimate = meter.prompt_estimate
+    # Prompt-injection filter (ADR 0021), per the key's tier.
+    action = config.limits.tiers[key.tier].injection if key.tier in config.limits.tiers else "log"
+    guard = await guardrails.check(messages, action, tools)
+    rules = config.guardrails
+    # Over the scan budget (ADR 0023): reported, and refused only where configured.
+    unscanned = guard is not None and guard.unscanned > 0 and rules.unscanned != "allow"
+    if guard is not None and (
+        guard.detected(rules.threshold) or (unscanned and rules.unscanned == "block")
+    ):
+        flag = f"flagged; rules={','.join(guard.rules) or '-'}"
+        if guard.classifier == "injection":
+            flag += "; classifier=injection"
+        if unscanned:
+            flag += "; unscanned"
+        if action == "block":
+            meter.status, meter.error_code = 400, "prompt_injection_detected"
+            await meter.settle()
+            return error_response(
+                400,
+                "The request was blocked by the gateway's prompt-injection filter.",
+                code="prompt_injection_detected",
+                headers={**rl_headers, "x-gateway-guardrail": "blocked"},  # no rule names
+            )
+        if action == "flag":
+            rl_headers["x-gateway-guardrail"] = flag
+    elif unscanned and action == "flag":
+        rl_headers["x-gateway-guardrail"] = "unscanned"
+    alias_cfg = config.registry.aliases.get(body.model)
+    variant = None
+    if alias_cfg is not None and alias_cfg.variants:
+        # A/B test (ADR 0020): pick the arm before the cache, whose key depends on it.
+        pinned = request.headers.get("x-gateway-variant") if alias_cfg.allow_pin else None
+        user = (body.model_extra or {}).get("user")
+        variant = ab.assign(body.model, alias_cfg, key, str(user) if user else None, pinned)
+        if variant.system_prefix:
+            body = ab.with_prefix(body, variant.system_prefix)
+        meter.variant = variant.name
+        rl_headers["x-gateway-variant"] = variant.name
+    if (
+        alias_cfg is not None
+        and alias_cfg.judge is not None
+        and (body.n or 1) == 1  # one answer to grade
+        and judge.sampled(alias_cfg.judge)
+    ):
+        # Sampled for LLM-as-judge (ADR 0022): keep the conversation text until it's judged.
+        meter.judge_cfg = alias_cfg.judge
+        text = judge.conversation_text(body.model_dump()["messages"])
+        meter.judge_conversation = text[-alias_cfg.judge.max_chars :]  # bounded in memory
+        if body.stream and meter.collector is None:
+            meter.collector = cache.Collector()  # to assemble the streamed answer
+    if alias_cfg is not None and alias_cfg.cache is not None:
+        cache_alias = f"{body.model}#{variant.name}" if variant else body.model
+        hit = await _cache_lookup(
+            body, request, key, meter, alias_cfg.cache, rl_headers, cache_alias
+        )
+        if hit is not None:
+            return _serve_cached(hit, body, meter, rl_headers, fmt, anthropic_client)
     try:
         chain = config.registry.resolve(body.model)
     except KeyError:
@@ -688,7 +903,47 @@ async def _chat(
         meter.alias_label = "_unknown"  # never a client-chosen string as a metric label
         await meter.settle()
         return _unknown(body)
-    await meter.reserve(chain[0])  # hold the estimated cost against the budget now
+    alias = config.registry.aliases.get(body.model)
+    if alias is not None and alias.policy is not None:
+        # Policy routing (ADR 0017): this request's chain, from the catalog.
+        try:
+            hints = _route_hints(body, request)
+            plan = await policy.plan(
+                body.model,
+                policy.effective(alias.policy, hints),
+                body.model_dump(exclude_unset=True),
+                prompt_estimate,
+            )
+        except (ValueError, TypeError) as exc:
+            meter.status, meter.error_code = 400, "invalid_route"
+            await meter.settle()
+            return error_response(
+                400, f"Invalid route hints: {exc}", code="invalid_route", param="route"
+            )
+        except policy.NoRoute as exc:
+            status = 503 if exc.capacity else 400
+            meter.status, meter.error_code = status, "no_route"
+            await meter.settle()
+            return error_response(
+                status,
+                str(exc),
+                "api_error" if exc.capacity else "invalid_request_error",
+                "no_route",
+            )
+        chain = plan.chain
+        rl_headers["x-gateway-route"] = plan.header()
+    elif variant is not None:
+        chain = list(variant.chain)
+    else:
+        chain = []  # the router resolves the alias itself
+    try:
+        first = chain[0] if chain else config.registry.resolve(body.model)[0]
+    except KeyError, IndexError:  # the alias vanished in a config reload mid-request
+        meter.status, meter.error_code = 404, "model_not_found"
+        meter.alias_label = "_unknown"
+        await meter.settle()
+        return _unknown(body)
+    await meter.reserve(first)
     if body.stream:
         # Always ask the provider for usage so streams can be metered (ADR 0007); the
         # meter drops the usage chunk again if the client didn't ask for it. Keep any
@@ -702,8 +957,80 @@ async def _chat(
     if started:
         rl_headers["server-timing"] = f"admit;dur={(time.perf_counter() - started) * 1000:.2f}"
     if body.stream:
-        return await _stream(body, request, meter, rl_headers, fmt)
-    return await _complete(body, request, meter, rl_headers, anthropic_client)
+        return await _stream(body, request, meter, rl_headers, fmt, chain)
+    return await _complete(body, request, meter, rl_headers, anthropic_client, chain)
+
+
+async def _cache_lookup(
+    body: ChatCompletionRequest,
+    request: Request,
+    key: ApiKey,
+    meter: Meter,
+    cfg: config.CacheConfig,
+    rl_headers: dict[str, str],
+    cache_alias: str,
+) -> dict[str, Any] | None:
+    """Look the request up in the response cache (ADR 0018). On a miss, the meter is told
+    where to store the answer. `x-gateway-cache: bypass | refresh` skips the read."""
+    mode = request.headers.get("x-gateway-cache", "").strip().lower()
+    mode = mode if mode in ("bypass", "refresh") else ""
+    req = body.model_dump(exclude_unset=True)
+    if "route" not in req and (hint := request.headers.get("x-gateway-route")):
+        req["route"] = hint  # header hints change the answer like body hints do
+    hit, ctx, label = await cache.lookup(services.response_cache, cfg, key, cache_alias, req, mode)
+    rl_headers["x-gateway-cache"] = label
+    if hit is None:
+        meter.cache = ctx
+        if body.stream and ctx is not None:
+            meter.collector = cache.Collector()
+        return None
+    meter.cache_hit = f"cache/{cfg.mode}"
+    await meter.settle()  # refunds the token estimate; no cost; recorded as a cache hit
+    return hit
+
+
+class _NoUpstream:
+    async def aclose(self) -> None:
+        return None
+
+
+def _serve_cached(
+    hit: dict[str, Any],
+    body: ChatCompletionRequest,
+    meter: Meter,
+    rl_headers: dict[str, str],
+    fmt: StreamFormat | None,
+    anthropic_client: bool,
+) -> JSONResponse | Response:
+    headers = {**rl_headers, "x-gateway-provider": meter.cache_hit or "cache"}
+    # A hit consumes no tokens; report that the same way for streamed and plain answers.
+    hit = {**hit, "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+    if not body.stream:
+        result = hit if anthropic_client else extensions.strip_response(hit)
+        return JSONResponse(result, headers=headers)
+
+    async def chunks() -> AsyncIterator[dict[str, Any]]:
+        for c in cache.replay(hit)[1:]:
+            yield c
+
+    replayed = cache.replay(hit)
+    return SSEResponse(
+        relay_sse(replayed[0], chunks(), meter, fmt),  # the meter only filters the usage chunk
+        upstream=_NoUpstream(),
+        headers={**headers, "cache-control": "no-cache", "x-accel-buffering": "no"},
+        write_timeout=config.settings.client_write_timeout_seconds,
+    )
+
+
+def _route_hints(body: ChatCompletionRequest, request: Request) -> dict[str, Any] | None:
+    """Policy hints from the body (`route`, e.g. OpenAI SDK extra_body) or the
+    `x-gateway-route` header. The body wins if both are sent."""
+    extra = body.model_extra or {}
+    if isinstance(extra.get("route"), dict):
+        return dict(extra["route"])
+    if header := request.headers.get("x-gateway-route"):
+        return policy.parse_header(header)
+    return None
 
 
 async def _settle(meter: Meter) -> None:
@@ -739,8 +1066,9 @@ async def _complete(
     meter: Meter,
     rl_headers: dict[str, str],
     anthropic_client: bool = False,
+    chain: list[str] | None = None,
 ) -> JSONResponse | Response:
-    routed = Routed()
+    routed = Routed(chain=chain or None)
     try:
         try:
             result, routed = await cancel_on_disconnect(request, router.route_chat(body, routed))
@@ -767,6 +1095,7 @@ async def _complete(
         meter.target = routed.target
         meter.routed(routed)
         meter.observe_completion(result)
+        meter.cache_result = result  # stored in the response cache when settled, if enabled
         if not anthropic_client:
             result = extensions.strip_response(result)  # OpenAI clients: standard fields only
         return JSONResponse(result, headers={**routed.headers(), **rl_headers})
@@ -784,11 +1113,12 @@ async def _stream(
     meter: Meter,
     rl_headers: dict[str, str],
     fmt: StreamFormat | None = None,
+    chain: list[str] | None = None,
 ) -> JSONResponse | Response:
     # Retries and fallback cover everything up to the first chunk, which is pulled
     # *before* the 200 goes out (ADR 0002, 0005). That wait can be long (prompt
     # processing), so it is watched for disconnects too.
-    routed = Routed()
+    routed = Routed(chain=chain or None)
     try:
         (first, chunks), routed = await cancel_on_disconnect(
             request, router.route_stream(body, routed)
@@ -829,6 +1159,7 @@ async def _stream(
             "x-accel-buffering": "no",
         },
         on_close=lambda: _settle(meter),  # after the stream ends, however it ends
+        write_timeout=config.settings.client_write_timeout_seconds,
     )
 
 
@@ -877,7 +1208,8 @@ async def list_keys(_: Admin) -> dict[str, Any]:
 async def revoke_key(key_id: str, _: Admin) -> dict[str, Any] | JSONResponse:
     if not await services.keys.store.revoke(key_id):
         return error_response(404, "no active key with that id", code="key_not_found")
-    services.keys.invalidate()  # this instance stops accepting it now; others within 30s
+    services.keys.invalidate()  # this instance stops accepting it now
+    await services.announce_key_change()  # and the others (within 30 s if Redis is down)
     return {"revoked": True, "id": key_id}
 
 
@@ -898,7 +1230,7 @@ class KeyUpdate(BaseModel):
 @app.patch("/admin/keys/{key_id}", response_model=None)
 async def update_key(key_id: str, changes: KeyUpdate, _: Admin) -> dict[str, Any] | JSONResponse:
     """Edit a key in place: name, tier, team, limits, allowed aliases. The plaintext key
-    doesn't change. Takes effect here now and on other replicas within 30 s."""
+    doesn't change. Takes effect here and, through Redis, on other replicas now."""
     fields = changes.model_dump(include=changes.model_fields_set)
     if fields.get("name", "") is None or fields.get("tier", "") is None:
         return error_response(400, "name and tier can be changed but not cleared")
@@ -914,6 +1246,7 @@ async def update_key(key_id: str, changes: KeyUpdate, _: Admin) -> dict[str, Any
     if key is None:
         return error_response(404, "no active key with that id", code="key_not_found")
     services.keys.invalidate()
+    await services.announce_key_change()
     return {**key.public(), "spent_this_month_usd": await services.spend.spent(key.id)}
 
 
@@ -947,7 +1280,7 @@ async def reload(_: Admin) -> dict[str, object] | JSONResponse:
 @app.get("/admin/providers", response_model=None)
 async def provider_status(_: Admin) -> dict[str, object]:
     """Circuit-breaker state of every target used by an alias."""
-    targets = dict.fromkeys(t for a in config.registry.aliases.values() for t in a.chain)
+    targets = dict.fromkeys(sorted(config.registry.routable_targets()))
     return {"targets": {t: str(await router.store.state(t)) for t in targets}}
 
 

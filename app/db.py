@@ -44,6 +44,23 @@ class ApiKeyRow(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class JudgeScoreRow(Base):
+    """One judged answer (ADR 0022): a score and fixed labels, never content."""
+
+    __tablename__ = "judge_scores"
+    __table_args__ = (Index("ix_judge_scores_alias_created", "alias", "created_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    request_id: Mapped[str] = mapped_column(String(64), index=True)
+    alias: Mapped[str] = mapped_column(String(200))
+    target: Mapped[str | None] = mapped_column(String(200))  # the model that answered
+    variant: Mapped[str | None] = mapped_column(String(32))
+    judge_target: Mapped[str | None] = mapped_column(String(200))  # the model that judged
+    score: Mapped[int] = mapped_column(Integer)  # 1 (bad) … 5 (excellent)
+    labels: Mapped[list[str]] = mapped_column(JSON)
+
+
 class UsageRow(Base):
     """One row per admitted request (ADR 0008). Never holds prompt or completion text."""
 
@@ -55,10 +72,12 @@ class UsageRow(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    request_id: Mapped[str] = mapped_column(String(64))
+    request_id: Mapped[str] = mapped_column(String(64))  # the gateway's own, unique
+    client_request_id: Mapped[str | None] = mapped_column(String(64))  # the caller's, if sent
     key_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     key_prefix: Mapped[str] = mapped_column(String(16))
     team: Mapped[str | None] = mapped_column(String(100))  # the key's team at request time
+    variant: Mapped[str | None] = mapped_column(String(32))  # A/B arm (ADR 0020)
     alias: Mapped[str] = mapped_column(String(200))  # what the client asked for
     target: Mapped[str | None] = mapped_column(String(200))  # provider/model that served
     provider: Mapped[str | None] = mapped_column(String(100))
@@ -68,11 +87,11 @@ class UsageRow(Base):
     streamed: Mapped[bool] = mapped_column(Boolean)
     fallback: Mapped[bool] = mapped_column(Boolean)
     attempts: Mapped[int] = mapped_column(Integer)
-    prompt_tokens: Mapped[int] = mapped_column(Integer)
-    completion_tokens: Mapped[int] = mapped_column(Integer)
-    cached_tokens: Mapped[int] = mapped_column(Integer)
+    prompt_tokens: Mapped[int] = mapped_column(BigInteger)
+    completion_tokens: Mapped[int] = mapped_column(BigInteger)
+    cached_tokens: Mapped[int] = mapped_column(BigInteger)
     usage_estimated: Mapped[bool] = mapped_column(Boolean)  # no provider usage: estimated
-    estimated_tokens: Mapped[int | None] = mapped_column(Integer)  # pre-call estimate
+    estimated_tokens: Mapped[int | None] = mapped_column(BigInteger)  # pre-call estimate
     cost_usd: Mapped[float | None] = mapped_column(Float)  # None = unpriced model
     latency_ms: Mapped[int] = mapped_column(Integer)
     ttft_ms: Mapped[int | None] = mapped_column(Integer)  # streams only

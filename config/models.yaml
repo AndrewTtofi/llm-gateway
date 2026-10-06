@@ -140,6 +140,20 @@ providers:
 
 # Aliases are what clients send as `model`. Each is an ordered fallback chain.
 aliases:
+  # Chosen per request from the catalog (ADR 0017): the cheapest configured model with
+  # quality ≥ 3 that can do what the request needs. Clients can tighten it with `route`
+  # (e.g. optimize: quality) or the x-gateway-route header.
+  auto:
+    policy: { optimize: cost, min_quality: 3, max_chain: 4 }
+  # A/B test (ADR 0020), e.g. a cheaper model or a prompt change for 10% of callers:
+  # support:
+  #   sticky: user                     # key | user | request
+  #   variants:
+  #     - { name: control, weight: 90, chain: [anthropic/claude-sonnet-5-5, openai/gpt-6.1-sol] }
+  #     - { name: haiku,   weight: 10, chain: [anthropic/claude-haiku-4-5-20251001],
+  #         system_prefix: "Answer in at most three sentences." }
+  #   cache: { mode: exact, ttl_seconds: 3600 }   # response cache (ADR 0018), optional
+  #   judge: { sample_rate: 0.05, judge: smart }  # LLM-as-judge on 5% of answers (ADR 0022)
   # The strongest model from each company, best first. Providers without a key are skipped.
   frontier:
     chain:
@@ -207,3 +221,14 @@ circuit_breaker:
                              # but healthy probe would let a second probe through
   redis_timeout_ms: 100      # Redis is a LAN hop. On errors the breaker fails open and
                              # skips Redis for 5s, so an outage doesn't slow every request
+
+
+# Self-healing and alerts (ADR 0019).
+self_healing:
+  probes: true                 # probe half-open targets in the background, not with user traffic
+  probe_interval_seconds: 10
+  probe_max_tokens: 16         # one tiny request per target per open period, billed to you
+  quarantine_seconds: 600      # auth / model-not-found / quota failures: hold the breaker open longer
+  quarantine_status: [401, 403, 404]
+  alert_webhook_env: ALERT_WEBHOOK_URL   # Slack-compatible webhook URL from this env var; unset = off
+  alert_min_interval_seconds: 60         # one alert per target and state per minute, fleet-wide

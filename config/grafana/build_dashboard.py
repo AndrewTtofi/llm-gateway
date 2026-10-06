@@ -142,6 +142,37 @@ panel("timeseries", "Spend per team over time", 12, 8, 12, 44, [sql(
     "FROM usage_log u WHERE $__timeFilter(u.created_at) GROUP BY 1, 2 ORDER BY 1", "time_series")],
     ds=PG, unit="currencyUSD")
 
+# --- row 7: A/B tests (ADR 0020) ---
+panel("timeseries", "A/B: requests / s by variant", 8, 8, 0, 52, [prom(
+    f"sum by (alias, variant) (rate(gateway_variant_requests_total{RATE}))", "{{alias}} · {{variant}}")],
+    unit="reqps", desc="Variant names come from config (bounded labels).")
+panel("timeseries", "A/B: error rate by variant", 8, 8, 8, 52, [prom(
+    f'sum by (alias, variant) (rate(gateway_variant_requests_total{{status=~"5.*|200:.*"}}{RATE})) '
+    f"/ sum by (alias, variant) (rate(gateway_variant_requests_total{RATE}))", "{{alias}} · {{variant}}")],
+    unit="percentunit")
+panel("timeseries", "A/B: p95 latency by variant", 8, 8, 16, 52, [prom(
+    f"histogram_quantile(0.95, sum by (le, alias, variant) (rate(gateway_variant_duration_seconds_bucket{RATE})))",
+    "{{alias}} · {{variant}}")], unit="s")
+panel("table", "A/B: cost per request by variant — this month", 24, 6, 0, 60, [sql(
+    "SELECT alias, variant, count(*) AS requests, "
+    "round(avg(coalesce(cost_usd, 0))::numeric, 6) AS usd_per_request, "
+    "round(avg(latency_ms)) AS avg_ms, "
+    "round(100.0 * avg(CASE WHEN status >= 500 OR error_code IS NOT NULL THEN 1 ELSE 0 END), 2) AS error_pct "
+    "FROM usage_log WHERE variant IS NOT NULL AND created_at >= date_trunc('month', now()) "
+    "GROUP BY 1, 2 ORDER BY 1, 2")], ds=PG, desc="From the usage log: exact cost per arm.")
+
+# --- row 8: quality (LLM-as-judge, ADR 0022) ---
+panel("timeseries", "Judge: average score by alias / variant", 12, 8, 0, 66, [prom(
+    f"sum by (alias, variant) (rate(gateway_judge_score_sum{RATE})) / "
+    f"sum by (alias, variant) (rate(gateway_judge_score_count{RATE}))", "{{alias}} {{variant}}")],
+    desc="1 bad … 5 excellent. Only sampled answers (judge.sample_rate).")
+panel("table", "Judge: labels this month", 12, 8, 12, 66, [sql(
+    "SELECT alias, coalesce(variant, '') AS variant, label, count(*) AS answers, "
+    "round(avg(score)::numeric, 2) AS avg_score "
+    "FROM judge_scores, json_array_elements_text(labels) AS label "
+    "WHERE created_at >= date_trunc('month', now()) GROUP BY 1, 2, 3 ORDER BY 1, 2, answers DESC")],
+    ds=PG, desc="Scores and fixed labels only; no content is stored.")
+
 dashboard = {
     "uid": "llm-gateway",
     "title": "LLM Gateway",

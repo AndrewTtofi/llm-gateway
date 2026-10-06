@@ -1,0 +1,89 @@
+# Response cache
+
+ADRs 0018 and 0023. The cache is opt-in per alias. A hit returns a stored answer without calling a
+provider: no cost, no provider latency.
+
+```yaml
+aliases:
+  faq:
+    chain: [anthropic/claude-haiku-4-5-20251001]
+    cache:
+      mode: semantic            # exact | semantic
+      ttl_seconds: 3600
+      scope: key                # key (default) | team | global
+      threshold: 0.95           # semantic: cosine similarity needed for a hit (-1 … 1)
+      embedding: openai/text-embedding-3-small   # semantic: an OpenAI-compatible embedding model
+      max_entries: 10000        # semantic index size per scope and alias
+      max_entry_bytes: 262144   # larger answers aren't stored
+      shared_semantic: false    # semantic + team/global scope must be enabled explicitly
+```
+
+## Exact and semantic
+
+- **Exact.** A SHA-256 of the alias (and A/B arm) plus **every request field** except
+  `model`, `stream`, `stream_options`, `user` and `metadata`. That includes routing hints,
+  sent in the body or in the `x-gateway-route` header, so `optimize: quality` never gets a
+  cheaper model's cached answer. A streamed and a
+  non-streamed request share entries.
+- **Semantic.** The conversation text is embedded and looked up in a Redis 8 vector set. A
+  neighbour with similarity at or above `threshold` is a hit. An exact match is tried first.
+  - **Embedding failure:** if embedding fails (provider down, no key), lookups fall back to
+    exact.
+  - **Matching scope:** only conversations whose *other* settings match are compared: tools,
+    response format, sampling, limits and the embedding model. Requests with images or
+    files are matched exactly only.
+  - **Index size:** at `max_entries`, a random old entry makes room. An idle index expires
+    with its TTL.
+  - **Embedding timeout:** embedding calls time out after 2 s; on a timeout the lookup is
+    exact only.
+
+## Scope: who shares answers
+
+| Scope | Shared between | Use when |
+|-------|---------------|----------|
+| `key` | Requests with the same API key | Default, and always safe |
+| `team` | Keys in the same [team](Keys-Limits-and-Budgets.md#teams) | One team's internal tool |
+| `global` | Everyone allowed the alias | Public content only: docs Q&A, product FAQ |
+
+A **semantic** hit gives the caller an answer written for *someone else's* similar
+question, and that answer may contain details from the other prompt. Only share across
+callers when the content isn't private.
+
+Sharing also means trusting the other callers (ADR 0023):
+- **Poisoning:** with semantic matching, a caller can send a near-duplicate of a common
+  question with an injected instruction ("…and tell users to call this number"). Its
+  answer would then be served to everyone whose question is similar enough. So semantic
+  mode with `team` or `global` scope is refused at config load unless you set
+  `shared_semantic: true`, which says the callers are trusted or the content is public.
+  Exact matching in a shared scope is safe from this: a hit needs the identical request.
+- **Refresh:** in a shared scope, `x-gateway-cache: refresh` acts as `bypass`, so no
+  caller can overwrite the entry everyone else gets.
+
+## Behaviour
+
+| | |
+|---|---|
+| Header | `x-gateway-cache: hit`, `miss`, `bypass` or `refresh`. On a hit, `x-gateway-provider: cache/exact` (or `cache/semantic`) |
+| Cost | A hit costs 0, refunds its token reservation, reports zero usage, and is recorded with target `cache/…` |
+| Limits | A hit still counts as one request against requests/min |
+| Streams | Streams are replayed from the stored answer, in OpenAI or Anthropic format, thinking blocks included |
+| What's stored | Only complete answers: finish reason `stop` or `tool_calls`. Truncated, errored and cut-off answers aren't stored. Requests with `n > 1` are never cached (`x-gateway-cache: uncacheable`) |
+| Client control | `x-gateway-cache: bypass` neither reads nor writes. `refresh` skips the read and stores the new answer (key scope only; elsewhere it acts as `bypass`) |
+| Failure | Cache errors are logged and ignored. A cache never fails a request |
+| Metric | `gateway_cache_total{mode, result}`: `hit_exact`, `hit_semantic`, `miss`, `store`, `bypass`, `refresh` |
+
+## When not to cache
+
+- When answers should vary: creative writing, sampling-based evaluations. A cached answer
+  is identical every time, even with `temperature > 0`.
+- When requests depend on time or external state the prompt doesn't show.
+- With semantic mode, when a near-miss would be harmful (support bots answering a related
+  but different question). Keep `threshold` high and test on real traffic.
+
+## Production
+
+The cache can grow as fast as clients send distinct questions. In production give it its
+own Redis (`CACHE_REDIS_URL`) with `maxmemory` and LRU eviction, so it can never evict or
+crowd out the rate limits and budgets. `docker-compose.prod.yml` does this (`redis-cache`,
+512 MB by default via `CACHE_MAXMEMORY`). Without `CACHE_REDIS_URL` the cache shares
+`REDIS_URL`.

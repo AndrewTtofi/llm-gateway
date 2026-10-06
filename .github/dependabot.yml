@@ -1,17 +1,23 @@
 # Updates arrive as PRs; CI must pass before merge. Grouped to keep PR noise low.
+# `cooldown`: a release must be a week old before it's proposed, so a hijacked or broken
+# release usually gets yanked before it reaches us.
 version: 2
 updates:
   - package-ecosystem: pip
     directory: /
     schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
     groups:
       python-minor-patch: { update-types: [minor, patch] }
   - package-ecosystem: docker
     directory: /
     schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
   - package-ecosystem: docker-compose
     directory: /
     schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    cooldown: { default-days: 7 }

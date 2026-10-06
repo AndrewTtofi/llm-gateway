@@ -58,11 +58,18 @@ attempts = Counter(
 )
 rejected = Counter(
     "gateway_rejected_total", "Requests rejected before routing.", ["reason"], registry=registry
-)  # unauthenticated / model_not_allowed / rate_limit / budget
+)  # unauthenticated / model_not_allowed / rate_limit / budget / concurrency …
 breaker = Gauge(
     "gateway_circuit_state",
     "Circuit breaker per target: 0 closed, 1 half-open, 2 open.",
     ["target"],
+    registry=registry,
+)
+fail_open = Counter(
+    "gateway_redis_fail_open_total",
+    "Calls answered without Redis while it was unreachable: rate limits allow, budgets "
+    "read the last known spend, and spend is queued until Redis is back (ADR 0023).",
+    ["what"],
     registry=registry,
 )
 usage_dropped = Counter(
@@ -81,5 +88,60 @@ loop_lag = Histogram(
 auth_stale = Counter(
     "gateway_auth_stale_served_total",
     "Requests authenticated from a stale cached key because the key store was down.",
+    registry=registry,
+)
+cache = Counter(
+    "gateway_cache_total",
+    "Response cache lookups by mode and result: hit_exact, hit_semantic, miss, store, "
+    "bypass, refresh (ADR 0018).",
+    ["mode", "result"],
+    registry=registry,
+)
+probes = Counter(
+    "gateway_probes_total",
+    "Background probes of half-open targets: recovered, failed, skipped, busy (ADR 0019).",
+    ["target", "result"],
+    registry=registry,
+)
+alerts = Counter(
+    "gateway_alerts_total",
+    "Alert webhook posts: sent, failed (ADR 0019).",
+    ["result"],
+    registry=registry,
+)
+variant_requests = Counter(
+    "gateway_variant_requests_total",
+    "Requests per A/B arm and outcome (ADR 0020); variant names come from config.",
+    ["alias", "variant", "status"],
+    registry=registry,
+)
+variant_duration = Histogram(
+    "gateway_variant_duration_seconds",
+    "End-to-end request time per A/B arm.",
+    ["alias", "variant"],
+    buckets=LATENCY_BUCKETS,
+    registry=registry,
+)
+variant_cost = Counter(
+    "gateway_variant_cost_usd_total", "Spend per A/B arm.", ["alias", "variant"], registry=registry
+)
+guardrail = Counter(
+    "gateway_guardrail_detections_total",
+    "Prompt-injection detections by rule (from config) and action (ADR 0021); rule "
+    '"unscanned" counts requests with text over the scan budget (ADR 0023).',
+    ["rule", "action"],
+    registry=registry,
+)
+judge = Counter(
+    "gateway_judge_total",
+    "LLM-as-judge samples by result: scored, dropped, error, unparsable (ADR 0022).",
+    ["alias", "result"],
+    registry=registry,
+)
+judge_score = Histogram(
+    "gateway_judge_score",
+    "Judge scores (1 bad … 5 excellent) per alias and A/B variant.",
+    ["alias", "variant"],
+    buckets=(1.5, 2.5, 3.5, 4.5, 5.5),
     registry=registry,
 )

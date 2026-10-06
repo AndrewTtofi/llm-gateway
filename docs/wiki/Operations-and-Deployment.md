@@ -1,5 +1,9 @@
 # Operations and deployment
 
+For a ready-made single-host setup (TLS, two replicas, migrations, retention and
+monitoring), see [Production deployment](Production-Deployment.md). This page covers what any
+deployment needs.
+
 ## Shape of a deployment
 
 ```
@@ -113,4 +117,8 @@ Compose. Things to check:
 | Many 429 `rate_limit_exceeded` for one app | That key's limits; `max_tokens` estimates; raise `tokens_per_minute` |
 | `gateway_usage_log_dropped_total` rising | Postgres is slow or down; the dashboard spend panels will undercount |
 | `gateway_event_loop_lag_seconds` high | CPU saturation or a blocking call; add replicas |
+| A target stays open for 10 minutes | Quarantined: bad key, unknown model or no credit. Check the alert or the `/admin/providers` reason, fix it, then restart or wait for the probe |
+| `gateway_guardrail_detections_total` jumps | An attack, or a rule that's too broad. Check which rule, then tune `guardrails.yaml` |
+| `gateway_judge_total{result="dropped"}` rising | The judge can't keep up. Lower `sample_rate` or use a faster judge alias |
+| `usage_log` growing too large | Check the retention job (`prune-usage`) and `USAGE_RETENTION_DAYS` |
 | Spend shows `null` cost | A target is missing from `pricing.yaml` |

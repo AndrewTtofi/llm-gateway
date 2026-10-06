@@ -59,6 +59,7 @@ providers:
 | `drop` | Never sent |
 | `rename` | Sent under another name; if the client sent both, the new name wins |
 | `values` | Sent only with one of these values; otherwise removed, so the provider uses its default |
+| `pass` | Let through fields that are held back by default (below) |
 | `tools: false` / `vision: false` | A request with tools or images skips this target and the chain continues. `/v1/catalog` doesn't list the capability |
 
 Model rules overlay provider rules. They apply in the order rename → drop → allow →
@@ -68,6 +69,20 @@ values, so `drop`, `allow` and `values` use the names fields are *sent* under.
 
 Dropped parameters change behaviour silently: xAI's reasoning models don't honour `stop`,
 for example. That's the trade for a chain that keeps working.
+
+**Held back by default (ADR 0023).** Some fields are never forwarded unless the provider lists
+them under `params.pass`:
+
+| Field | Held back because |
+|-------|-------------------|
+| `service_tier` | Priority tiers cost about twice the standard price, which the gateway's pricing doesn't know |
+| `web_search_options`, `search_parameters` | Per-call search fees (OpenAI, xAI) on top of tokens |
+| `audio`, `modalities` | Audio output is priced per audio token |
+| `prediction` | Predicted outputs bill rejected prediction tokens as output |
+| `store`, `background`, `metadata` | They keep tenants' prompts and answers stored in the operator's provider account |
+
+`user` is always sent as a SHA-256 pseudonym, never as given (it's often an email address).
+The Responses API's `safety_identifier` gets the same pseudonym.
 
 `make test-live` runs a chat, a stream and a tool call against each provider whose key is
 set. Run it after adding a key, or when a provider ships a new model.
@@ -94,6 +109,34 @@ providers:
     timeouts: { connect: 2, first_token: 60, stream_idle: 120, stream_total: 900, total: 300, pool: 5 }
     limits: { max_connections: 50, max_keepalive: 10 }
 ```
+
+### OpenAI's Responses API
+
+GPT-6 Astra and GPT-6.1 Sol can only call tools through OpenAI's newer **Responses API**
+(`/v1/responses`), not chat completions. A model with `api: responses` is translated
+(ADR 0014):
+
+| Chat completions | Responses API |
+|------------------|---------------|
+| messages | `input` items; images become `input_image` |
+| assistant `tool_calls` | `function_call` items |
+| `tool` messages | `function_call_output` items |
+| `tools` | flat `{type: function, name, parameters, strict}` |
+| `max_tokens` / `max_completion_tokens` | `max_output_tokens` |
+| `reasoning_effort` | `reasoning.effort` (plus `reasoning.mode` from the model's `reasoning_mode`, e.g. `pro`) |
+| `response_format` | `text.format` |
+| `user` | `safety_identifier` |
+
+- **Not stored:** `store: false` is always sent, so OpenAI doesn't keep the conversation.
+- **Responses and streams:** output items become message text, refusal and tool calls.
+  Streamed events (`response.output_text.delta`, `response.function_call_arguments.delta`,
+  `response.completed`, …) become chunks. A stream that ends without a terminal event is an
+  in-band error.
+- **Usage:** includes cache reads, cache writes and reasoning tokens.
+- **Limits:**
+  - `stop`, `seed` and `logprobs` have no equivalent and are dropped.
+  - Reasoning isn't carried between turns yet (ADR 0014), so expect somewhat more reasoning
+    tokens in agent loops.
 
 ## Anthropic (Claude), outbound
 
@@ -180,7 +223,10 @@ metering all apply.
   - The system prompt (a string or text blocks) becomes a system message.
   - System messages inside `messages` stay system messages (Claude Code sends these).
   - Text and images.
-  - `thinking` blocks in the history are dropped.
+  - **Prompt caching:** `cache_control` on the system prompt, content blocks, tools, tool
+    calls and tool results is kept (ADR 0013).
+  - **Extended thinking:** the `thinking` parameter and signed `thinking` /
+    `redacted_thinking` blocks in the history are kept (ADR 0013).
 - **Tool calls:**
   - `tool_use` becomes `tool_calls`.
   - `tool_result` becomes `tool` messages, placed straight after the calls. Images inside a
@@ -195,12 +241,16 @@ metering all apply.
 
 ### Responses, streams and errors
 
-- **Responses:** text, `tool_use` (arguments parsed into `input`), refusals, stop reasons and
-  usage (cache reads split back out of `prompt_tokens`).
+- **Responses:**
+  - text, `tool_use` (arguments parsed into `input`), refusals and stop reasons;
+  - **thinking blocks** with their signatures;
+  - usage, including cache reads and cache writes.
 - **Streams:**
   - `MessagesStream` turns flat OpenAI deltas into numbered content blocks.
   - Tool-call blocks stay open until all calls finish. Agents run the tool on
     `content_block_stop`, and some providers interleave the arguments of parallel calls.
+  - Thinking streams as `thinking_delta` and `signature_delta`, so the SDK reassembles signed
+    blocks.
   - `message_start` carries an input-token estimate; `message_delta` carries the real usage.
   - A mid-stream failure is `event: error` with no `message_stop`.
 - **Errors:** errors use Anthropic's shape, `{"type":"error","error":{"type","message"}}`,
@@ -216,13 +266,23 @@ metering all apply.
   | 503 / 529 | `overloaded_error` |
   | 504 | `timeout_error` |
 
-### Not supported yet
+### How caching and thinking travel
+
+The internal format is OpenAI's, so Anthropic-only features travel as **extension fields**
+(`app/extensions.py`): `cache_control`, `thinking`, `thinking_blocks`, a `thinking` stream
+delta, and cache-write counts in usage.
+
+- **Anthropic adapter:** reads them.
+- **Other providers:** the fields are stripped. A system prompt split into parts for a
+  cache breakpoint becomes a plain string again.
+- **OpenAI-format clients:** they never receive these fields, and their own `thinking`
+  requests are ignored. They couldn't send the signed blocks back, which Anthropic requires
+  on the next tool-use turn.
+
+### Not supported
 
 - **Rejected with a 400:** document blocks, and server tools such as web search or code
   execution. Those run inside Anthropic's API and can't be routed elsewhere.
-- **Dropped:** `cache_control`, so there is **no prompt caching** through `/v1/messages` yet.
-  Long agent sessions pay full input price on Claude.
-- **Dropped:** extended thinking.
 - **Dropped:** `top_k`.
 - **Stop sequences:** which sequence matched is not reported (`stop_sequence` is always null).
 
@@ -238,6 +298,8 @@ claude
 
 Claude Code requests a large `max_tokens` (often 32 000) every time. The rate limiter
 reserves prompt plus `max_tokens` up front, so give the key a generous `tokens_per_minute`.
+Prompt caching works through the gateway, so long sessions pay the cache-read price for
+the repeated part of the prompt. Cache writes are billed at their own price (ADR 0015).
 Why subscriptions can't be used here is covered in [Subscriptions and provider terms](Subscriptions-and-Terms.md).
 
 ## Adding a new provider type

@@ -8,3 +8,6 @@ __pycache__/
 .claude/settings.local.json
 tests/load/results/
 .env.prod
+
+# Agent worktrees (Claude Code)
+.claude/worktrees/

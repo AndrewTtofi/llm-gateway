@@ -1,6 +1,7 @@
 # Routing and reliability
 
-ADRs: 0002 (streaming errors), 0004 (retries, fallback, breakers), 0005 (mid-stream failures).
+ADRs: 0002 (streaming errors), 0004 (retries, fallback, breakers), 0005 (mid-stream failures),
+0023 (what doesn't count against a breaker).
 
 ## Resolving a model
 
@@ -19,8 +20,22 @@ Every failure is classified first (`app/routing/router.py::classify`):
 | Client fault: 400/413/422, untranslatable request | no | no; returned to the client | no |
 | Gateway fault: 401/403/404 upstream, quota exhausted, missing provider key | no | yes | yes |
 | Provider type not supported or not configured | n/a | yes | no (never called) |
-| Transient: `retry_on_status` (408/409/429/5xx/529), timeouts, connection errors | yes, with backoff | yes, after retries | yes |
+| Transient: `retry_on_status` (408/409/429/5xx/529), connect failures, first-token and idle timeouts | yes, with backoff | yes, after retries | yes |
+| The whole answer ran past `total` (non-streamed) or `stream_total` | no | yes | **no** |
+| No free connection in the pool (`pool` timeout): `skipped:busy` | no | yes | **no** (never sent) |
 | Untranslatable for *this* provider only (e.g. `n>1` on Anthropic) | no | yes | no |
+
+**Why some timeouts don't count (ADR 0023).** The breakers are shared by every tenant on every
+replica, so only failures the *provider* caused may open them:
+- **A full pool** means this replica is busy; the request was never sent. If nothing else in
+  the chain can serve, the client gets a retryable `503 gateway_busy`.
+- **A request past `total`/`stream_total`** took as long as it was asked to. A huge
+  `max_tokens` or a high reasoning effort makes a healthy provider slow. Counting it would
+  let one tenant open the breaker for all. It isn't retried on the same target either: it
+  would take as long again. It is still billed (the provider did the work).
+
+Connect failures, first-token timeouts and stalled streams still count. A sick provider
+shows up there.
 
 Why gateway faults become 5xx for the client: if the gateway's OpenAI key is revoked, the
 client did nothing wrong. Returning 401 would make it "fix" a request that was fine.
@@ -103,7 +118,12 @@ Configured per provider in `models.yaml`. LLM calls need more than one timeout:
 | `stream_idle` | Silence between stream events. Reasoning models can pause for a long time, so Anthropic uses 300 s |
 | `stream_total` | A stream that never ends, such as a provider sending keep-alives forever |
 | `total` | A non-streaming call, where the whole answer arrives at once |
-| `pool` | Waiting for a free connection when the provider's pool is exhausted |
+| `pool` | Waiting for a free connection when the provider's pool is exhausted (never counted against the provider) |
+
+Toward the client, a streaming write that doesn't complete in `CLIENT_WRITE_TIMEOUT_SECONDS`
+(30 s) disconnects it. A client that stops reading can't hold an upstream connection open.
+Keys also have a limit on requests in flight
+([Keys, limits and budgets](Keys-Limits-and-Budgets.md#concurrency-requests-in-flight)).
 
 ## The first-token boundary
 

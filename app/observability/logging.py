@@ -11,22 +11,30 @@ from typing import Any
 import structlog
 
 request_id: ContextVar[str] = ContextVar("request_id", default="-")
+# The caller's own id (x-client-request-id, or x-request-id), kept beside ours (ADR 0023).
+client_request_id: ContextVar[str | None] = ContextVar("client_request_id", default=None)
 request_started: ContextVar[float] = ContextVar("request_started", default=0.0)
 _VALID_ID = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 _HANDLER = "gateway-json"
 
 
-def new_request_id(incoming: str | None) -> str:
-    """Reuse a caller's x-request-id if it's sane (for tracing across services)."""
-    if incoming and _VALID_ID.fullmatch(incoming):
-        return incoming
+def new_request_id() -> str:
+    """The gateway's own id for a request: always unique, so usage rows, judge scores and
+    logs can't be confused by a caller reusing someone else's id."""
     return uuid.uuid4().hex
+
+
+def caller_request_id(incoming: str | None) -> str | None:
+    """A caller's id, if it's sane: kept for tracing across services, never as ours."""
+    return incoming if incoming and _VALID_ID.fullmatch(incoming) else None
 
 
 def _add_request_id(_: Any, __: str, event: dict[str, Any]) -> dict[str, Any]:
     rid = request_id.get()
     if rid != "-":
         event.setdefault("request_id", rid)
+    if cid := client_request_id.get():
+        event.setdefault("client_request_id", cid)
     return event
 
 
