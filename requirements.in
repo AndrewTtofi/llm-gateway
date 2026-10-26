@@ -1,17 +1,17 @@
 # Direct runtime deps. Floors = oldest version we've tested against.
 # Exact pins live in requirements.txt — regenerate with `make lock`.
-fastapi>=0.142
+fastapi>=0.148.0
 uvicorn[standard]>=0.54
-pydantic>=2.13
-pydantic-settings>=2.15
+pydantic>=2.14.1
+pydantic-settings>=2.16.0
 httpx>=0.28
 pyyaml>=6.0
 redis>=8.1
-sqlalchemy[asyncio]>=2.1
-asyncpg>=0.31
+sqlalchemy[asyncio]>=2.1.5
+asyncpg>=0.32.0
 alembic>=1.20
-anthropic>=1.11
-httpx2>=2.13  # imported directly (the Anthropic SDK's transport), so pinned directly
+anthropic>=1.15.0
+httpx2>=2.14.0  # imported directly (the Anthropic SDK's transport), so pinned directly
 anyio>=4.15
 prometheus-client>=0.26
 structlog>=26.1

@@ -5,10 +5,10 @@
 pytest>=9.1
 pytest-asyncio>=1.4
 respx>=0.23
-ruff>=0.16
+ruff>=0.17.1
 mypy>=2.4
 types-PyYAML
-openai>=3.24
-pip-tools>=7.6
+openai>=3.35.1
+pip-tools>=7.6.2
 pip-audit>=2.10  # CI: known vulnerabilities in the locked dependencies
-hypothesis>=6.168  # property-based fuzzing of the format translators
+hypothesis>=6.170.2  # property-based fuzzing of the format translators
