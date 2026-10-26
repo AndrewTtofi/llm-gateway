@@ -60,7 +60,7 @@ services:
       postgres: { condition: service_healthy }
 
   renderer:   # Grafana's image renderer — only for docs screenshots
-    image: grafana/grafana-image-renderer:v5.12.5
+    image: grafana/grafana-image-renderer:v5.12.7
     profiles: ["screenshots"]
     environment:
       AUTH_TOKEN: ${GRAFANA_RENDERER_TOKEN:-dev-only-renderer-token}
