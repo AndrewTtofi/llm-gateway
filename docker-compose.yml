@@ -32,7 +32,7 @@ services:
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U gateway"], interval: 5s, retries: 10 }
 
   prometheus:
-    image: prom/prometheus:v3.15.0
+    image: prom/prometheus:v3.15.1
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./config/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
